@@ -159,12 +159,17 @@ export default function LiveTradingClient() {
   const [formPrivateKey, setFormPrivateKey] = useState("");
   const [credsSaved, setCredsSaved] = useState(false);
 
-  // Load credentials from localStorage on mount
+  // Load credentials from localStorage on mount; only fetch data if creds exist
   useEffect(() => {
     const creds = loadStoredCreds();
     setSavedCreds(creds);
-    if (!creds) setShowCredsForm(true); // show form immediately if no creds
-  }, []);
+    if (!creds) {
+      setShowCredsForm(true);
+      setLoading(false);
+    } else {
+      loadData(creds);
+    }
+  }, [loadData]);
 
   const saveCreds = () => {
     if (!formKeyId.trim() || !formPrivateKey.trim()) return;
@@ -220,10 +225,6 @@ export default function LiveTradingClient() {
       setLoading(false);
     }
   }, []);
-
-  useEffect(() => {
-    loadData(undefined);
-  }, [loadData]);
 
   const eligibleTrades = proposals.filter(
     (p) => p.target && !p.alreadyTraded
@@ -284,7 +285,7 @@ export default function LiveTradingClient() {
     );
   }
 
-  if (loadError) {
+  if (loadError && !loadError.toLowerCase().includes("not configured")) {
     return (
       <div
         className="min-h-screen flex flex-col items-center justify-center gap-3"
@@ -292,12 +293,6 @@ export default function LiveTradingClient() {
       >
         <AlertTriangle className="w-8 h-8 text-red-400" />
         <p className="text-red-400 font-medium">{loadError}</p>
-        {loadError.includes("not configured") && (
-          <p className="text-gray-500 text-sm max-w-sm text-center">
-            Enter your Kalshi API credentials using the form on the Live Trading page.
-            Generate a key pair at kalshi.com → Profile → API Keys.
-          </p>
-        )}
         <button
           onClick={() => loadData(undefined)}
           className="mt-2 px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors"
@@ -455,6 +450,15 @@ export default function LiveTradingClient() {
             </div>
           )}
         </div>
+
+        {/* ── Inline error (e.g. bad creds after saving) ──────────────────── */}
+        {loadError && (
+          <div className="flex items-center gap-2 rounded-xl px-4 py-3 text-sm text-red-400"
+            style={{ background: "#1a0e0e", border: "1px solid #3d1515" }}>
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            {loadError}
+          </div>
+        )}
 
         {/* ── Summary Cards ───────────────────────────────────────────────── */}
         <div className="grid grid-cols-3 gap-4">
