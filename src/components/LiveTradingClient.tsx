@@ -159,17 +159,15 @@ export default function LiveTradingClient() {
   const [formPrivateKey, setFormPrivateKey] = useState("");
   const [credsSaved, setCredsSaved] = useState(false);
 
-  // Load credentials from localStorage on mount; only fetch data if creds exist
+  // Load credentials from localStorage on mount
   useEffect(() => {
     const creds = loadStoredCreds();
     setSavedCreds(creds);
     if (!creds) {
       setShowCredsForm(true);
       setLoading(false);
-    } else {
-      loadData(creds);
     }
-  }, [loadData]);
+  }, []);
 
   const saveCreds = () => {
     if (!formKeyId.trim() || !formPrivateKey.trim()) return;
@@ -225,6 +223,11 @@ export default function LiveTradingClient() {
       setLoading(false);
     }
   }, []);
+
+  useEffect(() => {
+    const creds = loadStoredCreds();
+    if (creds) loadData(creds);
+  }, [loadData]);
 
   const eligibleTrades = proposals.filter(
     (p) => p.target && !p.alreadyTraded
