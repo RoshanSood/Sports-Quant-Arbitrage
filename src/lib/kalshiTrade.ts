@@ -310,8 +310,8 @@ export async function placeKalshiOrder(target: TradeTarget, creds?: KalshiCreds)
   // "bid" = buy YES; "ask" = sell YES (equivalent to buying NO).
   // For NO side: we sell YES at (100 - noAskCents)/100 dollars, which costs noAskCents/100 net.
   const price = isYes
-    ? (target.askCents / 100).toFixed(6)
-    : ((100 - target.askCents) / 100).toFixed(6);
+    ? (target.askCents / 100).toFixed(2)
+    : ((100 - target.askCents) / 100).toFixed(2);
 
   const body: Record<string, unknown> = {
     ticker: target.ticker,
