@@ -634,7 +634,7 @@ export default function LiveTradingClient() {
           onClick={() => setConfirmOpen(false)}
         >
           <div
-            className="rounded-2xl p-6 max-w-md w-full space-y-4"
+            className="rounded-2xl p-6 max-w-md w-full space-y-4 max-h-[90vh] overflow-y-auto"
             style={{ background: "#13161e", border: "1px solid #2e3347" }}
             onClick={(e) => e.stopPropagation()}
           >
@@ -648,7 +648,7 @@ export default function LiveTradingClient() {
               </div>
             </div>
 
-            <div className="space-y-2">
+            <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
               {eligibleTrades.map((p) => (
                 <div
                   key={p.rec.id}
