@@ -14,6 +14,7 @@ type KM = {
   yes_ask?: number;
   yes_bid_dollars?: string | number;
   yes_ask_dollars?: string | number;
+  close_time?: string;  // ISO — markets close at first pitch, used to match the right game day
 };
 
 type KE = {
@@ -188,10 +189,23 @@ export async function resolveTradeTarget(
   const gameEvents = events.filter((ev) => eventMatchesTeams(away, home, ev));
   if (!gameEvents.length) return null;
 
-  const allMarkets = gameEvents
+  let allMarkets = gameEvents
     .flatMap((ev) => ev.markets ?? [])
     .filter(isUsable);
   if (!allMarkets.length) return null;
+
+  // Narrow to the specific game day so that back-to-back series don't cross-match.
+  // Markets close at first pitch, so close_time ≈ game start time.
+  // Games on consecutive days are ≥20 h apart; a ±6 h window safely picks the right one.
+  if (rec.startTime) {
+    const gameStart = new Date(rec.startTime).getTime();
+    const sameDay = allMarkets.filter((m) => {
+      if (!m.close_time) return true;
+      const diffH = (new Date(m.close_time).getTime() - gameStart) / 3_600_000;
+      return diffH > -6 && diffH < 6;
+    });
+    if (sameDay.length > 0) allMarkets = sameDay;
+  }
 
   // ── Total ────────────────────────────────────────────────────────────────
   if (marketType === "total") {

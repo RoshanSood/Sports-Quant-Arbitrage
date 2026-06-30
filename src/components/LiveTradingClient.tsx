@@ -151,7 +151,7 @@ export default function LiveTradingClient() {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [executeResults, setExecuteResults] = useState<ExecuteResult[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [maxTrades, setMaxTrades] = useState(999);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
   // Credentials state
   const [savedCreds, setSavedCreds] = useState<StoredCreds | null>(null);
@@ -234,8 +234,22 @@ export default function LiveTradingClient() {
     (p) => p.target && !p.alreadyTraded
   );
 
-  const effectiveMax = Math.min(maxTrades, eligibleTrades.length);
-  const selectedTrades = eligibleTrades.slice(0, effectiveMax);
+  // Auto-select all eligible trades when proposals first load
+  useEffect(() => {
+    setSelectedIds(new Set(eligibleTrades.map((p) => p.rec.id)));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [proposals]);
+
+  const toggleTrade = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const selectedTrades = eligibleTrades.filter((p) => selectedIds.has(p.rec.id));
 
   const totalCost = selectedTrades.reduce(
     (s, p) => s + (p.target?.estimatedCost ?? 0),
@@ -348,40 +362,15 @@ export default function LiveTradingClient() {
             >
               <RefreshCw className="w-4 h-4" />
             </button>
-            {eligibleTrades.length > 0 && (
-              <div className="flex items-center gap-2">
-                <div
-                  className="flex items-center rounded-lg overflow-hidden text-sm"
-                  style={{ border: "1px solid #2e3347", background: "#13161e" }}
-                >
-                  <button
-                    onClick={() => setMaxTrades((m) => Math.max(1, m - 1))}
-                    className="px-2.5 py-1.5 text-gray-400 hover:text-white hover:bg-gray-800 transition-colors font-bold"
-                  >
-                    −
-                  </button>
-                  <span className="px-2 text-white font-semibold min-w-[2rem] text-center">
-                    {effectiveMax}
-                  </span>
-                  <button
-                    onClick={() => setMaxTrades((m) => Math.min(eligibleTrades.length, m + 1))}
-                    className="px-2.5 py-1.5 text-gray-400 hover:text-white hover:bg-gray-800 transition-colors font-bold"
-                  >
-                    +
-                  </button>
-                </div>
-                <button
-                  onClick={() => setConfirmOpen(true)}
-                  disabled={executing}
-                  className="flex items-center gap-2 px-4 py-2 bg-yellow-500 hover:bg-yellow-400 text-black font-bold rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  <Zap className="w-4 h-4" />
-                  Execute Top {effectiveMax} Trade{effectiveMax !== 1 ? "s" : ""}
-                  {eligibleTrades.length > effectiveMax && (
-                    <span className="font-normal opacity-70">of {eligibleTrades.length}</span>
-                  )}
-                </button>
-              </div>
+            {selectedTrades.length > 0 && (
+              <button
+                onClick={() => setConfirmOpen(true)}
+                disabled={executing}
+                className="flex items-center gap-2 px-4 py-2 bg-yellow-500 hover:bg-yellow-400 text-black font-bold rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <Zap className="w-4 h-4" />
+                Execute {selectedTrades.length} Trade{selectedTrades.length !== 1 ? "s" : ""}
+              </button>
             )}
           </div>
         </div>
@@ -561,18 +550,15 @@ export default function LiveTradingClient() {
             </div>
           ) : (
             <div className="space-y-3">
-              {proposals.map((p, idx) => {
-                const eligibleIdx = eligibleTrades.indexOf(p);
-                const isSelected = eligibleIdx !== -1 && eligibleIdx < effectiveMax;
-                return (
-                  <ProposalCard
-                    key={p.rec.id}
-                    proposal={p}
-                    rank={idx + 1}
-                    selected={isSelected}
-                  />
-                );
-              })}
+              {proposals.map((p, idx) => (
+                <ProposalCard
+                  key={p.rec.id}
+                  proposal={p}
+                  rank={idx + 1}
+                  selected={selectedIds.has(p.rec.id)}
+                  onToggle={p.target && !p.alreadyTraded ? () => toggleTrade(p.rec.id) : undefined}
+                />
+              ))}
             </div>
           )}
         </section>
@@ -754,7 +740,17 @@ export default function LiveTradingClient() {
 
 // ── Proposal Card ─────────────────────────────────────────────────────────────
 
-function ProposalCard({ proposal, rank, selected }: { proposal: Proposal; rank: number; selected: boolean }) {
+function ProposalCard({
+  proposal,
+  rank,
+  selected,
+  onToggle,
+}: {
+  proposal: Proposal;
+  rank: number;
+  selected: boolean;
+  onToggle?: () => void;
+}) {
   const { rec, target, alreadyTraded, error } = proposal;
 
   const hasTarget = !!target && !alreadyTraded;
@@ -772,18 +768,34 @@ function ProposalCard({ proposal, rank, selected }: { proposal: Proposal; rank: 
       }`}
       style={{
         background: "#13161e",
-        border: `1px solid ${selected && !alreadyTraded ? "#2e3347" : "#1e2130"}`,
+        border: `1px solid ${selected && !alreadyTraded ? "#eab308" : "#1e2130"}`,
       }}
     >
       <div className="flex items-start justify-between gap-4">
         {/* Left: game + pick info */}
         <div className="flex items-start gap-3 min-w-0">
-          <div
-            className="shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold"
-            style={{ background: "#1e2130", color: "#94a3b8" }}
-          >
-            {rank}
-          </div>
+          {/* Toggle checkbox — only shown for tradeable plays */}
+          {hasTarget ? (
+            <button
+              onClick={onToggle}
+              className={`shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold transition-colors ${
+                selected
+                  ? "bg-yellow-500 text-black"
+                  : "text-gray-500 hover:text-gray-300"
+              }`}
+              style={selected ? {} : { background: "#1e2130" }}
+              title={selected ? "Deselect" : "Select"}
+            >
+              {selected ? <CheckCircle2 className="w-4 h-4" /> : rank}
+            </button>
+          ) : (
+            <div
+              className="shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold"
+              style={{ background: "#1e2130", color: "#94a3b8" }}
+            >
+              {rank}
+            </div>
+          )}
           <div className="min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
               <span className="text-white font-bold text-base">
