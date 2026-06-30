@@ -151,6 +151,7 @@ export default function LiveTradingClient() {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [executeResults, setExecuteResults] = useState<ExecuteResult[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [maxTrades, setMaxTrades] = useState(999);
 
   // Credentials state
   const [savedCreds, setSavedCreds] = useState<StoredCreds | null>(null);
@@ -233,18 +234,21 @@ export default function LiveTradingClient() {
     (p) => p.target && !p.alreadyTraded
   );
 
-  const totalCost = eligibleTrades.reduce(
+  const effectiveMax = Math.min(maxTrades, eligibleTrades.length);
+  const selectedTrades = eligibleTrades.slice(0, effectiveMax);
+
+  const totalCost = selectedTrades.reduce(
     (s, p) => s + (p.target?.estimatedCost ?? 0),
     0
   );
 
   const executeAll = async () => {
-    if (!eligibleTrades.length) return;
+    if (!selectedTrades.length) return;
     setExecuting(true);
     setConfirmOpen(false);
     setExecuteResults([]);
     try {
-      const tradePayload = eligibleTrades.map((p) => ({
+      const tradePayload = selectedTrades.map((p) => ({
         recId: p.rec.id,
         game: `${p.rec.awayTeam.abbreviation} @ ${p.rec.homeTeam.abbreviation}`,
         pick: p.rec.recommendedPick,
@@ -345,14 +349,39 @@ export default function LiveTradingClient() {
               <RefreshCw className="w-4 h-4" />
             </button>
             {eligibleTrades.length > 0 && (
-              <button
-                onClick={() => setConfirmOpen(true)}
-                disabled={executing}
-                className="flex items-center gap-2 px-4 py-2 bg-yellow-500 hover:bg-yellow-400 text-black font-bold rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <Zap className="w-4 h-4" />
-                Execute {eligibleTrades.length} Trade{eligibleTrades.length !== 1 ? "s" : ""}
-              </button>
+              <div className="flex items-center gap-2">
+                <div
+                  className="flex items-center rounded-lg overflow-hidden text-sm"
+                  style={{ border: "1px solid #2e3347", background: "#13161e" }}
+                >
+                  <button
+                    onClick={() => setMaxTrades((m) => Math.max(1, m - 1))}
+                    className="px-2.5 py-1.5 text-gray-400 hover:text-white hover:bg-gray-800 transition-colors font-bold"
+                  >
+                    −
+                  </button>
+                  <span className="px-2 text-white font-semibold min-w-[2rem] text-center">
+                    {effectiveMax}
+                  </span>
+                  <button
+                    onClick={() => setMaxTrades((m) => Math.min(eligibleTrades.length, m + 1))}
+                    className="px-2.5 py-1.5 text-gray-400 hover:text-white hover:bg-gray-800 transition-colors font-bold"
+                  >
+                    +
+                  </button>
+                </div>
+                <button
+                  onClick={() => setConfirmOpen(true)}
+                  disabled={executing}
+                  className="flex items-center gap-2 px-4 py-2 bg-yellow-500 hover:bg-yellow-400 text-black font-bold rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <Zap className="w-4 h-4" />
+                  Execute Top {effectiveMax} Trade{effectiveMax !== 1 ? "s" : ""}
+                  {eligibleTrades.length > effectiveMax && (
+                    <span className="font-normal opacity-70">of {eligibleTrades.length}</span>
+                  )}
+                </button>
+              </div>
             )}
           </div>
         </div>
@@ -532,13 +561,18 @@ export default function LiveTradingClient() {
             </div>
           ) : (
             <div className="space-y-3">
-              {proposals.map((p, idx) => (
-                <ProposalCard
-                  key={p.rec.id}
-                  proposal={p}
-                  rank={idx + 1}
-                />
-              ))}
+              {proposals.map((p, idx) => {
+                const eligibleIdx = eligibleTrades.indexOf(p);
+                const isSelected = eligibleIdx !== -1 && eligibleIdx < effectiveMax;
+                return (
+                  <ProposalCard
+                    key={p.rec.id}
+                    proposal={p}
+                    rank={idx + 1}
+                    selected={isSelected}
+                  />
+                );
+              })}
             </div>
           )}
         </section>
@@ -649,7 +683,7 @@ export default function LiveTradingClient() {
             </div>
 
             <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
-              {eligibleTrades.map((p) => (
+              {selectedTrades.map((p) => (
                 <div
                   key={p.rec.id}
                   className="flex items-center justify-between rounded-lg px-3 py-2"
@@ -720,7 +754,7 @@ export default function LiveTradingClient() {
 
 // ── Proposal Card ─────────────────────────────────────────────────────────────
 
-function ProposalCard({ proposal, rank }: { proposal: Proposal; rank: number }) {
+function ProposalCard({ proposal, rank, selected }: { proposal: Proposal; rank: number; selected: boolean }) {
   const { rec, target, alreadyTraded, error } = proposal;
 
   const hasTarget = !!target && !alreadyTraded;
@@ -734,11 +768,11 @@ function ProposalCard({ proposal, rank }: { proposal: Proposal; rank: number }) 
   return (
     <div
       className={`rounded-xl p-4 transition-all ${
-        alreadyTraded ? "opacity-50" : hasTarget ? "" : "opacity-60"
+        alreadyTraded ? "opacity-50" : hasTarget && !selected ? "opacity-40" : hasTarget ? "" : "opacity-60"
       }`}
       style={{
         background: "#13161e",
-        border: `1px solid ${hasTarget && !alreadyTraded ? "#2e3347" : "#1e2130"}`,
+        border: `1px solid ${selected && !alreadyTraded ? "#2e3347" : "#1e2130"}`,
       }}
     >
       <div className="flex items-start justify-between gap-4">

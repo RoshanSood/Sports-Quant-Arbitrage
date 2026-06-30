@@ -24,17 +24,13 @@ type KE = {
 };
 
 type KalshiOrderResponse = {
-  order: {
-    id: string;
-    ticker: string;
-    status: string;
-    action: string;
-    side: string;
-    count: number;
-    filled_count?: number;
-    avg_price?: number;
-    type: string;
-  };
+  order_id: string;
+  fill_count: string;
+  remaining_count: string;
+  ts_ms: number;
+  client_order_id?: string;
+  average_fill_price?: string;
+  average_fee_paid?: string;
 };
 
 export type TradeTarget = {
@@ -308,28 +304,36 @@ export async function resolveTradeTarget(
 // ── Public: place a limit buy order on Kalshi ────────────────────────────────
 
 export async function placeKalshiOrder(target: TradeTarget, creds?: KalshiCreds): Promise<PlacedOrder> {
+  const isYes = target.side === "yes";
+
+  // New v2 event-order endpoint uses bid/ask single-book shape with dollar prices.
+  // "bid" = buy YES; "ask" = sell YES (equivalent to buying NO).
+  // For NO side: we sell YES at (100 - noAskCents)/100 dollars, which costs noAskCents/100 net.
+  const price = isYes
+    ? (target.askCents / 100).toFixed(2)
+    : ((100 - target.askCents) / 100).toFixed(2);
+
   const body: Record<string, unknown> = {
     ticker: target.ticker,
-    action: "buy",
-    type: "limit",
-    count: target.contracts,
-    side: target.side,
+    side: isYes ? "bid" : "ask",
+    count: target.contracts.toFixed(2),
+    price,
+    time_in_force: "good_till_canceled",
+    self_trade_prevention_type: "taker_at_cross",
   };
 
-  if (target.side === "yes") {
-    body.yes_price = target.askCents;
-  } else {
-    body.no_price = target.askCents;
-  }
+  const data = await kalshiPost<KalshiOrderResponse>("/portfolio/events/orders", body, creds);
 
-  const data = await kalshiPost<KalshiOrderResponse>("/portfolio/orders", body, creds);
-  const order = data.order;
+  const fillCount = parseFloat(data.fill_count ?? "0");
+  const remainingCount = parseFloat(data.remaining_count ?? "0");
+  const status = fillCount > 0 && remainingCount === 0 ? "executed" : "resting";
+
   return {
-    orderId: order.id,
-    ticker: order.ticker,
-    side: order.side as "yes" | "no",
-    contracts: order.count,
+    orderId: data.order_id,
+    ticker: target.ticker,
+    side: target.side,
+    contracts: target.contracts,
     limitPriceCents: target.askCents,
-    status: order.status,
+    status,
   };
 }
