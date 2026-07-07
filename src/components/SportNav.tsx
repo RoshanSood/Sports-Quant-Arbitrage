@@ -2,16 +2,17 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { TrendingUp, Activity, Trophy, Zap } from "lucide-react";
+import { TrendingUp, Activity, Trophy, Zap, BarChart2 } from "lucide-react";
 import DataSourceToggle from "./DataSourceToggle";
 
 const NAV = [
   { label: "MLB", href: "/" },
   { label: "WNBA", href: "/wnba" },
-  { label: "Value Plays",   href: "/value-plays",    icon: "value" as const },
-  { label: "Line Movement", href: "/line-movement",  icon: "lines" as const },
-  { label: "Performance",   href: "/performance",    icon: "perf"  as const },
-  { label: "Live Trading",  href: "/live-trading",   icon: "trade" as const },
+  { label: "Value Plays",   href: "/value-plays",    icon: "value"   as const },
+  { label: "Line Movement", href: "/line-movement",  icon: "lines"   as const },
+  { label: "Performance",   href: "/performance",    icon: "perf"    as const },
+  { label: "Live Trading",  href: "/live-trading",   icon: "trade"   as const },
+  { label: "Markets",       href: "/markets",        icon: "markets" as const },
 ];
 
 export default function SportNav() {
@@ -44,10 +45,11 @@ export default function SportNav() {
                       : "text-gray-500 hover:text-gray-300 hover:bg-[#1a1d24]"
                   }`}
                 >
-                  {item.icon === "value" && <TrendingUp className="w-3.5 h-3.5" />}
-                  {item.icon === "lines" && <Activity className="w-3.5 h-3.5" />}
-                  {item.icon === "perf"  && <Trophy className="w-3.5 h-3.5" />}
-                  {item.icon === "trade" && <Zap className="w-3.5 h-3.5" />}
+                  {item.icon === "value"   && <TrendingUp className="w-3.5 h-3.5" />}
+                  {item.icon === "lines"   && <Activity className="w-3.5 h-3.5" />}
+                  {item.icon === "perf"    && <Trophy className="w-3.5 h-3.5" />}
+                  {item.icon === "trade"   && <Zap className="w-3.5 h-3.5" />}
+                  {item.icon === "markets" && <BarChart2 className="w-3.5 h-3.5" />}
                   {item.label}
                 </Link>
               );

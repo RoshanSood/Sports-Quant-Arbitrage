@@ -1,28 +1,13 @@
 "use client";
 
-import { useState, useCallback, useRef } from "react";
-import { ChevronDown, TrendingUp, RefreshCw } from "lucide-react";
-import { MLBGame } from "@/types";
-import { WNBAGame } from "@/types/wnba";
-import { GameAnalysis, ValuePlay } from "@/types/analysis";
-import { extractValuePlays } from "@/lib/valuePlayAnalysis";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { ChevronDown, TrendingUp, RefreshCw, Lock, Clock } from "lucide-react";
+import { ValuePlay, ValuePlaysCacheEntry } from "@/types/analysis";
 import ValuePlayCard from "./ValuePlayCard";
 import { useDataSource } from "./DataSourceContext";
 
 type League = "All" | "MLB" | "WNBA";
 type MarketFilter = "All" | "moneyline" | "spread" | "total";
-
-type GameEntry =
-  | { league: "MLB"; game: MLBGame }
-  | { league: "WNBA"; game: WNBAGame };
-
-type AnalysisState =
-  | { status: "idle" }
-  | { status: "loading" }
-  | { status: "done"; analysis: GameAnalysis }
-  | { status: "error"; message: string };
-
-const CONCURRENCY = 3;
 
 function todayDateStr() {
   const d = new Date();
@@ -44,47 +29,12 @@ function shiftDate(dateStr: string, days: number): string {
   return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
 }
 
-// Session-level analysis cache (keyed by source so toggling re-runs)
-const analysisCache = new Map<string, GameAnalysis>();
-
-async function analyzeGame(
-  entry: GameEntry,
-  gameDate: string,
-  source: string
-): Promise<GameAnalysis> {
-  const cacheKey = `${source}-${entry.league}-${entry.game.id}-${gameDate}`;
-  if (analysisCache.has(cacheKey)) return analysisCache.get(cacheKey)!;
-
-  const res = await fetch(`/api/value-play/${entry.game.id}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ league: entry.league, game: entry.game, gameDate, source }),
-  });
-
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
-    throw new Error(err.error ?? `HTTP ${res.status}`);
-  }
-
-  const data = await res.json();
-  if (!data.analysis) throw new Error("No analysis in response");
-  analysisCache.set(cacheKey, data.analysis);
-  return data.analysis;
-}
-
-async function processQueue<T>(
-  items: T[],
-  concurrency: number,
-  fn: (item: T, index: number) => Promise<void>
-) {
-  let i = 0;
-  const workers = Array.from({ length: concurrency }, async () => {
-    while (i < items.length) {
-      const idx = i++;
-      await fn(items[idx], idx);
-    }
-  });
-  await Promise.all(workers);
+function timeAgo(isoStr: string): string {
+  const secs = Math.floor((Date.now() - new Date(isoStr).getTime()) / 1000);
+  if (secs < 60) return "just now";
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
+  if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`;
+  return `${Math.floor(secs / 86400)}d ago`;
 }
 
 export default function ValuePlaysClient() {
@@ -95,109 +45,90 @@ export default function ValuePlaysClient() {
   const [minConfidence, setMinConfidence] = useState(6);
   const [showDatePicker, setShowDatePicker] = useState(false);
 
-  const [running, setRunning] = useState(false);
-  const [progress, setProgress] = useState({ done: 0, total: 0 });
-  const [states, setStates] = useState<Map<string, AnalysisState>>(new Map());
-  const [valuePlays, setValuePlays] = useState<ValuePlay[]>([]);
-  const abortRef = useRef(false);
+  const [entry, setEntry] = useState<ValuePlaysCacheEntry | null>(null);
+  const [serverRunning, setServerRunning] = useState(false);
+  const [loading, setLoading] = useState(true);
 
-  const setGameState = useCallback((id: string, state: AnalysisState) => {
-    setStates((prev) => new Map(prev).set(id, state));
+  // Admin panel
+  const [showAdmin, setShowAdmin] = useState(false);
+  const [password, setPassword] = useState("");
+  const [adminMsg, setAdminMsg] = useState("");
+
+  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const fetchCached = useCallback(async (d: string, src: string) => {
+    const res = await fetch(`/api/value-plays/cached?date=${d}&source=${src}`);
+    const data: { entry: ValuePlaysCacheEntry | null; running: boolean } = await res.json();
+    setEntry(data.entry ?? null);
+    setServerRunning(data.running ?? false);
+    return data;
   }, []);
 
-  const runAnalysis = useCallback(async () => {
-    abortRef.current = false;
-    analysisCache.clear();
-    setRunning(true);
-    setStates(new Map());
-    setValuePlays([]);
-    setProgress({ done: 0, total: 0 });
+  // Load on date or source change
+  useEffect(() => {
+    setLoading(true);
+    setEntry(null);
+    setServerRunning(false);
+    if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
 
-    try {
-      // Fetch games for selected leagues
-      const fetches: Promise<GameEntry[]>[] = [];
+    fetchCached(date, source).finally(() => setLoading(false));
+  }, [date, source, fetchCached]);
 
-      if (league === "All" || league === "MLB") {
-        fetches.push(
-          fetch(`/api/games?date=${date}&source=${source}`)
-            .then((r) => r.json())
-            .then((d) => (d.games as MLBGame[]).map((g) => ({ league: "MLB" as const, game: g })))
-            .catch(() => [])
-        );
+  // Poll every 5 seconds while server-side analysis is running
+  useEffect(() => {
+    if (!serverRunning) return;
+
+    const poll = async () => {
+      const data = await fetchCached(date, source);
+      if (data.running) {
+        pollTimerRef.current = setTimeout(poll, 5000);
       }
-      if ((league === "All" || league === "WNBA") && source !== "kalshi") {
-        fetches.push(
-          fetch(`/api/wnba?date=${date}&source=${source}`)
-            .then((r) => r.json())
-            .then((d) => (d.games as WNBAGame[]).map((g) => ({ league: "WNBA" as const, game: g })))
-            .catch(() => [])
-        );
-      }
+    };
+    pollTimerRef.current = setTimeout(poll, 5000);
 
-      const results = await Promise.all(fetches);
-      const allGames: GameEntry[] = results.flat();
+    return () => {
+      if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
+    };
+  }, [serverRunning, date, source, fetchCached]);
 
-      if (allGames.length === 0) {
-        setRunning(false);
-        return;
-      }
-
-      setProgress({ done: 0, total: allGames.length });
-
-      // Mark all as loading
-      const initial = new Map<string, AnalysisState>();
-      for (const e of allGames) initial.set(e.game.id, { status: "loading" });
-      setStates(initial);
-
-      const collectedPlays: ValuePlay[] = [];
-
-      await processQueue(allGames, CONCURRENCY, async (entry) => {
-        if (abortRef.current) return;
-        try {
-          const analysis = await analyzeGame(entry, date, source);
-          setGameState(entry.game.id, { status: "done", analysis });
-
-          // Extract value plays from this game
-          const { awayTeam, homeTeam, startTime } = entry.game as MLBGame & WNBAGame;
-          const plays = extractValuePlays(
-            analysis,
-            { name: awayTeam.name, abbreviation: awayTeam.abbreviation },
-            { name: homeTeam.name, abbreviation: homeTeam.abbreviation },
-            startTime,
-            minConfidence
-          );
-
-          if (plays.length > 0) {
-            setValuePlays((prev) => {
-              const updated = [...prev, ...plays];
-              // Sort by confidence descending
-              return updated.sort((a, b) => b.analysis.confidence - a.analysis.confidence);
-            });
-            collectedPlays.push(...plays);
-          }
-        } catch (err) {
-          setGameState(entry.game.id, {
-            status: "error",
-            message: err instanceof Error ? err.message : "Failed",
-          });
-        }
-        setProgress((p) => ({ ...p, done: p.done + 1 }));
-      });
-    } finally {
-      setRunning(false);
+  const triggerRun = async () => {
+    if (password !== "123") {
+      setAdminMsg("Wrong password.");
+      return;
     }
-  }, [date, league, minConfidence, source, setGameState]);
+    setAdminMsg("Starting analysis...");
+    try {
+      const res = await fetch("/api/value-plays/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ date, source, password }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setAdminMsg(
+          data.status === "already-running"
+            ? "Already running — results will appear when complete."
+            : "Analysis started! Results will appear automatically."
+        );
+        setServerRunning(true);
+        setPassword("");
+        setShowAdmin(false);
+      } else {
+        setAdminMsg(data.error ?? "Error starting analysis.");
+      }
+    } catch {
+      setAdminMsg("Network error.");
+    }
+  };
 
-  const hasRun = states.size > 0;
-
-  // Filter displayed plays
-  const displayed = valuePlays.filter(
+  // Client-side filters on cached plays
+  const allPlays: ValuePlay[] = entry?.plays ?? [];
+  const displayed = allPlays.filter(
     (p) =>
+      (league === "All" || p.league === league) &&
       (marketFilter === "All" || p.market === marketFilter) &&
       p.analysis.confidence >= minConfidence
   );
-
-  const percentDone = progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0;
 
   return (
     <div className="min-h-screen" style={{ background: "#111318" }}>
@@ -208,7 +139,9 @@ export default function ValuePlaysClient() {
           <div>
             <h1 className="text-4xl font-bold text-white">Value Plays</h1>
             <p className="text-sm text-gray-500 mt-1">
-              Claude AI scans all games and surfaces markets with genuine edge
+              {entry
+                ? `Updated ${timeAgo(entry.generatedAt)} · ${entry.analyzedCount} of ${entry.gameCount} games analyzed`
+                : "Runs automatically at midnight PST each day"}
             </p>
           </div>
           <TrendingUp className="w-8 h-8 text-blue-500 mt-1" />
@@ -225,9 +158,7 @@ export default function ValuePlaysClient() {
                 <button
                   onClick={() => setDate((d) => shiftDate(d, -1))}
                   className="w-7 h-7 flex items-center justify-center rounded-lg bg-[#252a3a] hover:bg-[#2d3348] text-gray-400 text-sm transition-colors"
-                >
-                  ‹
-                </button>
+                >‹</button>
                 <div className="relative">
                   <button
                     onClick={() => setShowDatePicker(!showDatePicker)}
@@ -253,9 +184,7 @@ export default function ValuePlaysClient() {
                 <button
                   onClick={() => setDate((d) => shiftDate(d, 1))}
                   className="w-7 h-7 flex items-center justify-center rounded-lg bg-[#252a3a] hover:bg-[#2d3348] text-gray-400 text-sm transition-colors"
-                >
-                  ›
-                </button>
+                >›</button>
               </div>
             </div>
 
@@ -268,13 +197,9 @@ export default function ValuePlaysClient() {
                     key={l}
                     onClick={() => setLeague(l)}
                     className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
-                      league === l
-                        ? "bg-blue-600 text-white"
-                        : "bg-[#252a3a] text-gray-400 hover:text-gray-200"
+                      league === l ? "bg-blue-600 text-white" : "bg-[#252a3a] text-gray-400 hover:text-gray-200"
                     }`}
-                  >
-                    {l}
-                  </button>
+                  >{l}</button>
                 ))}
               </div>
             </div>
@@ -288,13 +213,9 @@ export default function ValuePlaysClient() {
                     key={m}
                     onClick={() => setMarketFilter(m)}
                     className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors capitalize ${
-                      marketFilter === m
-                        ? "bg-blue-600 text-white"
-                        : "bg-[#252a3a] text-gray-400 hover:text-gray-200"
+                      marketFilter === m ? "bg-blue-600 text-white" : "bg-[#252a3a] text-gray-400 hover:text-gray-200"
                     }`}
-                  >
-                    {m}
-                  </button>
+                  >{m}</button>
                 ))}
               </div>
             </div>
@@ -308,114 +229,52 @@ export default function ValuePlaysClient() {
                     key={c}
                     onClick={() => setMinConfidence(c)}
                     className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
-                      minConfidence === c
-                        ? "bg-blue-600 text-white"
-                        : "bg-[#252a3a] text-gray-400 hover:text-gray-200"
+                      minConfidence === c ? "bg-blue-600 text-white" : "bg-[#252a3a] text-gray-400 hover:text-gray-200"
                     }`}
-                  >
-                    {c}+
-                  </button>
+                  >{c}+</button>
                 ))}
               </div>
-            </div>
-
-            {/* Run button */}
-            <div className="ml-auto">
-              <button
-                onClick={running ? () => { abortRef.current = true; } : runAnalysis}
-                className={`flex items-center gap-2 px-5 py-2 rounded-xl text-sm font-semibold transition-colors ${
-                  running
-                    ? "bg-red-900/40 text-red-400 border border-red-800/40 hover:bg-red-900/60"
-                    : "bg-blue-600 hover:bg-blue-700 text-white"
-                }`}
-              >
-                {running ? (
-                  <>
-                    <RefreshCw className="w-4 h-4 animate-spin" />
-                    Stop ({percentDone}%)
-                  </>
-                ) : hasRun ? (
-                  <>
-                    <RefreshCw className="w-4 h-4" />
-                    Re-run
-                  </>
-                ) : (
-                  <>
-                    <TrendingUp className="w-4 h-4" />
-                    Find Value Plays
-                  </>
-                )}
-              </button>
             </div>
           </div>
         </div>
 
-        {/* Progress bar */}
-        {running && progress.total > 0 && (
-          <div className="mb-4">
-            <div className="flex items-center justify-between text-xs text-gray-500 mb-1.5">
-              <span>Analyzing {progress.total} games with Claude AI...</span>
-              <span>{progress.done}/{progress.total}</span>
-            </div>
-            <div className="h-1 bg-[#1a1d24] rounded-full overflow-hidden">
-              <div
-                className="h-full bg-blue-600 rounded-full transition-all duration-300"
-                style={{ width: `${percentDone}%` }}
-              />
-            </div>
+        {/* Running banner */}
+        {serverRunning && (
+          <div className="flex items-center gap-2 text-blue-400 text-sm bg-blue-950/30 border border-blue-800/30 rounded-xl px-4 py-3 mb-4">
+            <RefreshCw className="w-4 h-4 animate-spin flex-shrink-0" />
+            Analysis in progress — results will appear automatically when complete...
           </div>
         )}
 
-        {/* Game analysis status grid */}
-        {hasRun && states.size > 0 && (
-          <div className="flex flex-wrap gap-1.5 mb-6">
-            {[...states.entries()].map(([id, state]) => (
-              <div
-                key={id}
-                title={state.status === "error" ? state.message : state.status}
-                className={`w-3 h-3 rounded-sm ${
-                  state.status === "loading"
-                    ? "bg-gray-600 animate-pulse"
-                    : state.status === "done"
-                    ? "bg-green-600"
-                    : "bg-red-700"
-                }`}
-              />
-            ))}
-            <span className="text-xs text-gray-600 ml-1 self-center">
-              {[...states.values()].filter((s) => s.status === "done").length} analyzed ·{" "}
-              {[...states.values()].filter((s) => s.status === "error").length} failed
-            </span>
+        {/* Loading */}
+        {loading && !serverRunning && (
+          <div className="flex flex-col items-center justify-center py-24 text-gray-500">
+            <RefreshCw className="w-8 h-8 text-gray-700 mb-3 animate-spin" />
+            <p className="text-sm">Loading...</p>
+          </div>
+        )}
+
+        {/* No cache */}
+        {!loading && !entry && !serverRunning && (
+          <div className="flex flex-col items-center justify-center py-24 text-gray-500">
+            <Clock className="w-12 h-12 text-gray-700 mb-4" />
+            <p className="text-lg font-medium">No analysis for this date yet</p>
+            <p className="text-sm mt-1 text-center max-w-sm">
+              Value plays are generated automatically at midnight PST each day.
+            </p>
           </div>
         )}
 
         {/* Results */}
-        {!hasRun && !running && (
-          <div className="flex flex-col items-center justify-center py-24 text-gray-500">
-            <TrendingUp className="w-12 h-12 text-gray-700 mb-4" />
-            <p className="text-lg font-medium">Ready to scan for value</p>
-            <p className="text-sm mt-1 text-center max-w-sm">
-              Claude will analyze every game and surface markets where the Polymarket price doesn&apos;t
-              reflect the true probability.
-            </p>
-            <button
-              onClick={runAnalysis}
-              className="mt-6 px-6 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-semibold transition-colors"
-            >
-              Find Value Plays
-            </button>
-          </div>
-        )}
-
-        {hasRun && displayed.length === 0 && !running && (
+        {!loading && entry && displayed.length === 0 && !serverRunning && (
           <div className="flex flex-col items-center justify-center py-16 text-gray-500">
-            <p className="text-lg font-medium">No value plays found</p>
+            <p className="text-lg font-medium">No value plays match your filters</p>
             <p className="text-sm mt-1">
-              {valuePlays.length > 0
-                ? `${valuePlays.length} play(s) found but filtered out by current settings`
-                : "Claude didn't identify clear edges in today's markets"}
+              {allPlays.length > 0
+                ? `${allPlays.length} play(s) found but filtered by current settings`
+                : "No clear edges found in this day's markets"}
             </p>
-            {valuePlays.length > 0 && (
+            {allPlays.length > 0 && (
               <button
                 onClick={() => { setMarketFilter("All"); setMinConfidence(5); }}
                 className="mt-3 text-xs text-blue-400 hover:text-blue-300 underline"
@@ -432,8 +291,10 @@ export default function ValuePlaysClient() {
               <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">
                 {displayed.length} Value Play{displayed.length !== 1 ? "s" : ""} Found
               </h2>
-              {running && (
-                <span className="text-xs text-blue-400 animate-pulse">Scanning more games...</span>
+              {serverRunning && (
+                <span className="text-xs text-blue-400 animate-pulse flex items-center gap-1">
+                  <RefreshCw className="w-3 h-3 animate-spin" /> Refreshing
+                </span>
               )}
             </div>
             <div className="flex flex-col gap-3">
@@ -443,6 +304,51 @@ export default function ValuePlaysClient() {
             </div>
           </>
         )}
+
+        {/* Admin panel */}
+        <div className="mt-12 border-t border-[#1e2130] pt-6">
+          <button
+            onClick={() => { setShowAdmin((v) => !v); setAdminMsg(""); }}
+            className="flex items-center gap-1.5 text-gray-600 hover:text-gray-400 text-xs transition-colors"
+          >
+            <Lock className="w-3 h-3" />
+            Admin refresh
+          </button>
+
+          {showAdmin && (
+            <div className="mt-3 bg-[#1a1d24] border border-[#2a2d35] rounded-xl p-4 max-w-sm">
+              <p className="text-xs text-gray-500 mb-3">
+                Re-runs value plays for {formatDisplayDate(date)} ({source}). Uses Anthropic API credits.
+              </p>
+              <div className="flex gap-2">
+                <input
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && triggerRun()}
+                  placeholder="Password"
+                  className="flex-1 bg-[#252a3a] text-white text-sm rounded-lg px-3 py-1.5 outline-none border border-[#2a2d35] focus:border-blue-500"
+                />
+                <button
+                  onClick={triggerRun}
+                  className="px-4 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-sm rounded-lg font-semibold transition-colors"
+                >
+                  Run
+                </button>
+              </div>
+              {adminMsg && (
+                <p className={`text-xs mt-2 ${
+                  adminMsg.includes("Error") || adminMsg.includes("Wrong") || adminMsg.includes("Network")
+                    ? "text-red-400"
+                    : "text-green-400"
+                }`}>
+                  {adminMsg}
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+
       </div>
     </div>
   );

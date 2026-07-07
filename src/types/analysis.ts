@@ -37,3 +37,12 @@ export type ValuePlay = {
   analysis: MarketAnalysis;
   fullAnalysis: GameAnalysis;
 };
+
+export type ValuePlaysCacheEntry = {
+  plays: ValuePlay[];
+  gameCount: number;
+  analyzedCount: number;
+  generatedAt: string; // ISO timestamp
+  source: string;
+  date: string; // YYYYMMDD
+};
