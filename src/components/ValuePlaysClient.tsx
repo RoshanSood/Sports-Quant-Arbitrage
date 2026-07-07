@@ -141,7 +141,7 @@ export default function ValuePlaysClient() {
             <p className="text-sm text-gray-500 mt-1">
               {entry
                 ? `Updated ${timeAgo(entry.generatedAt)} · ${entry.analyzedCount} of ${entry.gameCount} games analyzed`
-                : "Runs automatically at midnight PST each day"}
+                : "Updated nightly at 9:57 PM PT for the next day"}
             </p>
           </div>
           <TrendingUp className="w-8 h-8 text-blue-500 mt-1" />

@@ -9,8 +9,9 @@ export async function register() {
   const { getCached, isRunning } = await import("@/lib/valuePlaysCache");
   const { runValuePlaysForDate } = await import("@/lib/valuePlaysRunner");
 
-  function todayStr(): string {
+  function dateStr(offset = 0): string {
     const d = new Date();
+    d.setDate(d.getDate() + offset);
     return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
   }
 
@@ -28,13 +29,13 @@ export async function register() {
   }
 
   // 1. Run immediately on startup if today has no cache
-  runIfMissing(todayStr()).catch(console.error);
+  runIfMissing(dateStr(0)).catch(console.error);
 
-  // 2. Schedule daily at 08:00 UTC (midnight PST / 1 AM PDT)
+  // 2. Schedule daily at 9:57 PM PT — generates next day's plays the night before
   const cron = (await import("node-cron")).default;
-  cron.schedule("0 8 * * *", () => {
-    const date = todayStr();
-    console.log(`[scheduler] Daily run for ${date}`);
+  cron.schedule("57 21 * * *", () => {
+    const date = dateStr(1); // tomorrow
+    console.log(`[scheduler] Nightly pre-run for ${date}`);
     runIfMissing(date).catch(console.error);
-  });
+  }, { timezone: "America/Los_Angeles" });
 }
