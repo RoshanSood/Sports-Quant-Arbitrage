@@ -7,6 +7,7 @@ export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const leagueParam = searchParams.get("league") as League | null;
   const marketParam = searchParams.get("market") as MarketType | null;
+  const dateParam   = searchParams.get("date");
   const sourceParam = searchParams.get("source");
   const limitStr = searchParams.get("limit");
   const limit = limitStr ? parseInt(limitStr, 10) : 100;
@@ -20,7 +21,10 @@ export async function GET(request: NextRequest) {
     if (leagueParam) recs = recs.filter((r) => r.league === leagueParam);
     if (marketParam) recs = recs.filter((r) => r.marketType === marketParam);
 
+    // breakdown is always computed over undate-filtered recs so overall stats are accurate
     const breakdown = computeBreakdown(recs);
+
+    if (dateParam) recs = recs.filter((r) => r.date === dateParam);
     const recent = recs.slice(0, limit);
 
     return NextResponse.json({
