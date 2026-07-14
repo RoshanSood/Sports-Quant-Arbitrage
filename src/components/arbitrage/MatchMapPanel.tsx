@@ -53,7 +53,7 @@ export default function MatchMapPanel({
           }}
         >
           <span className="w-1.5 h-1.5 rounded-full" style={{ background: live ? "#22c55e" : "#f59e0b" }} />
-          {live ? "LIVE MATCHING" : "MOCK DATA"}
+          {live ? "LIVE MATCHING" : "SCANNING…"}
         </span>
       </div>
 

@@ -256,7 +256,7 @@ export default function ArenaCanvas({
           }}
         >
           <span className="w-1.5 h-1.5 rounded-full" style={{ background: marketsLive ? "#22c55e" : "#f59e0b" }} />
-          {marketsLive ? "LIVE MARKETS" : "MOCK DATA"}
+          {marketsLive ? "LIVE MARKETS" : "SCANNING…"}
         </span>
         <span>Drag nodes · click for details</span>
       </div>

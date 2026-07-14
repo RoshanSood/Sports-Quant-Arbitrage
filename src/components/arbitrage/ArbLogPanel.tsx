@@ -32,7 +32,7 @@ export default function ArbLogPanel({ logs, live = false, onClose }: { logs: Arb
           }}
         >
           <span className="w-1.5 h-1.5 rounded-full" style={{ background: live ? "#22c55e" : "#f59e0b" }} />
-          {live ? "LIVE LOG" : "MOCK DATA"}
+          {live ? "LIVE LOG" : "SCANNING…"}
         </span>
       </div>
       <div className="flex items-center gap-1 mb-3">

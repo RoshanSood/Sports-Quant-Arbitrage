@@ -95,7 +95,7 @@ export default function PortfolioPanel({
           }}
         >
           <span className="w-1.5 h-1.5 rounded-full" style={{ background: live ? "#22c55e" : "#f59e0b" }} />
-          {live ? "LIVE PAPER POSITIONS" : "MOCK DATA"}
+          {live ? "LIVE PAPER POSITIONS" : "SCANNING…"}
         </span>
       </div>
       <div className="flex items-center gap-1 mb-4">

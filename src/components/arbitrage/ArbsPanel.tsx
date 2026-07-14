@@ -45,7 +45,7 @@ export default function ArbsPanel({
           }}
         >
           <span className="w-1.5 h-1.5 rounded-full" style={{ background: live ? "#22c55e" : "#f59e0b" }} />
-          {live ? "LIVE DETECTION" : "MOCK DATA"}
+          {live ? "LIVE DETECTION" : "SCANNING…"}
         </span>
         <span className="text-gray-500 uppercase tracking-wide ml-2">Agents</span>
         <Pill color="#8b5cf6" text="#c4b5fd">{agentName}</Pill>

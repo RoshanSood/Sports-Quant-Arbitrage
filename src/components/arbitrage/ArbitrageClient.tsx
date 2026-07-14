@@ -12,15 +12,7 @@ import type {
   Trade,
   Venue,
 } from "@/types/arbitrage";
-import {
-  MOCK_LOGS,
-  MOCK_MARKETS,
-  MOCK_OPPORTUNITIES,
-  MOCK_TRADES,
-  MOCK_VENUES,
-  DEFAULT_AGENT,
-} from "@/lib/arbitrage/mockData";
-import { DEFAULT_RISK } from "@/lib/arbitrage/seed";
+import { DEFAULT_AGENT, DEFAULT_RISK, DEFAULT_VENUES } from "@/lib/arbitrage/seed";
 import ClawArbsTopBar from "./ClawArbsTopBar";
 import ArenaCanvas, { type AgentTrade, type BookEdge } from "./ArenaCanvas";
 import ArbsPanel from "./ArbsPanel";
@@ -35,9 +27,9 @@ import AnalyticsPanel from "./AnalyticsPanel";
 
 export type PanelKey = "arbs" | "portfolio" | "risk" | "log" | "matchmap" | "analytics";
 
-// Phase 1 renders from mock data. Flip to false once the /api/arbitrage routes are
-// populated to fetch live state instead. Kept as a single switch for a clean handoff.
-const USE_MOCK = true;
+// Live-only: the dashboard renders real ingested data (or honest empty/scanning
+// states) — never mock fixtures. Venues start from the seed so the arena has nodes.
+const USE_MOCK = false;
 
 // Auto-scan cadence while Scanning is on. Each scan re-ingests both venues (~11MB
 // Polymarket pull), so keep it modest to avoid hammering the public APIs.
@@ -49,20 +41,14 @@ function todayDateStr(): string {
 }
 
 export default function ArbitrageClient() {
-  const [venues, setVenues] = useState<Venue[]>(MOCK_VENUES);
+  const [venues, setVenues] = useState<Venue[]>(DEFAULT_VENUES);
   const [agent, setAgent] = useState<Agent>(DEFAULT_AGENT);
-  const [opportunities, setOpportunities] = useState<ArbOpportunity[]>(MOCK_OPPORTUNITIES);
-  const [trades, setTrades] = useState<Trade[]>(MOCK_TRADES);
-  const [logs, setLogs] = useState<ArbLog[]>(MOCK_LOGS);
-  const [risk, setRisk] = useState<RiskSettings>({
-    ...DEFAULT_RISK,
-    currentExposure: 647,
-    dailyPnl: 14.3,
-  });
-  // Live normalized markets (Phase 3 ingestion). Starts on mock fixtures so the
-  // dashboard is never blank, and is replaced with real Kalshi/Polymarket totals
-  // once ingestion returns data.
-  const [markets, setMarkets] = useState<NormalizedMarket[]>(MOCK_MARKETS);
+  const [opportunities, setOpportunities] = useState<ArbOpportunity[]>([]);
+  const [trades, setTrades] = useState<Trade[]>([]);
+  const [logs, setLogs] = useState<ArbLog[]>([]);
+  const [risk, setRisk] = useState<RiskSettings>(DEFAULT_RISK);
+  // Live normalized markets (Kalshi + Polymarket + SX.bet), populated by ingestion.
+  const [markets, setMarkets] = useState<NormalizedMarket[]>([]);
   const [marketsLive, setMarketsLive] = useState(false);
   const [oppsLive, setOppsLive] = useState(false);
   const [portfolioLive, setPortfolioLive] = useState(false);
@@ -190,12 +176,8 @@ export default function ArbitrageClient() {
         applyMarkets(first.markets, first.venueCounts ?? {});
         return;
       }
-      // Nothing cached yet — trigger ingestion, then poll for results.
-      await fetch("/api/arbitrage/markets/run", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ date, password: "123" }),
-      }).catch(() => null);
+      // Nothing cached yet — the GET above auto-triggers ingestion server-side
+      // (no admin password), so just poll for results.
       if (!cancelled) setTimeout(poll, 2000);
     })();
 
@@ -320,11 +302,8 @@ export default function ArbitrageClient() {
     const date = todayDateStr();
     setRefreshing(true);
     try {
-      await fetch("/api/arbitrage/markets/run", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ date, password: "123" }),
-      }).catch(() => null);
+      // GET with refresh=1 re-triggers ingestion server-side (no admin password).
+      await fetch(`/api/arbitrage/markets?date=${date}&refresh=1`).catch(() => null);
 
       // Poll until ingestion settles, then pull derived data.
       for (let i = 0; i < 12; i++) {
@@ -405,8 +384,8 @@ export default function ArbitrageClient() {
         }}
         onOpenAgent={() => setAgentOpen(true)}
         onReset={() => {
-          setTrades(MOCK_TRADES);
-          setLogs(MOCK_LOGS);
+          setTrades([]);
+          setLogs([]);
         }}
       />
 
