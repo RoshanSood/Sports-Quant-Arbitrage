@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { TrendingUp, Activity, Trophy, Zap, BarChart2 } from "lucide-react";
+import { TrendingUp, Activity, Trophy, Zap, BarChart2, GitCompareArrows, Grid3x3 } from "lucide-react";
 import DataSourceToggle from "./DataSourceToggle";
 
 const NAV = [
@@ -13,10 +13,16 @@ const NAV = [
   { label: "Performance",   href: "/performance",    icon: "perf"    as const },
   { label: "Live Trading",  href: "/live-trading",   icon: "trade"   as const },
   { label: "Markets",       href: "/markets",        icon: "markets" as const },
+  { label: "Arbitrage",     href: "/arbitrage",      icon: "arb"     as const },
+  { label: "Player Props",  href: "/props",          icon: "props"   as const },
 ];
 
 export default function SportNav() {
   const pathname = usePathname();
+
+  // The arbitrage module is a standalone full-screen "Claw Arbs" experience with its
+  // own top bar — hide the shared app nav on its route.
+  if (pathname.startsWith("/arbitrage")) return null;
 
   function isActive(href: string) {
     if (href === "/") return pathname === "/" || pathname.startsWith("/game/");
@@ -50,6 +56,8 @@ export default function SportNav() {
                   {item.icon === "perf"    && <Trophy className="w-3.5 h-3.5" />}
                   {item.icon === "trade"   && <Zap className="w-3.5 h-3.5" />}
                   {item.icon === "markets" && <BarChart2 className="w-3.5 h-3.5" />}
+                  {item.icon === "arb"     && <GitCompareArrows className="w-3.5 h-3.5" />}
+                  {item.icon === "props"   && <Grid3x3 className="w-3.5 h-3.5" />}
                   {item.label}
                 </Link>
               );

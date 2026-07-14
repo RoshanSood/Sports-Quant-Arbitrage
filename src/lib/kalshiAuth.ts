@@ -108,7 +108,23 @@ export async function kalshiPost<T = unknown>(
   return (await res.json()) as T;
 }
 
-export function isKalshiConfigured(): boolean {
+export async function kalshiDelete<T = unknown>(path: string, creds?: KalshiCreds): Promise<T> {
+  const fullPath = `${PATH_PREFIX}${path}`;
+  const headers: KalshiHeaders = {
+    Accept: "application/json",
+    ...authHeaders("DELETE", fullPath, creds),
+  };
+  const res = await fetch(`${BASE_URL}${path}`, { method: "DELETE", headers, cache: "no-store" });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Kalshi ${res.status} ${res.statusText}: ${text.slice(0, 200)}`);
+  }
+  return (await res.json()) as T;
+}
+
+// True when creds are provided per-call OR configured in the environment.
+export function isKalshiConfigured(creds?: KalshiCreds): boolean {
+  if (creds?.keyId && creds?.privateKey) return true;
   return Boolean(process.env.KALSHI_KEY_ID && process.env.KALSHI_PRIVATE_KEY);
 }
 

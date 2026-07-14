@@ -1,9 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isRunning } from "@/lib/valuePlaysCache";
 import { runValuePlaysForDate } from "@/lib/valuePlaysRunner";
-
-const REFRESH_PASSWORD = "123";
-const CRON_SECRET = process.env.CRON_SECRET;
+import { isAuthorized } from "@/lib/adminAuth";
 
 function todayDateStr(): string {
   const d = new Date();
@@ -18,11 +16,7 @@ export async function POST(request: NextRequest) {
     // ignore parse errors — body is optional
   }
 
-  const authHeader = request.headers.get("authorization") ?? "";
-  const isCron = Boolean(CRON_SECRET && authHeader === `Bearer ${CRON_SECRET}`);
-  const isAdmin = body.password === REFRESH_PASSWORD;
-
-  if (!isCron && !isAdmin) {
+  if (!isAuthorized(request, body.password)) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 

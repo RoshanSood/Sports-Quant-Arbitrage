@@ -1,6 +1,7 @@
 import { GameMarket, MLBGame, OddsOption } from "@/types";
 import { teamMatchesTitle } from "./teamNormalization";
 import { kalshiGet } from "./kalshiAuth";
+import type { ArbGame } from "./arbitrage/sports";
 
 const MLB_GAME_SERIES   = "KXMLBGAME";
 const MLB_SPREAD_SERIES = "KXMLBSPREAD";
@@ -25,6 +26,8 @@ type KalshiMarket = {
   yes_bid_dollars?: string | number;
   yes_ask_dollars?: string | number;
   last_price_dollars?: string | number;
+  yes_ask_size_fp?: number; // contracts resting at the yes ask (top of book)
+  yes_bid_size_fp?: number; // contracts resting at the yes bid
   volume?: number;
   open_interest?: number;
   result?: string;
@@ -139,7 +142,7 @@ function eventSearchText(event: KalshiEvent): string {
   return [event.title, event.sub_title].filter(Boolean).join(" ");
 }
 
-function eventMatchesGame(game: MLBGame, event: KalshiEvent): boolean {
+function eventMatchesGame(game: ArbGame, event: KalshiEvent): boolean {
   const text = eventSearchText(event);
   if (!text) return false;
   const awayHit = teamMatchesTitle(
@@ -157,7 +160,7 @@ function eventMatchesGame(game: MLBGame, event: KalshiEvent): boolean {
   return awayHit && homeHit;
 }
 
-function marketYesSide(market: KalshiMarket, game: MLBGame): "away" | "home" | null {
+function marketYesSide(market: KalshiMarket, game: ArbGame): "away" | "home" | null {
   const text = market.yes_sub_title ?? "";
   if (!text.trim()) return null;
   const awayHit = teamMatchesTitle(
@@ -377,6 +380,201 @@ export async function fetchKalshiData(
   }
 
   return marketMap;
+}
+
+// ── Arbitrage support: every total line per game (not just the main line) ─────
+
+export type VenueTotalLine = {
+  line: number;
+  overCents: number; // executable cost to BUY over, in cents (the ask)
+  underCents: number; // executable cost to BUY under, in cents (the ask)
+  overLiquidityUsd: number; // $ executable at the over ask (top of book)
+  underLiquidityUsd: number; // $ executable at the under ask
+  marketId: string;
+};
+
+// A two-way market (moneyline) priced from each venue at the executable ask.
+export type VenueTwoWay = {
+  homeCents: number;
+  awayCents: number;
+  homeLiquidityUsd: number;
+  awayLiquidityUsd: number;
+  marketId: string;
+  // Kalshi only: which team the market's YES side represents, so execution knows to
+  // buy YES (that team) or NO (the other). Undefined for venues without a yes/no book.
+  yesSide?: "home" | "away";
+};
+
+// Kalshi MLB moneyline per game (home/away buy costs at the ask). Reuses the same
+// tuned team/side matching + top-of-book size logic as the totals fetch.
+export async function fetchKalshiMoneylineByGame(
+  games: ArbGame[],
+  gameSeries: string = MLB_GAME_SERIES
+): Promise<Map<string, VenueTwoWay>> {
+  const result = new Map<string, VenueTwoWay>();
+  if (!games.length) return result;
+
+  const gameEvents = await fetchEventsBySeries(gameSeries);
+
+  for (const game of games) {
+    const markets = gameEvents
+      .filter((ev) => eventMatchesGame(game, ev))
+      .flatMap((ev) => ev.markets ?? []);
+
+    // Pick the most liquid (tightest bid/ask) winner market with a known YES side.
+    let best: { m: KalshiMarket; yesSide: "away" | "home"; bid: number; ask: number; spread: number } | null = null;
+    for (const m of markets) {
+      if (!isUsable(m)) continue;
+      const yesSide = marketYesSide(m, game);
+      if (!yesSide) continue;
+      const { bid, ask } = readBidAsk(m);
+      if (bid == null || ask == null) continue;
+      const spread = ask - bid;
+      if (!best || spread < best.spread) best = { m, yesSide, bid, ask, spread };
+    }
+    if (!best) continue;
+
+    const { m, yesSide, bid, ask } = best;
+    // Buy the YES-side team at the ask; buy the other team at the NO ask (1 - yes bid).
+    const yesAskCents = Math.round(ask * 100);
+    const noAskCents = Math.round((1 - bid) * 100);
+    const yesSize = Number(m.yes_ask_size_fp ?? 0);
+    const noSize = Number(m.yes_bid_size_fp ?? 0);
+    const yesUsd = yesSize > 0 ? yesSize * ask : 1e9;
+    const noUsd = noSize > 0 ? noSize * (1 - bid) : 1e9;
+
+    result.set(game.id, {
+      homeCents: yesSide === "home" ? yesAskCents : noAskCents,
+      awayCents: yesSide === "away" ? yesAskCents : noAskCents,
+      homeLiquidityUsd: yesSide === "home" ? yesUsd : noUsd,
+      awayLiquidityUsd: yesSide === "away" ? yesUsd : noUsd,
+      marketId: m.ticker,
+      yesSide,
+    });
+  }
+
+  return result;
+}
+
+// A spread (runline) market: home/away cover costs + the SIGNED home line (e.g.
+// -1.5 if home is favored, +1.5 if home is the underdog) so settlement can grade it.
+export type VenueSpread = VenueTwoWay & { homeSignedLine: number };
+
+// Kalshi MLB runline (1.5). YES = named team covers -1.5. Maps to home/away cover.
+export async function fetchKalshiSpreadByGame(
+  games: ArbGame[],
+  spreadSeries: string = MLB_SPREAD_SERIES,
+  fixedLine: number | undefined = 1.5
+): Promise<Map<string, VenueSpread>> {
+  const result = new Map<string, VenueSpread>();
+  if (!games.length) return result;
+
+  const events = await fetchEventsBySeries(spreadSeries);
+
+  for (const game of games) {
+    const markets = events
+      .filter((ev) => eventMatchesGame(game, ev))
+      .flatMap((ev) => ev.markets ?? []);
+
+    let best: { m: KalshiMarket; yesSide: "away" | "home"; bid: number; ask: number; line: number; spread: number } | null = null;
+    for (const m of markets) {
+      if (!isUsable(m)) continue;
+      const line = extractSpreadLine(m);
+      const yesSide = marketYesSide(m, game);
+      if (line == null || yesSide == null) continue;
+      // MLB has a fixed 1.5 run-line; other sports use variable point spreads —
+      // in that case take the most liquid line (tightest bid/ask) instead.
+      if (fixedLine != null && Math.abs(line - fixedLine) > 0.01) continue;
+      const { bid, ask } = readBidAsk(m);
+      if (bid == null || ask == null) continue;
+      const spread = ask - bid;
+      if (!best || spread < best.spread) best = { m, yesSide, bid, ask, line, spread };
+    }
+    if (!best) continue;
+
+    const { m, yesSide, bid, ask, line } = best;
+    const yesAskCents = Math.round(ask * 100);
+    const noAskCents = Math.round((1 - bid) * 100);
+    const yesSize = Number(m.yes_ask_size_fp ?? 0);
+    const noSize = Number(m.yes_bid_size_fp ?? 0);
+    const yesUsd = yesSize > 0 ? yesSize * ask : 1e9;
+    const noUsd = noSize > 0 ? noSize * (1 - bid) : 1e9;
+
+    result.set(game.id, {
+      homeCents: yesSide === "home" ? yesAskCents : noAskCents,
+      awayCents: yesSide === "away" ? yesAskCents : noAskCents,
+      homeLiquidityUsd: yesSide === "home" ? yesUsd : noUsd,
+      awayLiquidityUsd: yesSide === "away" ? yesUsd : noUsd,
+      homeSignedLine: yesSide === "home" ? -line : line,
+      marketId: m.ticker,
+      yesSide,
+    });
+  }
+
+  return result;
+}
+
+// Returns ALL total lines Kalshi offers for each game, keyed by ESPN gameId. The
+// arb matching engine needs the full ladder so it can pair the same line across
+// venues — unlike buildTotal(), which collapses to a single main line for the UI.
+export async function fetchKalshiTotalsByGame(
+  games: ArbGame[],
+  totalSeries: string = MLB_TOTAL_SERIES
+): Promise<Map<string, VenueTotalLine[]>> {
+  const result = new Map<string, VenueTotalLine[]>();
+  if (!games.length) return result;
+
+  const totalEvents = await fetchEventsBySeries(totalSeries);
+
+  for (const game of games) {
+    const events = totalEvents.filter((ev) => eventMatchesGame(game, ev));
+    if (!events.length) continue;
+
+    // line -> best (tightest bid/ask) quote, so duplicate markets collapse per line.
+    // Kalshi total YES = OVER, so the executable buy costs are:
+    //   overCost  = yes_ask         (pay the ask to buy YES/over)
+    //   underCost = 1 - yes_bid     (the NO ask = 1 minus the YES bid)
+    // Falls back to mid only when a side is one-sided/missing.
+    type Q = { overAsk: number; underAsk: number; overUsd: number; underUsd: number; spread: number; ticker: string };
+    const byLine = new Map<number, Q>();
+    for (const ev of events) {
+      for (const m of ev.markets ?? []) {
+        if (!isUsable(m)) continue;
+        const line = extractTotalLine(m);
+        const mid = midPrice(m);
+        if (line == null || mid == null) continue;
+        const { bid, ask } = readBidAsk(m);
+        const overAsk = ask != null ? ask : mid;
+        const underAsk = bid != null ? 1 - bid : 1 - mid;
+        const spread = bid != null && ask != null ? ask - bid : Infinity;
+        // Executable $ at top of book: OVER fills against the yes ask (yes_ask_size),
+        // UNDER fills against the no ask = yes bid resting size (yes_bid_size).
+        const overSize = Number(m.yes_ask_size_fp ?? 0);
+        const underSize = Number(m.yes_bid_size_fp ?? 0);
+        // Large sentinel when size is unavailable (JSON-safe, unlike Infinity) — the
+        // cross-venue min then defers to the other leg's real liquidity.
+        const overUsd = overSize > 0 ? overSize * overAsk : 1e9;
+        const underUsd = underSize > 0 ? underSize * underAsk : 1e9;
+        const prev = byLine.get(line);
+        if (!prev || spread < prev.spread) {
+          byLine.set(line, { overAsk, underAsk, overUsd, underUsd, spread, ticker: m.ticker });
+        }
+      }
+    }
+
+    if (byLine.size === 0) continue;
+    const lines: VenueTotalLine[] = [...byLine.entries()].map(([line, q]) => ({
+      line,
+      overCents: Math.round(q.overAsk * 100),
+      underCents: Math.round(q.underAsk * 100),
+      overLiquidityUsd: q.overUsd,
+      underLiquidityUsd: q.underUsd,
+      marketId: q.ticker,
+    }));
+    result.set(game.id, lines);
+  }
+
+  return result;
 }
 
 export { fetchSportSeries };

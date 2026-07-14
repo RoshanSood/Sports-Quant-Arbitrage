@@ -1,5 +1,7 @@
 import { GameMarket, MLBGame, OddsOption } from "@/types";
 import { teamMatchesTitle, teamsMatch } from "./teamNormalization";
+import type { VenueTotalLine, VenueTwoWay, VenueSpread } from "./kalshi";
+import type { ArbGame } from "./arbitrage/sports";
 
 const GAMMA_API = "https://gamma-api.polymarket.com";
 
@@ -9,6 +11,9 @@ type PolymarketMarket = {
   volume?: string;
   outcomes?: string;
   outcomePrices?: string;
+  bestBid?: number; // best bid for the first-outcome token (Gamma)
+  bestAsk?: number; // best ask for the first-outcome token (Gamma)
+  liquidityNum?: number; // $ liquidity resting in the CLOB book (Gamma)
   tokens?: Array<{ token_id: string; outcome: string; price?: number }>;
 };
 
@@ -22,10 +27,10 @@ type PolymarketEvent = {
   endDate?: string;
 };
 
-// Fetch all open MLB game-level events from Polymarket
-async function fetchMLBEvents(): Promise<PolymarketEvent[]> {
+// Fetch all open game-level events from Polymarket for a tag (mlb, wnba, …).
+async function fetchMLBEvents(tag: string = "mlb"): Promise<PolymarketEvent[]> {
   const params = new URLSearchParams({
-    tag_slug: "mlb",
+    tag_slug: tag,
     closed: "false",
     limit: "200",
   });
@@ -239,7 +244,7 @@ function buildTotalOptions(market: PolymarketMarket): OddsOption[] {
 }
 
 // Check whether a Polymarket event matches an ESPN game (order-independent)
-function gameMatchesEvent(game: MLBGame, event: PolymarketEvent): boolean {
+function gameMatchesEvent(game: ArbGame, event: PolymarketEvent): boolean {
   const title = event.title;
 
   const awayMatches = teamMatchesTitle(
@@ -339,5 +344,223 @@ export async function fetchPolymarketData(
   }
 
   return marketMap;
+}
+
+// ── Arbitrage support: every total line per game (not just the main line) ─────
+
+// Returns ALL total lines Polymarket offers for each game, keyed by ESPN gameId,
+// so the arb matching engine can pair the same line across venues.
+export async function fetchPolymarketTotalsByGame(
+  games: ArbGame[],
+  tag: string = "mlb"
+): Promise<Map<string, VenueTotalLine[]>> {
+  const result = new Map<string, VenueTotalLine[]>();
+  if (!games.length) return result;
+
+  const events = await fetchMLBEvents(tag);
+
+  for (const game of games) {
+    const matchedEvents = events.filter((ev) => gameMatchesEvent(game, ev));
+    if (matchedEvents.length === 0) continue;
+    const event = pickBestEvent(matchedEvents, game.date);
+
+    const byLine = new Map<number, { overCents: number; underCents: number; overLiquidityUsd: number; underLiquidityUsd: number; id: string }>();
+    for (const market of event.markets ?? []) {
+      if (classifyMarket(market) !== "total") continue;
+      const { outcomes, prices } = parseOutcomes(market);
+      if (isSettledMarket(prices)) continue;
+
+      const lineMatch = market.question.match(/(\d+\.?\d*)/g);
+      const line = lineMatch ? parseFloat(lineMatch[lineMatch.length - 1]) : null;
+      if (line == null || Number.isNaN(line)) continue;
+
+      // Mid prices per outcome (fallback if bid/ask are absent).
+      let overMid: number | null = null;
+      let underMid: number | null = null;
+      outcomes.forEach((o, i) => {
+        const label = o.toLowerCase();
+        if (label === "over" || label === "yes") overMid = prices[i];
+        else if (label === "under" || label === "no") underMid = prices[i];
+      });
+
+      // Executable buy costs from top-of-book. Gamma's bestBid/bestAsk are for the
+      // first-outcome token; the complement's ask = 1 - that token's bid.
+      const firstIsOver = ["over", "yes"].includes((outcomes[0] ?? "").toLowerCase());
+      const bestBid = typeof market.bestBid === "number" ? market.bestBid : null;
+      const bestAsk = typeof market.bestAsk === "number" ? market.bestAsk : null;
+
+      let overAsk: number | null;
+      let underAsk: number | null;
+      if (bestBid != null && bestAsk != null) {
+        if (firstIsOver) {
+          overAsk = bestAsk;
+          underAsk = 1 - bestBid;
+        } else {
+          underAsk = bestAsk;
+          overAsk = 1 - bestBid;
+        }
+      } else {
+        overAsk = overMid;
+        underAsk = underMid != null ? underMid : overMid != null ? 1 - overMid : null;
+      }
+
+      if (overAsk == null || underAsk == null) continue;
+      if (overAsk <= 0 || overAsk >= 1) continue; // no ask liquidity / settled
+
+      // Book liquidity ($) for this line, shared by both outcomes.
+      const liq = typeof market.liquidityNum === "number" ? market.liquidityNum : 0;
+
+      if (!byLine.has(line)) {
+        byLine.set(line, {
+          overCents: Math.round(overAsk * 100),
+          underCents: Math.round(underAsk * 100),
+          overLiquidityUsd: liq,
+          underLiquidityUsd: liq,
+          id: market.id,
+        });
+      }
+    }
+
+    if (byLine.size === 0) continue;
+    result.set(
+      game.id,
+      [...byLine.entries()].map(([line, q]) => ({
+        line,
+        overCents: q.overCents,
+        underCents: q.underCents,
+        overLiquidityUsd: q.overLiquidityUsd,
+        underLiquidityUsd: q.underLiquidityUsd,
+        marketId: q.id,
+      }))
+    );
+  }
+
+  return result;
+}
+
+// Polymarket MLB moneyline per game (home/away buy costs at the ask).
+export async function fetchPolymarketMoneylineByGame(
+  games: ArbGame[],
+  tag: string = "mlb"
+): Promise<Map<string, VenueTwoWay>> {
+  const result = new Map<string, VenueTwoWay>();
+  if (!games.length) return result;
+
+  const events = await fetchMLBEvents(tag);
+
+  for (const game of games) {
+    const matched = events.filter((ev) => gameMatchesEvent(game, ev));
+    if (matched.length === 0) continue;
+    const event = pickBestEvent(matched, game.date);
+
+    const ml = (event.markets ?? []).find((m) => classifyMarket(m) === "moneyline");
+    if (!ml) continue;
+    const { outcomes, prices } = parseOutcomes(ml);
+    if (outcomes.length < 2 || isSettledMarket(prices)) continue;
+
+    // Which outcome token is the away team? bestBid/bestAsk are for outcomes[0].
+    const outcome0IsAway =
+      teamsMatch(outcomes[0], game.awayTeam.name) ||
+      outcomes[0].toLowerCase().includes(game.awayTeam.abbreviation.toLowerCase());
+
+    const bestBid = typeof ml.bestBid === "number" ? ml.bestBid : null;
+    const bestAsk = typeof ml.bestAsk === "number" ? ml.bestAsk : null;
+
+    let awayAsk: number | null;
+    let homeAsk: number | null;
+    if (bestBid != null && bestAsk != null) {
+      const ask0 = bestAsk;
+      const ask1 = 1 - bestBid;
+      awayAsk = outcome0IsAway ? ask0 : ask1;
+      homeAsk = outcome0IsAway ? ask1 : ask0;
+    } else {
+      const p0 = prices[0];
+      const p1 = prices[1];
+      if (p0 == null || p1 == null) continue;
+      awayAsk = outcome0IsAway ? p0 : p1;
+      homeAsk = outcome0IsAway ? p1 : p0;
+    }
+
+    if (awayAsk == null || homeAsk == null) continue;
+    if (awayAsk <= 0 || awayAsk >= 1 || homeAsk <= 0 || homeAsk >= 1) continue;
+
+    const liq = typeof ml.liquidityNum === "number" ? ml.liquidityNum : 0;
+    result.set(game.id, {
+      homeCents: Math.round(homeAsk * 100),
+      awayCents: Math.round(awayAsk * 100),
+      homeLiquidityUsd: liq,
+      awayLiquidityUsd: liq,
+      marketId: ml.id,
+    });
+  }
+
+  return result;
+}
+
+// Polymarket MLB runline (spread). Question names one team with a sign, e.g.
+// "Spread: Toronto Blue Jays (-1.5)". Maps to home/away cover + signed home line.
+export async function fetchPolymarketSpreadByGame(
+  games: ArbGame[],
+  tag: string = "mlb"
+): Promise<Map<string, VenueSpread>> {
+  const result = new Map<string, VenueSpread>();
+  if (!games.length) return result;
+
+  const events = await fetchMLBEvents(tag);
+
+  for (const game of games) {
+    const matched = events.filter((ev) => gameMatchesEvent(game, ev));
+    if (matched.length === 0) continue;
+    const event = pickBestEvent(matched, game.date);
+
+    const sp = (event.markets ?? []).find((m) => classifyMarket(m) === "spread");
+    if (!sp) continue;
+    const { outcomes, prices } = parseOutcomes(sp);
+    if (outcomes.length < 2 || isSettledMarket(prices)) continue;
+
+    const q = sp.question;
+    const lineMatch = q.match(/(\d+\.5)/);
+    const lineMag = lineMatch ? parseFloat(lineMatch[1]) : 1.5;
+    const favLine = q.includes(`-${lineMag}`) ? -lineMag : lineMag;
+    const titleFavorsAway = teamMatchesTitle(game.awayTeam.name, game.awayTeam.shortName, game.awayTeam.abbreviation, q);
+    const homeSignedLine = titleFavorsAway ? -favLine : favLine;
+
+    const outcome0IsHome =
+      teamsMatch(outcomes[0], game.homeTeam.name) ||
+      outcomes[0].toLowerCase().includes(game.homeTeam.abbreviation.toLowerCase());
+
+    const bestBid = typeof sp.bestBid === "number" ? sp.bestBid : null;
+    const bestAsk = typeof sp.bestAsk === "number" ? sp.bestAsk : null;
+
+    let homeAsk: number | null;
+    let awayAsk: number | null;
+    if (bestBid != null && bestAsk != null) {
+      const ask0 = bestAsk;
+      const ask1 = 1 - bestBid;
+      homeAsk = outcome0IsHome ? ask0 : ask1;
+      awayAsk = outcome0IsHome ? ask1 : ask0;
+    } else {
+      const p0 = prices[0];
+      const p1 = prices[1];
+      if (p0 == null || p1 == null) continue;
+      homeAsk = outcome0IsHome ? p0 : p1;
+      awayAsk = outcome0IsHome ? p1 : p0;
+    }
+
+    if (homeAsk == null || awayAsk == null) continue;
+    if (homeAsk <= 0 || homeAsk >= 1 || awayAsk <= 0 || awayAsk >= 1) continue;
+
+    const liq = typeof sp.liquidityNum === "number" ? sp.liquidityNum : 0;
+    result.set(game.id, {
+      homeCents: Math.round(homeAsk * 100),
+      awayCents: Math.round(awayAsk * 100),
+      homeLiquidityUsd: liq,
+      awayLiquidityUsd: liq,
+      homeSignedLine,
+      marketId: sp.id,
+    });
+  }
+
+  return result;
 }
 
