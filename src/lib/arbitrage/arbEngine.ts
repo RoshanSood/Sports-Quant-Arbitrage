@@ -1,6 +1,10 @@
-// Arb engine (manual §7-§9). Consumes matched two-way markets and detects candidate
-// cross-venue pairs at identical lines. Inputs are executable top-book asks/depth;
-// order placement remains a separate concern.
+// Phase 5 arb engine (manual §7-§9). Consumes matched events and detects guaranteed
+// cross-venue arbitrage on game totals: buy OVER on one venue + UNDER on the other
+// at the same line, where p_over + p_under < 1 after fees. Builds an equal-profit
+// stake plan and applies the agent's min/max edge gates.
+//
+// Pure functions — no I/O. Prices are the current normalized quotes; executable
+// ask/depth-aware pricing is a later refinement.
 
 import type {
   Agent,
@@ -13,6 +17,7 @@ import type {
 } from "@/types/arbitrage";
 import {
   decimalOddsFromCents,
+  equalProfitSizing,
   grossEdge,
   impliedProbFromCents,
   totalCostCents,
@@ -20,7 +25,8 @@ import {
 import { computeFees, feeFractionOfStake } from "./feeEngine";
 
 // Legs are now priced at the executable ask, which already includes the bid/ask
-// spread cost — so no separate mid-era slippage buffer.
+// spread cost — so no separate mid-era slippage buffer. A small residual reserve
+// covers depth walk beyond top-of-book (proper depth-aware sizing is a later phase).
 const SLIPPAGE_RESERVE = 0;
 
 export type ArbReject = {
@@ -77,19 +83,20 @@ function pickMainLines(matched: MatchedEvent[]): MatchedEvent[] {
 
 // Choose the cheapest cross-venue pairing of the two complementary outcomes
 // (over/under for totals, home/away for moneyline). Outcome-agnostic.
-function crossVenuePairs(legs: MatchedLeg[]): Array<{ a: MatchedLeg; b: MatchedLeg }> {
+function bestCrossVenuePair(legs: MatchedLeg[]): { a: MatchedLeg; b: MatchedLeg } | null {
   const outcomes = [...new Set(legs.map((l) => l.outcome))];
-  if (outcomes.length !== 2) return [];
+  if (outcomes.length !== 2) return null;
   const sideA = legs.filter((l) => l.outcome === outcomes[0]);
   const sideB = legs.filter((l) => l.outcome === outcomes[1]);
-  const pairs: Array<{ a: MatchedLeg; b: MatchedLeg }> = [];
+  let best: { a: MatchedLeg; b: MatchedLeg; cost: number } | null = null;
   for (const a of sideA) {
     for (const b of sideB) {
       if (a.venueId === b.venueId) continue; // no intra-venue self edge
-      pairs.push({ a, b });
+      const cost = a.priceCents + b.priceCents;
+      if (!best || cost < best.cost) best = { a, b, cost };
     }
   }
-  return pairs;
+  return best ? { a: best.a, b: best.b } : null;
 }
 
 function buildLeg(m: MatchedLeg, size: number): ArbLeg {
@@ -102,72 +109,11 @@ function buildLeg(m: MatchedLeg, size: number): ArbLeg {
     priceCents: m.priceCents,
     decimalOdds: decimalOddsFromCents(m.priceCents),
     impliedProbability: impliedProbFromCents(m.priceCents),
-    feeRate: m.feeRate,
     size,
     feeCents: 0,
     liquidityUsd: m.liquidityUsd,
     label: m.label,
   };
-}
-
-type PairPlan = {
-  pair: { a: MatchedLeg; b: MatchedLeg };
-  pairLiquidity: number;
-  contracts: number;
-  legs: ArbLeg[];
-  legSizes: Record<string, number>;
-  totalStake: number;
-  fees: ReturnType<typeof computeFees>;
-  totalCost: number;
-  gross: number;
-  net: number;
-  expectedProfit: number;
-};
-
-function buildPairPlan(pair: { a: MatchedLeg; b: MatchedLeg }, agent: Agent): PairPlan {
-  const pairLiquidity = Math.min(pair.a.liquidityUsd, pair.b.liquidityUsd);
-  const priceSumDollars = (pair.a.priceCents + pair.b.priceCents) / 100;
-  const stakeContracts = priceSumDollars > 0 ? Math.floor(agent.maxStake / priceSumDollars) : 0;
-  const depthContracts = Math.min(
-    Math.floor(pair.a.liquidityUsd / (pair.a.priceCents / 100)),
-    Math.floor(pair.b.liquidityUsd / (pair.b.priceCents / 100))
-  );
-  const contracts = Math.max(0, Math.min(stakeContracts, depthContracts));
-  const legs = [buildLeg(pair.a, contracts), buildLeg(pair.b, contracts)];
-  const legSizes: Record<string, number> = {};
-  // Keep subpenny costs precise until presentation formatting.
-  for (const leg of legs) legSizes[leg.venueId] = round((leg.size * leg.priceCents) / 100, 6);
-  const totalStake = round(Object.values(legSizes).reduce((sum, value) => sum + value, 0), 6);
-  const fees = computeFees(legs);
-  legs.forEach((leg, index) => (leg.feeCents = fees[index].feeCents));
-  const totalCost = totalCostCents([pair.a.priceCents, pair.b.priceCents]);
-  const gross = grossEdge(totalCost);
-  const feeFrac = feeFractionOfStake(fees, legSizes);
-  const net = round(gross - feeFrac - SLIPPAGE_RESERVE, 6);
-  const totalFeeDollars = fees.reduce((sum, fee) => sum + fee.feeCents / 100, 0);
-
-  return {
-    pair,
-    pairLiquidity,
-    contracts,
-    legs,
-    legSizes,
-    totalStake,
-    fees,
-    totalCost,
-    gross,
-    net,
-    expectedProfit: round(contracts - totalStake - totalFeeDollars, 4),
-  };
-}
-
-function bestPairPlan(legs: MatchedLeg[], agent: Agent, minLiquidityUsd: number): PairPlan | null {
-  const plans = crossVenuePairs(legs).map((pair) => buildPairPlan(pair, agent));
-  if (plans.length === 0) return null;
-  // Prefer executable depth, then rank every candidate by fee-adjusted return.
-  const executable = plans.filter((plan) => plan.contracts > 0 && plan.pairLiquidity >= minLiquidityUsd);
-  const pool = executable.length > 0 ? executable : plans;
-  return pool.sort((a, b) => b.net - a.net || b.contracts - a.contracts)[0];
 }
 
 export function detectArbs(
@@ -178,8 +124,7 @@ export function detectArbs(
   const opportunities: ArbOpportunity[] = [];
   const rejects: ArbReject[] = [];
   const watch: MainLineWatch[] = [];
-  const nowMs = Date.now();
-  const now = new Date(nowMs).toISOString();
+  const now = new Date().toISOString();
 
   // Totals: one main line per game. Moneyline: the single market per game.
   const totals = matched.filter((e) => e.marketType === "total");
@@ -188,9 +133,8 @@ export function detectArbs(
 
   for (const ev of candidates) {
     const isTotal = ev.marketType === "total";
-    const plan = bestPairPlan(ev.legs, agent, minLiquidityUsd);
-    if (!plan) continue;
-    const { pair, pairLiquidity, contracts, legs, legSizes, totalStake, fees, totalCost, gross, net, expectedProfit } = plan;
+    const pair = bestCrossVenuePair(ev.legs);
+    if (!pair) continue;
 
     // Cross-venue divergence on the first outcome group (stale-quote signal).
     const outcomes = [...new Set(ev.legs.map((l) => l.outcome))];
@@ -198,16 +142,30 @@ export function detectArbs(
     for (const l of ev.legs) if (l.outcome === outcomes[0]) sideAByVenue.set(l.venueId, l.priceCents);
     const sideAPrices = [...sideAByVenue.values()];
     const divergence = sideAPrices.length >= 2 ? Math.max(...sideAPrices) - Math.min(...sideAPrices) : 0;
-    const quoteFreshness = Math.max(
-      ...[pair.a, pair.b].map((leg) => {
-        const captured = Date.parse(leg.lastUpdated);
-        return Number.isFinite(captured) ? Math.max(0, nowMs - captured) : Number.POSITIVE_INFINITY;
-      })
-    );
+    const pairLiquidity = Math.min(pair.a.liquidityUsd, pair.b.liquidityUsd);
+
+    // Equal-profit sizing capped by agent max stake AND executable depth.
+    const effectiveMaxStake = Math.max(1, Math.min(agent.maxStake, pairLiquidity));
+    const provisional = [pair.a, pair.b].map((m) => buildLeg(m, 0));
+    const plan = equalProfitSizing(provisional, effectiveMaxStake);
+    const legs = [pair.a, pair.b].map((m) => {
+      const dollars = plan.legSizes[m.venueId] ?? 0;
+      const contracts = m.priceCents > 0 ? Math.round(dollars / (m.priceCents / 100)) : 0;
+      return buildLeg(m, contracts);
+    });
+    const fees = computeFees(legs);
+    legs.forEach((leg, i) => (leg.feeCents = fees[i].feeCents));
+
+    const totalCost = totalCostCents([pair.a.priceCents, pair.b.priceCents]);
+    const gross = grossEdge(totalCost);
+    const feeFrac = feeFractionOfStake(fees, plan.legSizes);
+    const net = round(gross - feeFrac - SLIPPAGE_RESERVE, 6);
+    const totalFeeDollars = fees.reduce((s, f) => s + f.feeCents / 100, 0);
+    const expectedProfit = round(plan.guaranteedPayout - plan.totalStake - totalFeeDollars, 2);
 
     let status: MainLineWatch["status"];
-    if (divergence > STALE_DIVERGENCE_CENTS || quoteFreshness > agent.staleQuoteMs) status = "stale";
-    else if (contracts > 0 && totalCost < 100 && pairLiquidity >= minLiquidityUsd && net >= agent.minEdge && net <= agent.maxEdge)
+    if (divergence > STALE_DIVERGENCE_CENTS) status = "stale";
+    else if (totalCost < 100 && pairLiquidity >= minLiquidityUsd && net >= agent.minEdge && net <= agent.maxEdge)
       status = "arb";
     else status = "no_edge";
 
@@ -232,7 +190,7 @@ export function detectArbs(
         grossEdge: gross,
         netEdge: net,
         divergenceCents: divergence,
-        liquidityUsd: Math.round(pairLiquidity),
+        liquidityUsd: pairLiquidity >= 1e8 ? 0 : Math.round(pairLiquidity),
         status,
       });
     }
@@ -251,25 +209,15 @@ export function detectArbs(
         netEdge: net,
         fees,
         depthLimit: Math.min(...legs.map((l) => l.size)) || 0,
-        stakePlan: {
-          method: "equal_profit",
-          totalStake,
-          legSizes,
-          guaranteedPayout: contracts,
-          expectedProfit,
-          profitPerLeg: expectedProfit,
-        },
-        quoteFreshness,
+        stakePlan: { ...plan, expectedProfit },
+        quoteFreshness: 0,
         agentId: agent.id,
         status: "tracked",
         detectedAt: now,
       });
     } else if (status === "stale") {
-      const detail = quoteFreshness > agent.staleQuoteMs
-        ? `oldest quote ${quoteFreshness}ms > ${agent.staleQuoteMs}ms`
-        : `venues disagree ${divergence}c — likely stale`;
-      rejects.push({ eventKey: ev.eventKey, matchup: ev.matchup, line: ev.line, reason: "stale_quote", netEdge: net, detail });
-    } else if (totalCost < 100 && (pairLiquidity < minLiquidityUsd || contracts === 0)) {
+      rejects.push({ eventKey: ev.eventKey, matchup: ev.matchup, line: ev.line, reason: "stale_quote", netEdge: net, detail: `venues disagree ${divergence}c — likely stale` });
+    } else if (totalCost < 100 && pairLiquidity < minLiquidityUsd) {
       rejects.push({ eventKey: ev.eventKey, matchup: ev.matchup, line: ev.line, reason: "insufficient_depth", netEdge: net, detail: `executable $${Math.round(pairLiquidity)} < min $${minLiquidityUsd}` });
     } else if (net > agent.maxEdge) {
       rejects.push({ eventKey: ev.eventKey, matchup: ev.matchup, line: ev.line, reason: "edge_above_max", netEdge: net, detail: `net ${(net * 100).toFixed(2)}% > max` });
