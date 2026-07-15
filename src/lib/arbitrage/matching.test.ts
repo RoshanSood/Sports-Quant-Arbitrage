@@ -7,15 +7,15 @@ function nm(
   marketType: MarketType,
   outcome: Outcome,
   priceCents: number,
-  opts: { line?: number | null; teams?: [string, string]; liquidityUsd?: number; startTime?: string } = {}
+  opts: { line?: number | null; teams?: [string, string]; liquidityUsd?: number } = {}
 ): NormalizedMarket {
-  const { line = null, teams = ["Reds", "Phillies"], liquidityUsd = 100, startTime = "2026-07-10T17:05:00.000Z" } = opts;
+  const { line = null, teams = ["Reds", "Phillies"], liquidityUsd = 100 } = opts;
   return {
     venueId: venue,
     marketId: `${venue}:401:${marketType}:${line ?? 0}:${outcome}`,
     sport: "baseball",
     league: "mlb",
-    startTime,
+    startTime: "2026-07-10",
     teams,
     marketType,
     line,
@@ -62,19 +62,6 @@ describe("matching — totals", () => {
       nm("kalshi", "total", "under", 49, { line: 6.5 }),
     ]);
     expect(matched).toHaveLength(0);
-  });
-
-  it("keeps same-team doubleheaders in separate event buckets", () => {
-    const early = "2026-07-10T17:05:00.000Z";
-    const late = "2026-07-10T23:05:00.000Z";
-    const { matched } = matchTotals([
-      nm("kalshi", "total", "over", 51, { line: 6.5, startTime: early }),
-      nm("polymarket", "total", "under", 48, { line: 6.5, startTime: early }),
-      nm("kalshi", "total", "over", 50, { line: 8.5, startTime: late }),
-      nm("polymarket", "total", "under", 49, { line: 8.5, startTime: late }),
-    ]);
-    expect(matched).toHaveLength(2);
-    expect(new Set(matched.map((event) => event.eventKey)).size).toBe(2);
   });
 });
 

@@ -11,7 +11,11 @@ import {
   type VenueTotalLine,
   type VenueTwoWay,
 } from "@/lib/kalshi";
-import { fetchPolymarketArbMarkets } from "@/lib/polymarketArbitrage";
+import {
+  fetchPolymarketMoneylineByGame,
+  fetchPolymarketSpreadByGame,
+  fetchPolymarketTotalsByGame,
+} from "@/lib/polymarket";
 import { fetchSxBetMLBMarkets, type SxBetMarkets } from "@/lib/sxbet";
 import type { NormalizedMarket, Outcome, Sport, VenueId } from "@/types/arbitrage";
 import { decimalOddsFromCents, impliedProbFromCents } from "./arbMath";
@@ -35,13 +39,6 @@ function nativeSideFor(
   return undefined;
 }
 
-function gameMarketState(game: ArbGame): Pick<NormalizedMarket, "live" | "status"> {
-  const status = game.status.toLowerCase();
-  if (/final|completed|canceled|cancelled|postponed/.test(status)) return { live: false, status: "closed" };
-  if (/delayed|suspended/.test(status)) return { live: false, status: "suspended" };
-  return { live: /in progress|inning|quarter|half/.test(status), status: "open" };
-}
-
 function normalizeVenueTotals(
   venueId: VenueId,
   game: ArbGame,
@@ -52,7 +49,6 @@ function normalizeVenueTotals(
 ): NormalizedMarket[] {
   if (!lines?.length) return [];
   const teams: [string, string] = [game.awayTeam.shortName, game.homeTeam.shortName];
-  const state = gameMarketState(game);
   const rows: NormalizedMarket[] = [];
   for (const l of lines) {
     for (const [outcome, priceCents, liqUsd, tokenId, sxIsOne] of [
@@ -60,16 +56,16 @@ function normalizeVenueTotals(
       ["under", l.underCents, l.underLiquidityUsd, l.underTokenId, l.overIsOutcomeOne === undefined ? undefined : !l.overIsOutcomeOne] as const,
     ]) {
       if (priceCents <= 0 || priceCents >= 100) continue;
-      const liquidityUsd = Number.isFinite(liqUsd) ? Number(Math.max(0, liqUsd).toFixed(4)) : 0;
+      const liquidityUsd = Number.isFinite(liqUsd) ? Math.round(liqUsd) : 0;
       rows.push({
         venueId,
         marketId: `${venueId}:${game.id}:total:${l.line}:${outcome}`,
         // Kalshi totals: buying OVER = buy YES, UNDER = buy NO, on the line's ticker.
-        nativeMarketId: outcome === "over" ? l.overNativeMarketId ?? l.marketId : l.underNativeMarketId ?? l.marketId,
+        nativeMarketId: l.marketId,
         nativeSide: nativeSideFor(venueId, { kalshiYesNo: outcome === "over" ? "yes" : "no", polyTokenId: tokenId, sxIsOne }),
         sport,
         league,
-        startTime: game.startTimeIso || game.date,
+        startTime: game.date,
         teams,
         marketType: "total",
         line: l.line,
@@ -77,10 +73,10 @@ function normalizeVenueTotals(
         priceCents,
         decimalOdds: decimalOddsFromCents(priceCents),
         impliedProbability: impliedProbFromCents(priceCents),
-        feeRate: l.feeRate,
         depth: priceCents > 0 ? Math.floor(liquidityUsd / (priceCents / 100)) : 0,
         liquidityUsd,
-        ...state,
+        live: true,
+        status: "open",
         lastUpdated: now,
       });
     }
@@ -99,7 +95,6 @@ function normalizeVenueTwoWay(
 ): NormalizedMarket[] {
   if (!q) return [];
   const teams: [string, string] = [game.awayTeam.shortName, game.homeTeam.shortName];
-  const state = gameMarketState(game);
   const line = marketType === "spread" ? q.homeSignedLine ?? null : null;
   const lineKey = marketType === "spread" ? String(q.homeSignedLine ?? 0) : "0";
   const rows: NormalizedMarket[] = [];
@@ -108,12 +103,12 @@ function normalizeVenueTwoWay(
     ["away", q.awayCents, q.awayLiquidityUsd, q.awayTokenId, q.homeIsOutcomeOne === undefined ? undefined : !q.homeIsOutcomeOne] as const,
   ]) {
     if (priceCents <= 0 || priceCents >= 100) continue;
-    const liquidityUsd = Number.isFinite(liqUsd) ? Number(Math.max(0, liqUsd).toFixed(4)) : 0;
+    const liquidityUsd = Number.isFinite(liqUsd) ? Math.round(liqUsd) : 0;
     rows.push({
       venueId,
       marketId: `${venueId}:${game.id}:${marketType}:${lineKey}:${outcome}`,
       // Kalshi two-way: buy YES on the team the market's YES side represents, else NO.
-      nativeMarketId: outcome === "home" ? q.homeNativeMarketId ?? q.marketId : q.awayNativeMarketId ?? q.marketId,
+      nativeMarketId: q.marketId,
       nativeSide: nativeSideFor(venueId, {
         kalshiYesNo: q.yesSide && outcome === q.yesSide ? "yes" : "no",
         polyTokenId: tokenId,
@@ -121,7 +116,7 @@ function normalizeVenueTwoWay(
       }),
       sport,
       league,
-      startTime: game.startTimeIso || game.date,
+      startTime: game.date,
       teams,
       marketType,
       line,
@@ -129,10 +124,10 @@ function normalizeVenueTwoWay(
       priceCents,
       decimalOdds: decimalOddsFromCents(priceCents),
       impliedProbability: impliedProbFromCents(priceCents),
-      feeRate: q.feeRate,
       depth: priceCents > 0 ? Math.floor(liquidityUsd / (priceCents / 100)) : 0,
       liquidityUsd,
-      ...state,
+      live: true,
+      status: "open",
       lastUpdated: now,
     });
   }
@@ -162,15 +157,13 @@ export async function ingestTotals(date: string): Promise<IngestResult> {
       gameCount += games.length;
       if (!games.length) return;
 
-      const [kTot, poly, kML, kSp, sx] = await Promise.all([
+      const [kTot, pTot, kML, pML, kSp, pSp, sx] = await Promise.all([
         fetchKalshiTotalsByGame(games, cfg.kalshi.total).catch(() => new Map<string, VenueTotalLine[]>()),
-        fetchPolymarketArbMarkets(games, cfg.polyTag).catch(() => ({
-          totals: new Map<string, VenueTotalLine[]>(),
-          moneyline: new Map<string, VenueTwoWay>(),
-          spread: new Map<string, VenueSpread>(),
-        })),
+        fetchPolymarketTotalsByGame(games, cfg.polyTag).catch(() => new Map<string, VenueTotalLine[]>()),
         fetchKalshiMoneylineByGame(games, cfg.kalshi.game).catch(() => new Map<string, VenueTwoWay>()),
+        fetchPolymarketMoneylineByGame(games, cfg.polyTag).catch(() => new Map<string, VenueTwoWay>()),
         fetchKalshiSpreadByGame(games, cfg.kalshi.spread, cfg.spreadFixedLine).catch(() => new Map<string, VenueSpread>()),
+        fetchPolymarketSpreadByGame(games, cfg.polyTag).catch(() => new Map<string, VenueSpread>()),
         fetchSxBetMLBMarkets(games, cfg.sxLeagueId).catch(() => EMPTY_SX),
       ]);
 
@@ -181,9 +174,9 @@ export async function ingestTotals(date: string): Promise<IngestResult> {
           ...normalizeVenueTwoWay("kalshi", game, kSp.get(game.id), "spread", cfg.sport, cfg.league, now),
         ];
         const pRows = [
-          ...normalizeVenueTotals("polymarket", game, poly.totals.get(game.id), cfg.sport, cfg.league, now),
-          ...normalizeVenueTwoWay("polymarket", game, poly.moneyline.get(game.id), "moneyline", cfg.sport, cfg.league, now),
-          ...normalizeVenueTwoWay("polymarket", game, poly.spread.get(game.id), "spread", cfg.sport, cfg.league, now),
+          ...normalizeVenueTotals("polymarket", game, pTot.get(game.id), cfg.sport, cfg.league, now),
+          ...normalizeVenueTwoWay("polymarket", game, pML.get(game.id), "moneyline", cfg.sport, cfg.league, now),
+          ...normalizeVenueTwoWay("polymarket", game, pSp.get(game.id), "spread", cfg.sport, cfg.league, now),
         ];
         const sRows = [
           ...normalizeVenueTotals("sxbet", game, sx.totals.get(game.id), cfg.sport, cfg.league, now),

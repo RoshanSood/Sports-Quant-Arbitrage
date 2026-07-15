@@ -118,7 +118,6 @@ export async function fetchWNBAGames(date: string): Promise<WNBAGame[]> {
     return {
       id: event.id as string,
       date: (event.date as string)?.split("T")[0] ?? date,
-      startTimeIso: (event.date as string) ?? "",
       startTime: formatTime(event.date as string),
       status,
       awayTeam: { ...awayBase, injuries: injuryMap.get(awayBase.id) ?? [] },
@@ -152,7 +151,6 @@ export async function fetchWNBAGame(gameId: string): Promise<WNBAGame | null> {
     return {
       id: gameId,
       date: dateStr.split("T")[0] ?? "",
-      startTimeIso: dateStr,
       startTime: formatTime(dateStr),
       status,
       awayTeam: { ...awayBase, injuries: injuryMap.get(awayBase.id) ?? [] },

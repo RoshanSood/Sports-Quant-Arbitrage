@@ -5,7 +5,7 @@ import type { ArbLeg, FeeBreakdown, VenueId } from "@/types/arbitrage";
 import { centsToDollars } from "./arbMath";
 
 export const KALSHI_FEE_TIER = 0.07; // default 7% tier
-export const POLYMARKET_SPORTS_FEE = 0.03;
+export const POLYMARKET_SPORTS_FEE = 0.0075; // 0.75% sports taker fee
 export const SXBET_TAKER_FEE = 0; // SX.bet charges no taker commission on fills (configurable)
 
 // Kalshi: fee = tier * P * (1 - P), where P is the contract probability (0-1).
@@ -15,29 +15,22 @@ export function kalshiFeePerContract(prob: number, tier = KALSHI_FEE_TIER): numb
   return round(tier * p * (1 - p), 6);
 }
 
-// The published fee schedule rounds an order's aggregate fee upward. A whole-cent
-// ceiling is conservative across Kalshi's fill-level rounding/rebate mechanics.
-export function kalshiFee(contracts: number, probability: number, tier = KALSHI_FEE_TIER): number {
-  const raw = Math.max(0, contracts) * kalshiFeePerContract(probability, tier);
-  if (raw <= 0) return 0;
-  return Math.ceil((raw - Number.EPSILON) * 100) / 100;
+// Polymarket: flat category taker fee on notional (dollars).
+export function polymarketFee(notional: number, rate = POLYMARKET_SPORTS_FEE): number {
+  return round(Math.max(0, notional) * rate, 4);
 }
 
-// Polymarket charges takers per share using feeRate * p * (1-p).
-export function polymarketFee(contracts: number, probability: number, rate = POLYMARKET_SPORTS_FEE): number {
-  const p = clamp01(probability);
-  return round(Math.max(0, contracts) * rate * p * (1 - p), 5);
-}
-
-// Compute a per-leg fee breakdown from the actual planned contract count.
+// Compute a per-leg fee breakdown. Contract sizes come from the stake plan; if a
+// leg has no size yet (detection stage), fee falls back to the per-unit rate.
 export function computeFees(legs: ArbLeg[]): FeeBreakdown[] {
   return legs.map((leg) => {
     const isKalshi = leg.venueId.toLowerCase().includes("kalshi");
     const prob = leg.impliedProbability;
-    const contracts = Math.max(0, leg.size);
+    const contracts = leg.size > 0 ? leg.size : 1;
 
     if (isKalshi) {
-      const feeDollars = kalshiFee(contracts, prob);
+      const perContract = kalshiFeePerContract(prob);
+      const feeDollars = round(perContract * contracts, 4);
       return {
         venueId: leg.venueId,
         feeCents: round(feeDollars * 100, 4),
@@ -49,15 +42,12 @@ export function computeFees(legs: ArbLeg[]): FeeBreakdown[] {
     const isPoly = leg.venueId.toLowerCase().includes("poly");
     const notional = centsToDollars(leg.priceCents) * contracts;
     if (isPoly) {
-      // Gamma exposes the fee curve rate per market; use the documented sports
-      // category rate only when the market-specific value is unavailable.
-      const feeRate = leg.feeRate ?? POLYMARKET_SPORTS_FEE;
-      const feeDollars = polymarketFee(contracts, prob, feeRate);
+      const feeDollars = polymarketFee(notional);
       return {
         venueId: leg.venueId,
         feeCents: round(feeDollars * 100, 4),
-        feeRate,
-        model: "polymarket_sports" as const,
+        feeRate: POLYMARKET_SPORTS_FEE,
+        model: "polymarket_flat" as const,
       };
     }
 

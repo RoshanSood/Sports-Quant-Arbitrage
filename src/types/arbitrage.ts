@@ -69,12 +69,12 @@ export type ArbResult = "executed" | "halted" | "failed" | "partial" | "naked";
 
 // ── Supporting shapes ────────────────────────────────────────────────────────
 
-export type FeeModel = "kalshi_tier" | "polymarket_sports" | "sxbet_flat" | "placeholder";
+export type FeeModel = "kalshi_tier" | "polymarket_flat" | "sxbet_flat" | "placeholder";
 
 export type FeeBreakdown = {
   venueId: VenueId;
   feeCents: number; // fee attributable to this leg, in cents
-  feeRate: number; // effective curve rate as a fraction (e.g. 0.05)
+  feeRate: number; // effective rate as a fraction (e.g. 0.0075)
   model: FeeModel;
 };
 
@@ -85,7 +85,6 @@ export type ArbLeg = {
   priceCents: number; // executable price in cents (0-100)
   decimalOdds: number; // 100 / priceCents
   impliedProbability: number; // priceCents / 100
-  feeRate?: number; // venue-provided taker fee curve rate when available
   size: number; // contracts / shares
   feeCents: number; // fee for this leg in cents
   liquidityUsd?: number; // executable $ available at the ask (top of book)
@@ -146,7 +145,6 @@ export type NormalizedMarket = {
   priceCents: number;
   decimalOdds: number;
   impliedProbability: number;
-  feeRate?: number; // venue-provided taker fee curve rate when available
   depth: number; // executable contracts at the ask (top of book)
   liquidityUsd: number; // executable $ at the ask (top of book)
   live: boolean;
@@ -187,9 +185,7 @@ export type MatchedLeg = {
   priceCents: number;
   decimalOdds: number;
   impliedProbability: number;
-  feeRate?: number;
   liquidityUsd: number; // executable $ at the ask
-  lastUpdated: string;
   label: string; // human-readable side, e.g. "over 6.5" or team name
 };
 
