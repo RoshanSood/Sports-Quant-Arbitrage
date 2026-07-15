@@ -112,7 +112,9 @@ function toLeg(m: NormalizedMarket): MatchedLeg {
     priceCents: m.priceCents,
     decimalOdds: m.decimalOdds,
     impliedProbability: m.impliedProbability,
+    feeRate: m.feeRate,
     liquidityUsd: m.liquidityUsd,
+    lastUpdated: m.lastUpdated,
     label: legLabel(m),
   };
 }
