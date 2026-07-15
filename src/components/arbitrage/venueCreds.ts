@@ -30,12 +30,32 @@ export function saveVenueCreds(venueId: string, creds: PolyCreds | SxCreds): voi
   if (typeof window === "undefined") return;
   const key = venueId === "polymarket" ? POLY_CREDS_KEY : SX_CREDS_KEY;
   localStorage.setItem(key, JSON.stringify(creds));
+  emitCredsChanged();
 }
 
 export function clearVenueCreds(venueId: string): void {
   if (typeof window === "undefined") return;
   const key = venueId === "polymarket" ? POLY_CREDS_KEY : SX_CREDS_KEY;
   localStorage.removeItem(key);
+  emitCredsChanged();
+}
+
+// True when this browser has credentials stored for a venue (Kalshi API creds, or an
+// on-chain wallet key). Drives the "connected" indicator on the arena nodes.
+export function hasVenueCreds(venueId: string): boolean {
+  if (typeof window === "undefined") return false;
+  if (venueId === "kalshi") {
+    const c = read<{ keyId?: string; privateKey?: string }>(KALSHI_CREDS_KEY);
+    return Boolean(c?.keyId && c?.privateKey);
+  }
+  return Boolean(loadVenueCreds(venueId)?.key);
+}
+
+// Same-tab notification that stored creds changed (localStorage's own `storage` event
+// only fires in OTHER tabs). Components re-read on this to stay in sync.
+export const CREDS_CHANGED_EVENT = "arb-creds-changed";
+export function emitCredsChanged(): void {
+  if (typeof window !== "undefined") window.dispatchEvent(new Event(CREDS_CHANGED_EVENT));
 }
 
 // Headers carrying the on-chain wallet creds (base64 keys). Empty when none stored.

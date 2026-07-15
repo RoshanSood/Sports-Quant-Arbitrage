@@ -1,9 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Check, X } from "lucide-react";
+import { Check, KeyRound, X } from "lucide-react";
 import type { ArbLog, Venue } from "@/types/arbitrage";
 import { venueStatusColor } from "./arbFormat";
+import { CREDS_CHANGED_EVENT, hasVenueCreds } from "./venueCreds";
 import ActivityFeed from "./ActivityFeed";
 
 // Fractional layout (0-1 of the canvas) for the default node positions. Users can
@@ -51,6 +52,20 @@ export default function ArenaCanvas({
   const [size, setSize] = useState({ w: 1000, h: 640 });
   const [overrides, setOverrides] = useState<Record<string, Pos>>({});
   const dragRef = useRef<{ id: string; moved: boolean } | null>(null);
+
+  // Which venues have credentials entered in THIS browser (drives the key badge). Starts
+  // empty (SSR-safe), then the effect computes it and re-checks whenever creds change.
+  const [connected, setConnected] = useState<Record<string, boolean>>({});
+  useEffect(() => {
+    const refresh = () => setConnected(Object.fromEntries(venues.map((v) => [v.id, hasVenueCreds(v.id)])));
+    window.addEventListener(CREDS_CHANGED_EVENT, refresh);
+    window.addEventListener("focus", refresh);
+    window.dispatchEvent(new Event(CREDS_CHANGED_EVENT)); // initial compute via the handler
+    return () => {
+      window.removeEventListener(CREDS_CHANGED_EVENT, refresh);
+      window.removeEventListener("focus", refresh);
+    };
+  }, [venues]);
 
   useEffect(() => {
     const el = canvasRef.current;
@@ -228,6 +243,13 @@ export default function ArenaCanvas({
                 }}
               >
                 <span className="absolute top-2 right-2 w-2 h-2 rounded-full" style={{ background: venueStatusColor(v.status) }} />
+                {/* Credential badge: green key when this browser has creds for the venue. */}
+                <span
+                  className="absolute top-1.5 left-2 grid place-items-center"
+                  title={connected[v.id] ? "Credentials entered" : "No credentials — open to add"}
+                >
+                  <KeyRound className="w-3 h-3" style={{ color: connected[v.id] ? "#22c55e" : "#3a3f4b" }} />
+                </span>
                 <div className="text-lg font-bold" style={{ color: v.color ?? "#e5e7eb" }}>{v.abbr}</div>
                 <div className="text-[11px] text-gray-400">{v.name}</div>
                 {v.activeEdges ? (

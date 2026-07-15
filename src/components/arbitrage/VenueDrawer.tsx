@@ -5,7 +5,7 @@ import { KeyRound, ShieldCheck } from "lucide-react";
 import type { ArbOpportunity, NormalizedMarket, Venue } from "@/types/arbitrage";
 import { Drawer, Toggle, Pill } from "./ui";
 import { formatCents, formatEdgePct, formatOdds, venueStatusColor, venueStatusLabel } from "./arbFormat";
-import { clearVenueCreds, loadVenueCreds, onchainAuthHeaders, saveVenueCreds, type PolyCreds } from "./venueCreds";
+import { clearVenueCreds, emitCredsChanged, loadVenueCreds, onchainAuthHeaders, saveVenueCreds, type PolyCreds } from "./venueCreds";
 
 type Tab = "status" | "live" | "edges" | "settings" | "credentials";
 
@@ -177,6 +177,7 @@ function KalshiCredsForm() {
   function save() {
     if (!keyId.trim() || !pem.trim()) return;
     localStorage.setItem(KALSHI_CREDS_KEY, JSON.stringify({ keyId: keyId.trim(), privateKey: pem }));
+    emitCredsChanged();
     setSaved(true);
     setHasStored(true);
     setKeyId("");
@@ -185,6 +186,7 @@ function KalshiCredsForm() {
   }
   function clear() {
     localStorage.removeItem(KALSHI_CREDS_KEY);
+    emitCredsChanged();
     setHasStored(false);
   }
 
