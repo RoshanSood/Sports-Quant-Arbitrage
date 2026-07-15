@@ -222,8 +222,8 @@ function KalshiCredsForm() {
         </button>
       </div>
       <p className="text-[10px] text-gray-600">
-        Used to sign your real Kalshi orders. Live trading still requires the server&apos;s execution gate to be
-        enabled (ARB_EXECUTION_MODE=live + allowlist), and starts capped at a few dollars.
+        Used to sign your real Kalshi orders. Live trading still requires arming the agent&apos;s Live toggle in
+        Settings, and stays capped by the Risk panel&apos;s max live stake.
       </p>
     </div>
   );
@@ -248,7 +248,7 @@ const STATUS_STYLE: Record<string, { color: string; label: string }> = {
   error: { color: "#ef4444", label: "Error" },
 };
 
-type ExecGate = { onchainOrdersEnabled?: boolean };
+type ExecGate = { agentLive?: boolean; killSwitch?: boolean; maxLiveStakeUsd?: number };
 
 function OnchainStatus({ venueId }: { venueId: string }) {
   const name = venueId === "polymarket" ? "Polymarket" : venueId === "sxbet" ? "SX.bet" : venueId;
@@ -330,7 +330,7 @@ function OnchainStatus({ venueId }: { venueId: string }) {
   }
 
   const s = status ? STATUS_STYLE[status.status] ?? STATUS_STYLE.error : null;
-  const armed = gate?.onchainOrdersEnabled === true;
+  const armed = gate?.agentLive === true && gate?.killSwitch !== true;
 
   return (
     <div className="space-y-3">
@@ -339,8 +339,8 @@ function OnchainStatus({ venueId }: { venueId: string }) {
         <p className="text-gray-400 mt-0.5">
           A wallet private key controls <strong>all</strong> funds in that wallet. It&apos;s kept only in{" "}
           <strong>this browser</strong>, sent to sign transactions, and never stored on the server or shown again. Use a
-          dedicated wallet funded with just your trading USDC. Order signing only fires when{" "}
-          <code className="text-gray-300">ARB_ONCHAIN_ORDERS_ENABLED=true</code> and every execution-gate switch passes.
+          dedicated wallet funded with just your trading USDC. A live order only fires when the agent&apos;s{" "}
+          <strong>Live</strong> toggle (Settings) is on, the kill switch is off, and the stake is under the Risk cap.
         </p>
       </div>
 
@@ -410,10 +410,10 @@ function OnchainStatus({ venueId }: { venueId: string }) {
 
       {status?.configured && (
         <div className="rounded-lg border px-3 py-2 text-[11px] flex items-center justify-between" style={{ borderColor: "#1e2130", background: "#0e1014" }}>
-          <span className="text-gray-400">On-chain orders</span>
-          <span className="inline-flex items-center gap-1.5" style={{ color: armed ? "#22c55e" : "#6b7280" }}>
+          <span className="text-gray-400">Live orders {gate?.maxLiveStakeUsd != null ? `(cap $${gate.maxLiveStakeUsd})` : ""}</span>
+          <span className="inline-flex items-center gap-1.5" style={{ color: armed ? "#22c55e" : "#6b7280" }} title={armed ? "Agent Live toggle is on" : "Agent is in paper mode — flip Live in Settings"}>
             <span className="w-2 h-2 rounded-full" style={{ background: armed ? "#22c55e" : "#6b7280" }} />
-            {armed ? "Armed" : "Disarmed (default)"}
+            {armed ? "Armed (agent live)" : "Paper (default)"}
           </span>
         </div>
       )}

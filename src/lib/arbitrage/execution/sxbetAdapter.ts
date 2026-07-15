@@ -4,8 +4,9 @@
 // bookkeeping. Signing follows SX's documented EIP-712 schema (domain verifyingContract
 // = EIP712FillHasher from /metadata). The wallet key is server-side only.
 //
-// supportsLive() stays false until the operator flips ARB_ONCHAIN_ORDERS_ENABLED after a
-// verified signer + paper run + a $1 live fill. The execution gate still applies on top.
+// A venue is live-capable once its wallet key is present; whether a live order actually
+// fires is decided by the execution gate (agent Live toggle + kill switch + UI stake cap
+// + admin auth) — validate with a $1 fill before raising the cap.
 //
 // NOTE: the exact HTTP request/response envelope of /orders/fill/v2 must be confirmed
 // against a live $1 fill before enabling; the EIP-712 signing schema below is quoted
@@ -13,7 +14,6 @@
 
 import { Wallet, ZeroAddress, ZeroHash, hexlify, randomBytes } from "ethers";
 import { SX_CHAIN_ID } from "./chains";
-import { onchainOrdersEnabled } from "./config";
 import { getSxMetadata } from "./sxMeta";
 import { verifySx } from "./verify";
 import type { SxbetCreds } from "./onchainCreds";
@@ -129,7 +129,9 @@ export class SxBetExecutionAdapter implements ExecutionAdapter {
   }
 
   supportsLive(): boolean {
-    return Boolean(this.key()) && onchainOrdersEnabled();
+    // Live-capable once a wallet key is present (entered in the UI or env). The gate
+    // (agent live toggle + kill switch + stake cap + admin auth) decides if it fires.
+    return Boolean(this.key());
   }
 
   async getBalanceUsd(): Promise<number | null> {
@@ -139,7 +141,6 @@ export class SxBetExecutionAdapter implements ExecutionAdapter {
 
   async placeOrder(req: OrderRequest): Promise<OrderResult> {
     if (!this.key()) return reject(req, "SX.bet wallet key not configured");
-    if (!onchainOrdersEnabled()) return reject(req, "on-chain orders disabled (set ARB_ONCHAIN_ORDERS_ENABLED=true after $1 validation)");
 
     const marketHash = req.nativeMarketId;
     const side = (req.nativeSide ?? "").toLowerCase();

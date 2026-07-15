@@ -1,53 +1,23 @@
-// Execution safety gate (manual §18). Real orders are OFF by default at every layer.
+// Execution safety gate. Arming is fully UI-driven — no environment variables. Real
+// orders are still OFF by default because a fresh agent seeds paper:true / live:false.
 // A leg only reaches a venue with real money when EVERY independent switch is on:
 //
-//   1. ARB_EXECUTION_MODE=live         (global env kill switch, default dry_run)
-//   2. the leg's venue is in ARB_LIVE_VENUES allowlist (env, default empty)
-//   3. the caller explicitly requested mode "live"
-//   4. the agent is NOT paper (agent.paper === false)
-//   5. the risk kill switch is OFF
-//   6. total stake ≤ ARB_MAX_LIVE_STAKE_USD (env, small default)
-//   7. the venue adapter reports supportsLive() (credentials/signer configured)
+//   1. the caller explicitly requested mode "live"        (the "Live" button in Play)
+//   2. the agent is NOT paper (agent.paper === false)      (Settings toggle)
+//   3. the agent's live switch is ON (agent.live === true) (Settings toggle)
+//   4. the risk kill switch is OFF                          (Risk panel)
+//   5. total stake ≤ the risk panel's max live stake        (Risk panel, UI-configured)
+//   6. the venue adapter reports supportsLive() (credentials/signer entered in the UI)
 //
 // If any switch is off, execution falls back to DRY-RUN (simulated) — never a real
-// order. This module owns switches 1, 2, 6.
+// order — and reports the blockers for transparency.
 
 export type ExecMode = "dry_run" | "live";
 
-// Global mode. Anything other than the exact string "live" is dry-run.
-export function getExecutionMode(): ExecMode {
-  return process.env.ARB_EXECUTION_MODE === "live" ? "live" : "dry_run";
-}
-
-// Comma-separated venue allowlist, e.g. ARB_LIVE_VENUES="kalshi,polymarket".
-export function liveVenueAllowlist(): Set<string> {
-  return new Set(
-    (process.env.ARB_LIVE_VENUES ?? "")
-      .split(",")
-      .map((s) => s.trim().toLowerCase())
-      .filter(Boolean)
-  );
-}
-
-export function isVenueLiveAllowed(venueId: string): boolean {
-  return liveVenueAllowlist().has(venueId.toLowerCase());
-}
-
-// Hard cap on the dollars any single live trade may commit. Defaults low on purpose;
-// validate the whole path at a few dollars before ever raising this.
-export function maxLiveStakeUsd(): number {
-  const v = Number(process.env.ARB_MAX_LIVE_STAKE_USD);
-  return Number.isFinite(v) && v > 0 ? v : 5;
-}
-
-// Separate, deliberately-off switch specific to the on-chain venues (Polymarket,
-// SX.bet). Order-signing code exists but stays inert until the operator sets this to
-// "true" AFTER validating signer verification + a paper run + a tiny ($1) live fill —
-// per the manual's "don't enable live until verification/paper/reconciliation work".
-// This is IN ADDITION to every switch in resolveExecutionMode (it does not bypass any).
-export function onchainOrdersEnabled(): boolean {
-  return process.env.ARB_ONCHAIN_ORDERS_ENABLED === "true";
-}
+// Default per-trade live cap (dollars) used to SEED risk settings on first run. After
+// that it's edited in the Risk panel (UI), not here — kept low on purpose so the whole
+// path is validated at a few dollars before the cap is ever raised.
+export const DEFAULT_MAX_LIVE_STAKE_USD = 5;
 
 export type GateInput = {
   requestedMode: ExecMode;
@@ -56,6 +26,7 @@ export type GateInput = {
   killSwitch: boolean;
   venues: string[];
   stakeUsd: number;
+  maxLiveStakeUsd: number; // from risk settings (UI-configured)
   venuesSupportLive: Record<string, boolean>;
 };
 
@@ -66,14 +37,12 @@ export type GateDecision = { mode: ExecMode; blockers: string[] };
 export function resolveExecutionMode(g: GateInput): GateDecision {
   const blockers: string[] = [];
   if (g.requestedMode !== "live") blockers.push("caller did not request live");
-  if (getExecutionMode() !== "live") blockers.push("ARB_EXECUTION_MODE is not 'live'");
   if (g.agentPaper) blockers.push("agent is in paper mode");
   if (!g.agentLive) blockers.push("agent live execution switch is off");
   if (g.killSwitch) blockers.push("risk kill switch is on");
-  if (g.stakeUsd > maxLiveStakeUsd()) blockers.push(`stake $${g.stakeUsd} exceeds live cap $${maxLiveStakeUsd()}`);
+  if (g.stakeUsd > g.maxLiveStakeUsd) blockers.push(`stake $${g.stakeUsd} exceeds live cap $${g.maxLiveStakeUsd}`);
   for (const v of g.venues) {
-    if (!isVenueLiveAllowed(v)) blockers.push(`venue ${v} not in ARB_LIVE_VENUES allowlist`);
-    if (!g.venuesSupportLive[v]) blockers.push(`venue ${v} adapter has no live credentials/signer`);
+    if (!g.venuesSupportLive[v]) blockers.push(`venue ${v} has no live credentials/signer`);
   }
   return { mode: blockers.length === 0 ? "live" : "dry_run", blockers };
 }

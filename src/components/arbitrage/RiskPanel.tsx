@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { ShieldAlert } from "lucide-react";
 import type { RiskSettings } from "@/types/arbitrage";
 import { FloatingPanel } from "./ui";
@@ -9,14 +10,22 @@ export default function RiskPanel({
   risk,
   killSwitch,
   onToggleKill,
+  onUpdateRisk,
   onClose,
 }: {
   risk: RiskSettings;
   killSwitch: boolean;
   onToggleKill: (v: boolean) => void;
+  onUpdateRisk: (partial: Partial<RiskSettings>) => void;
   onClose: () => void;
 }) {
   const exposurePct = risk.maxExposure > 0 ? Math.min(1, risk.currentExposure / risk.maxExposure) : 0;
+  const [stakeInput, setStakeInput] = useState(String(risk.maxLiveStakeUsd ?? 5));
+
+  function commitStake() {
+    const n = Number(stakeInput);
+    if (Number.isFinite(n) && n >= 0 && n !== risk.maxLiveStakeUsd) onUpdateRisk({ maxLiveStakeUsd: n });
+  }
 
   return (
     <FloatingPanel title="Risk" onClose={onClose} width="max-w-md">
@@ -36,6 +45,30 @@ export default function RiskPanel({
           <ShieldAlert className="w-3.5 h-3.5" />
           {killSwitch ? "ARMED — STOP ALL" : "KILL SWITCH"}
         </button>
+      </div>
+
+      {/* Live stake cap — the hard per-trade $ ceiling on REAL orders (UI-configured). */}
+      <div className="rounded-lg border px-3 py-2.5 mb-4" style={{ borderColor: "#3f2d10", background: "#1a160e" }}>
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="text-xs font-semibold text-amber-300">Max live stake</div>
+            <div className="text-[10px] text-gray-500">Hard cap on $ per real trade — keep low until validated</div>
+          </div>
+          <div className="flex items-center gap-1">
+            <span className="text-gray-400 text-sm">$</span>
+            <input
+              type="number"
+              min={0}
+              step={1}
+              value={stakeInput}
+              onChange={(e) => setStakeInput(e.target.value)}
+              onBlur={commitStake}
+              onKeyDown={(e) => e.key === "Enter" && commitStake()}
+              className="w-20 rounded bg-[#0b0d11] border px-2 py-1 text-sm text-right text-gray-100"
+              style={{ borderColor: "#3a2f17" }}
+            />
+          </div>
+        </div>
       </div>
 
       <div className="space-y-3 text-xs">

@@ -3,13 +3,13 @@
 // at our max price: it either fills entirely and immediately at ≤ our price, or is
 // killed — so we never leave a resting (naked) order, matching the arb "both legs or
 // nothing" requirement. The wallet key is read server-side only and never leaves the
-// process. supportsLive() stays false until the operator flips ARB_ONCHAIN_ORDERS_ENABLED
-// after a verified signer + paper run + $1 live fill. The gate still applies on top.
+// process. A venue is live-capable once its wallet key is present; whether a live order
+// actually fires is decided by the execution gate (agent Live toggle + kill switch +
+// UI stake cap + admin auth) — validate with a $1 trade before raising the cap.
 
 import { ClobClient, type ApiKeyCreds, Chain, OrderType, Side, SignatureType } from "@polymarket/clob-client";
 import { Wallet } from "ethers";
 import { POLYGON_CHAIN_ID, polymarketClobHost } from "./chains";
-import { onchainOrdersEnabled } from "./config";
 import type { PolymarketCreds } from "./onchainCreds";
 import { verifyPolymarket } from "./verify";
 import type { ExecutionAdapter, OrderRequest, OrderResult } from "./types";
@@ -77,7 +77,9 @@ export class PolymarketExecutionAdapter implements ExecutionAdapter {
   }
 
   supportsLive(): boolean {
-    return Boolean(this.key()) && onchainOrdersEnabled();
+    // Live-capable once a wallet key is present (entered in the UI or env). The gate
+    // (agent live toggle + kill switch + stake cap + admin auth) decides if it fires.
+    return Boolean(this.key());
   }
 
   async getBalanceUsd(): Promise<number | null> {
@@ -88,7 +90,6 @@ export class PolymarketExecutionAdapter implements ExecutionAdapter {
   async placeOrder(req: OrderRequest): Promise<OrderResult> {
     const key = this.key();
     if (!key) return reject(req, "Polymarket wallet key not configured");
-    if (!onchainOrdersEnabled()) return reject(req, "on-chain orders disabled (set ARB_ONCHAIN_ORDERS_ENABLED=true after $1 validation)");
 
     // For Polymarket we thread the ERC-1155 CLOB token id as the leg's nativeSide.
     const tokenID = req.nativeSide;

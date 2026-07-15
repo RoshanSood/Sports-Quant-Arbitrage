@@ -326,6 +326,7 @@ export type RiskSettings = {
   pauseOnNaked: boolean;
   staleQuoteMs: number;
   minLiquidityUsd: number; // drop legs with less executable $ than this (manual §13)
+  maxLiveStakeUsd: number; // hard cap on $ any single LIVE trade may commit (UI-configured)
   perVenueCap: Record<VenueId, number>;
 };
 

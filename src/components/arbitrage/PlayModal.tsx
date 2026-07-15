@@ -104,9 +104,9 @@ export default function PlayModal({
               <div className="flex items-start gap-1.5 text-[10px] text-red-300">
                 <TriangleAlert className="w-3.5 h-3.5 mt-px shrink-0" />
                 <span>
-                  Real money. This still passes through the server execution gate — it runs live only if
-                  ARB_EXECUTION_MODE=live, the venues are allowlisted, on-chain orders are armed, and the stake is
-                  under the cap. Otherwise it safely downgrades to dry-run.
+                  Real money. This still passes through the execution gate — it runs live only if the agent&apos;s
+                  Live toggle is on, the kill switch is off, the stake is under the Risk cap, and each venue has
+                  credentials. Otherwise it safely downgrades to dry-run.
                 </span>
               </div>
               <input

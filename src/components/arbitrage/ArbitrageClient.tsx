@@ -219,11 +219,24 @@ export default function ArbitrageClient() {
     }
   }, [agent.id]);
 
-  const toggleKill = useCallback((v: boolean) => {
-    setKillSwitch(v);
-    setRisk((prev) => ({ ...prev, killSwitch: v }));
-    if (v) setScanning(false);
+  // Persist risk changes server-side — the execution gate reads server risk.json, so a
+  // UI-only change (kill switch, live stake cap) must be PATCHed or it won't be enforced.
+  const updateRisk = useCallback((partial: Partial<RiskSettings>) => {
+    setRisk((prev) => ({ ...prev, ...partial }));
+    if (typeof partial.killSwitch === "boolean") setKillSwitch(partial.killSwitch);
+    if (!USE_MOCK) {
+      fetch("/api/arbitrage/risk", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(partial),
+      }).catch(console.error);
+    }
   }, []);
+
+  const toggleKill = useCallback((v: boolean) => {
+    updateRisk({ killSwitch: v });
+    if (v) setScanning(false);
+  }, [updateRisk]);
 
   // Pull real paper positions + logs written by the execution pipeline. First run
   // auto-settlement so any finished games close out and land in realized P&L.
@@ -437,7 +450,7 @@ export default function ArbitrageClient() {
           <PortfolioPanel trades={trades} live={portfolioLive} onSettle={settleTrade} onClose={() => setPanel(null)} />
         )}
         {panel === "risk" && (
-          <RiskPanel risk={risk} killSwitch={killSwitch} onToggleKill={toggleKill} onClose={() => setPanel(null)} />
+          <RiskPanel risk={risk} killSwitch={killSwitch} onToggleKill={toggleKill} onUpdateRisk={updateRisk} onClose={() => setPanel(null)} />
         )}
         {panel === "matchmap" && <MatchMapPanel data={matchMap} live={marketsLive} onClose={() => setPanel(null)} />}
         {panel === "log" && <ArbLogPanel logs={logs} live={portfolioLive} onClose={() => setPanel(null)} />}

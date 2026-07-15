@@ -8,7 +8,10 @@ const FILE = path.join(DATA_DIR, "risk.json");
 
 export async function getRiskSettings(): Promise<RiskSettings> {
   try {
-    return JSON.parse(await fs.readFile(FILE, "utf-8")) as RiskSettings;
+    const stored = JSON.parse(await fs.readFile(FILE, "utf-8")) as Partial<RiskSettings>;
+    // Merge over defaults so fields added later (e.g. maxLiveStakeUsd) are always present
+    // — a missing live cap must never read as undefined and bypass the stake check.
+    return { ...DEFAULT_RISK, ...stored };
   } catch {
     await write(DEFAULT_RISK);
     return DEFAULT_RISK;

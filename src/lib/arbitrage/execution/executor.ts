@@ -29,6 +29,7 @@ export async function runExecution(
     killSwitch: ctx.risk.killSwitch,
     venues: ctx.venues,
     stakeUsd: ctx.totalStake,
+    maxLiveStakeUsd: ctx.risk.maxLiveStakeUsd,
     venuesSupportLive: venueSupportsLive(ctx.venues, creds),
   });
   const mode = gate.mode;
