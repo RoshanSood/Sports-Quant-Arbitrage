@@ -40,6 +40,15 @@ export function maxLiveStakeUsd(): number {
   return Number.isFinite(v) && v > 0 ? v : 5;
 }
 
+// Separate, deliberately-off switch specific to the on-chain venues (Polymarket,
+// SX.bet). Order-signing code exists but stays inert until the operator sets this to
+// "true" AFTER validating signer verification + a paper run + a tiny ($1) live fill —
+// per the manual's "don't enable live until verification/paper/reconciliation work".
+// This is IN ADDITION to every switch in resolveExecutionMode (it does not bypass any).
+export function onchainOrdersEnabled(): boolean {
+  return process.env.ARB_ONCHAIN_ORDERS_ENABLED === "true";
+}
+
 export type GateInput = {
   requestedMode: ExecMode;
   agentPaper: boolean;

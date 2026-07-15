@@ -15,6 +15,7 @@ type PolymarketMarket = {
   bestAsk?: number; // best ask for the first-outcome token (Gamma)
   liquidityNum?: number; // $ liquidity resting in the CLOB book (Gamma)
   tokens?: Array<{ token_id: string; outcome: string; price?: number }>;
+  clobTokenIds?: string; // JSON array of ERC-1155 token ids, parallel to `outcomes`
 };
 
 type PolymarketEvent = {
@@ -101,9 +102,14 @@ function priceToDisplayCents(price: number | null | undefined): string {
   return `${Math.round(price * 100)}¢`;
 }
 
-function parseOutcomes(market: PolymarketMarket): { outcomes: string[]; prices: (number | null)[] } {
+function parseOutcomes(market: PolymarketMarket): {
+  outcomes: string[];
+  prices: (number | null)[];
+  tokenIds: (string | null)[];
+} {
   let outcomes: string[] = [];
   let prices: (number | null)[] = [];
+  let tokenIds: (string | null)[] = [];
 
   try {
     if (market.outcomes) outcomes = JSON.parse(market.outcomes);
@@ -112,6 +118,9 @@ function parseOutcomes(market: PolymarketMarket): { outcomes: string[]; prices: 
         p != null && p !== "" ? Number(p) : null
       );
     }
+    // clobTokenIds is a JSON string array parallel to `outcomes` — the ERC-1155 asset
+    // id per outcome, which live order placement signs against.
+    if (market.clobTokenIds) tokenIds = JSON.parse(market.clobTokenIds);
   } catch {
     // ignore
   }
@@ -120,8 +129,21 @@ function parseOutcomes(market: PolymarketMarket): { outcomes: string[]; prices: 
     outcomes = market.tokens.map((t) => t.outcome);
     prices = market.tokens.map((t) => t.price ?? null);
   }
+  if (tokenIds.length === 0 && market.tokens) {
+    tokenIds = market.tokens.map((t) => t.token_id ?? null);
+  }
 
-  return { outcomes, prices };
+  return { outcomes, prices, tokenIds };
+}
+
+// Resolve the token id for a named outcome ("over"/"under"/"yes"/"no" or a team).
+function tokenIdFor(
+  outcomes: string[],
+  tokenIds: (string | null)[],
+  match: (label: string) => boolean
+): string | undefined {
+  const i = outcomes.findIndex((o) => match(o.toLowerCase()));
+  return i >= 0 ? tokenIds[i] ?? undefined : undefined;
 }
 
 function formatVolume(vol: string | number | null | undefined): string | null {
@@ -364,10 +386,13 @@ export async function fetchPolymarketTotalsByGame(
     if (matchedEvents.length === 0) continue;
     const event = pickBestEvent(matchedEvents, game.date);
 
-    const byLine = new Map<number, { overCents: number; underCents: number; overLiquidityUsd: number; underLiquidityUsd: number; id: string }>();
+    const byLine = new Map<
+      number,
+      { overCents: number; underCents: number; overLiquidityUsd: number; underLiquidityUsd: number; id: string; overTokenId?: string; underTokenId?: string }
+    >();
     for (const market of event.markets ?? []) {
       if (classifyMarket(market) !== "total") continue;
-      const { outcomes, prices } = parseOutcomes(market);
+      const { outcomes, prices, tokenIds } = parseOutcomes(market);
       if (isSettledMarket(prices)) continue;
 
       const lineMatch = market.question.match(/(\d+\.?\d*)/g);
@@ -417,6 +442,8 @@ export async function fetchPolymarketTotalsByGame(
           overLiquidityUsd: liq,
           underLiquidityUsd: liq,
           id: market.id,
+          overTokenId: tokenIdFor(outcomes, tokenIds, (l) => l === "over" || l === "yes"),
+          underTokenId: tokenIdFor(outcomes, tokenIds, (l) => l === "under" || l === "no"),
         });
       }
     }
@@ -431,6 +458,8 @@ export async function fetchPolymarketTotalsByGame(
         overLiquidityUsd: q.overLiquidityUsd,
         underLiquidityUsd: q.underLiquidityUsd,
         marketId: q.id,
+        overTokenId: q.overTokenId,
+        underTokenId: q.underTokenId,
       }))
     );
   }
@@ -455,13 +484,15 @@ export async function fetchPolymarketMoneylineByGame(
 
     const ml = (event.markets ?? []).find((m) => classifyMarket(m) === "moneyline");
     if (!ml) continue;
-    const { outcomes, prices } = parseOutcomes(ml);
+    const { outcomes, prices, tokenIds } = parseOutcomes(ml);
     if (outcomes.length < 2 || isSettledMarket(prices)) continue;
 
     // Which outcome token is the away team? bestBid/bestAsk are for outcomes[0].
     const outcome0IsAway =
       teamsMatch(outcomes[0], game.awayTeam.name) ||
       outcomes[0].toLowerCase().includes(game.awayTeam.abbreviation.toLowerCase());
+    const awayTokenId = outcome0IsAway ? tokenIds[0] ?? undefined : tokenIds[1] ?? undefined;
+    const homeTokenId = outcome0IsAway ? tokenIds[1] ?? undefined : tokenIds[0] ?? undefined;
 
     const bestBid = typeof ml.bestBid === "number" ? ml.bestBid : null;
     const bestAsk = typeof ml.bestAsk === "number" ? ml.bestAsk : null;
@@ -491,6 +522,8 @@ export async function fetchPolymarketMoneylineByGame(
       homeLiquidityUsd: liq,
       awayLiquidityUsd: liq,
       marketId: ml.id,
+      homeTokenId,
+      awayTokenId,
     });
   }
 
@@ -515,7 +548,7 @@ export async function fetchPolymarketSpreadByGame(
 
     const sp = (event.markets ?? []).find((m) => classifyMarket(m) === "spread");
     if (!sp) continue;
-    const { outcomes, prices } = parseOutcomes(sp);
+    const { outcomes, prices, tokenIds } = parseOutcomes(sp);
     if (outcomes.length < 2 || isSettledMarket(prices)) continue;
 
     const q = sp.question;
@@ -528,6 +561,8 @@ export async function fetchPolymarketSpreadByGame(
     const outcome0IsHome =
       teamsMatch(outcomes[0], game.homeTeam.name) ||
       outcomes[0].toLowerCase().includes(game.homeTeam.abbreviation.toLowerCase());
+    const homeTokenId = outcome0IsHome ? tokenIds[0] ?? undefined : tokenIds[1] ?? undefined;
+    const awayTokenId = outcome0IsHome ? tokenIds[1] ?? undefined : tokenIds[0] ?? undefined;
 
     const bestBid = typeof sp.bestBid === "number" ? sp.bestBid : null;
     const bestAsk = typeof sp.bestAsk === "number" ? sp.bestAsk : null;
@@ -558,6 +593,8 @@ export async function fetchPolymarketSpreadByGame(
       awayLiquidityUsd: liq,
       homeSignedLine,
       marketId: sp.id,
+      homeTokenId,
+      awayTokenId,
     });
   }
 

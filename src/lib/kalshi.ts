@@ -391,6 +391,12 @@ export type VenueTotalLine = {
   overLiquidityUsd: number; // $ executable at the over ask (top of book)
   underLiquidityUsd: number; // $ executable at the under ask
   marketId: string;
+  // Per-outcome native execution ids used only by live order placement:
+  // Polymarket ERC-1155 CLOB token ids …
+  overTokenId?: string;
+  underTokenId?: string;
+  // … and SX.bet's outcome-one mapping (which side "over" corresponds to).
+  overIsOutcomeOne?: boolean;
 };
 
 // A two-way market (moneyline) priced from each venue at the executable ask.
@@ -403,6 +409,11 @@ export type VenueTwoWay = {
   // Kalshi only: which team the market's YES side represents, so execution knows to
   // buy YES (that team) or NO (the other). Undefined for venues without a yes/no book.
   yesSide?: "home" | "away";
+  // Polymarket CLOB token ids per outcome (live order placement only).
+  homeTokenId?: string;
+  awayTokenId?: string;
+  // SX.bet: whether the HOME outcome is the market's outcome one.
+  homeIsOutcomeOne?: boolean;
 };
 
 // Kalshi MLB moneyline per game (home/away buy costs at the ask). Reuses the same

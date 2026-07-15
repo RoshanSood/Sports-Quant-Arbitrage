@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { KeyRound, ShieldCheck } from "lucide-react";
 import type { ArbOpportunity, NormalizedMarket, Venue } from "@/types/arbitrage";
 import { Drawer, Toggle, Pill } from "./ui";
@@ -245,20 +245,27 @@ const STATUS_STYLE: Record<string, { color: string; label: string }> = {
   error: { color: "#ef4444", label: "Error" },
 };
 
+type ExecGate = { onchainOrdersEnabled?: boolean };
+
 function OnchainStatus({ venueId }: { venueId: string }) {
   const name = venueId === "polymarket" ? "Polymarket" : venueId === "sxbet" ? "SX.bet" : venueId;
   const envVar = venueId === "polymarket" ? "POLYMARKET_WALLET_KEY" : "SXBET_WALLET_KEY";
   const chainName = venueId === "polymarket" ? "Polygon" : "SX Network";
   const [status, setStatus] = useState<ExecStatus | null>(null);
+  const [gate, setGate] = useState<ExecGate | null>(null);
   const [loading, setLoading] = useState(true);
+  const [pw, setPw] = useState("");
+  const [approving, setApproving] = useState(false);
+  const [approveMsg, setApproveMsg] = useState<string | null>(null);
 
-  useEffect(() => {
+  const load = useCallback(() => {
     let cancelled = false;
     fetch("/api/arbitrage/execution/status")
       .then((r) => r.json())
-      .then((d: { venues?: ExecStatus[] }) => {
+      .then((d: { venues?: ExecStatus[]; gate?: ExecGate }) => {
         if (cancelled) return;
         setStatus((d.venues ?? []).find((v) => v.venueId === venueId) ?? null);
+        setGate(d.gate ?? null);
         setLoading(false);
       })
       .catch(() => {
@@ -269,7 +276,29 @@ function OnchainStatus({ venueId }: { venueId: string }) {
     };
   }, [venueId]);
 
+  useEffect(() => load(), [load]);
+
+  async function approve() {
+    setApproving(true);
+    setApproveMsg(null);
+    try {
+      const res = await fetch("/api/arbitrage/execution/approve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ venue: venueId, password: pw }),
+      });
+      const d = await res.json();
+      setApproveMsg(res.ok ? "Approval tx sent — allowance will update shortly." : d.error || "Approval failed");
+      if (res.ok) setTimeout(load, 4000);
+    } catch (e) {
+      setApproveMsg(String(e).slice(0, 120));
+    } finally {
+      setApproving(false);
+    }
+  }
+
   const s = status ? STATUS_STYLE[status.status] ?? STATUS_STYLE.error : null;
+  const armed = gate?.onchainOrdersEnabled === true;
 
   return (
     <div className="space-y-3">
@@ -278,9 +307,20 @@ function OnchainStatus({ venueId }: { venueId: string }) {
         <p className="text-gray-400 mt-0.5">
           {name} orders sign with a wallet private key that controls all wallet funds. It&apos;s set{" "}
           <strong>server-side by the operator</strong> as <code className="text-gray-300">{envVar}</code> (an env var on
-          the host), never typed into a browser. Live order execution is not yet enabled — this tab verifies the wallet.
+          the host), never typed into a browser. Order signing is implemented; it only fires when{" "}
+          <code className="text-gray-300">ARB_ONCHAIN_ORDERS_ENABLED=true</code> AND every execution-gate switch passes.
         </p>
       </div>
+
+      {status?.configured && (
+        <div className="rounded-lg border px-3 py-2 text-[11px] flex items-center justify-between" style={{ borderColor: "#1e2130", background: "#0e1014" }}>
+          <span className="text-gray-400">On-chain orders</span>
+          <span className="inline-flex items-center gap-1.5" style={{ color: armed ? "#22c55e" : "#6b7280" }}>
+            <span className="w-2 h-2 rounded-full" style={{ background: armed ? "#22c55e" : "#6b7280" }} />
+            {armed ? "Armed" : "Disarmed (default)"}
+          </span>
+        </div>
+      )}
 
       <div className="rounded-lg border px-3 py-2" style={{ borderColor: "#1e2130", background: "#0e1014" }}>
         {loading ? (
@@ -307,6 +347,31 @@ function OnchainStatus({ venueId }: { venueId: string }) {
               <KV label="USDC Allowance"><span className="text-gray-200">{status.allowance != null ? `$${status.allowance.toFixed(2)}` : "—"}</span></KV>
             )}
             {status.message && <p className="text-[10px] text-red-400 pt-1">{status.message}</p>}
+
+            <div className="pt-2 mt-1 border-t space-y-1.5" style={{ borderColor: "#1e2130" }}>
+              <p className="text-[10px] text-gray-500">
+                One-time: approve the {name} exchange to spend USDC (required before any fill). Signed server-side; admin only.
+              </p>
+              <div className="flex gap-1.5">
+                <input
+                  type="password"
+                  value={pw}
+                  onChange={(e) => setPw(e.target.value)}
+                  placeholder="admin password"
+                  className="flex-1 rounded bg-[#0b0d11] border px-2 py-1 text-[11px] text-gray-200"
+                  style={{ borderColor: "#2a2f3e" }}
+                />
+                <button
+                  onClick={approve}
+                  disabled={approving || !pw}
+                  className="rounded px-2 py-1 text-[11px] font-medium disabled:opacity-40"
+                  style={{ background: "#1e2a1e", color: "#86efac", border: "1px solid #2f4a2f" }}
+                >
+                  {approving ? "Approving…" : "Approve USDC"}
+                </button>
+              </div>
+              {approveMsg && <p className="text-[10px] text-gray-400">{approveMsg}</p>}
+            </div>
           </div>
         )}
       </div>

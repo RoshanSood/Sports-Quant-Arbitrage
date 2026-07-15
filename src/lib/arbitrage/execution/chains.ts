@@ -21,6 +21,21 @@ export function polygonUsdcAddress(): string {
   return process.env.POLYGON_USDC_ADDRESS || DEFAULT_POLYGON_USDC;
 }
 
+// Polymarket CLOB REST host (order signing/posting happens here, not on Gamma).
+export function polymarketClobHost(): string {
+  return process.env.POLYMARKET_CLOB_HOST || "https://clob.polymarket.com";
+}
+
+// Polymarket on-chain exchanges that pull USDC when an order fills — these are the
+// spenders that must have a USDC allowance. Neg-risk markets settle through a
+// different exchange, so a leg's negRisk flag picks the right spender.
+export const POLYMARKET_CTF_EXCHANGE = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E";
+export const POLYMARKET_NEG_RISK_EXCHANGE = "0xC5d563A36AE78145C45a50134d48A1215220f80a";
+
+export function polymarketExchangeAddress(negRisk: boolean): string {
+  return negRisk ? POLYMARKET_NEG_RISK_EXCHANGE : POLYMARKET_CTF_EXCHANGE;
+}
+
 export const USDC_DECIMALS = 6;
 
 // Minimal ERC-20 ABI for balance/allowance reads + the approve tx (allowance helper).

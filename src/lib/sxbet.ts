@@ -153,6 +153,7 @@ export async function fetchSxBetMLBMarkets(games: ArbGame[], leagueId: number = 
           awayLiquidityUsd: oneIsAway ? bp.o1LiqUsd : bp.o2LiqUsd,
           homeLiquidityUsd: oneIsAway ? bp.o2LiqUsd : bp.o1LiqUsd,
           marketId: ml.marketHash,
+          homeIsOutcomeOne: !oneIsAway,
         });
       }
     }
@@ -172,6 +173,7 @@ export async function fetchSxBetMLBMarkets(games: ArbGame[], leagueId: number = 
           awayLiquidityUsd: oneIsHome ? bp.o2LiqUsd : bp.o1LiqUsd,
           homeSignedLine,
           marketId: sp.marketHash,
+          homeIsOutcomeOne: oneIsHome,
         });
       }
     }
@@ -191,6 +193,7 @@ export async function fetchSxBetMLBMarkets(games: ArbGame[], leagueId: number = 
         overLiquidityUsd: overIsOne ? bp.o1LiqUsd : bp.o2LiqUsd,
         underLiquidityUsd: overIsOne ? bp.o2LiqUsd : bp.o1LiqUsd,
         marketId: t.marketHash,
+        overIsOutcomeOne: overIsOne,
       });
     }
     if (totalRows.length) result.totals.set(game.id, totalRows);

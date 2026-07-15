@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { verifyAllVenues } from "@/lib/arbitrage/execution/verify";
-import { getExecutionMode, liveVenueAllowlist, maxLiveStakeUsd } from "@/lib/arbitrage/execution/config";
+import { getExecutionMode, liveVenueAllowlist, maxLiveStakeUsd, onchainOrdersEnabled } from "@/lib/arbitrage/execution/config";
 
 // Execution readiness per venue (manual §19, §24): masked wallet identity + USDC
 // balance/allowance + verification status. Reads only — never places an order and
@@ -19,6 +19,7 @@ export async function GET() {
         executionMode: getExecutionMode(),
         liveVenues: [...liveVenueAllowlist()],
         maxLiveStakeUsd: maxLiveStakeUsd(),
+        onchainOrdersEnabled: onchainOrdersEnabled(),
       },
     });
   } catch (error) {

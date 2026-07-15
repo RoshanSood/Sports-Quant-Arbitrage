@@ -24,6 +24,21 @@ import { SPORTS, type ArbGame } from "./sports";
 
 const EMPTY_SX: SxBetMarkets = { moneyline: new Map(), spread: new Map(), totals: new Map() };
 
+// The venue-native side identifier a live order needs for a given outcome:
+//   • Kalshi     → "yes" | "no"
+//   • Polymarket → the ERC-1155 CLOB token id for that outcome
+//   • SX.bet     → "one" | "two" (isTakerBettingOutcomeOne)
+// Undefined when the venue hasn't supplied the id (read-only rows still ingest fine).
+function nativeSideFor(
+  venueId: VenueId,
+  ids: { kalshiYesNo: "yes" | "no"; polyTokenId?: string; sxIsOne?: boolean }
+): string | undefined {
+  if (venueId === "kalshi") return ids.kalshiYesNo;
+  if (venueId === "polymarket") return ids.polyTokenId;
+  if (venueId === "sxbet") return ids.sxIsOne === undefined ? undefined : ids.sxIsOne ? "one" : "two";
+  return undefined;
+}
+
 function normalizeVenueTotals(
   venueId: VenueId,
   game: ArbGame,
@@ -36,9 +51,9 @@ function normalizeVenueTotals(
   const teams: [string, string] = [game.awayTeam.shortName, game.homeTeam.shortName];
   const rows: NormalizedMarket[] = [];
   for (const l of lines) {
-    for (const [outcome, priceCents, liqUsd] of [
-      ["over", l.overCents, l.overLiquidityUsd] as const,
-      ["under", l.underCents, l.underLiquidityUsd] as const,
+    for (const [outcome, priceCents, liqUsd, tokenId, sxIsOne] of [
+      ["over", l.overCents, l.overLiquidityUsd, l.overTokenId, l.overIsOutcomeOne] as const,
+      ["under", l.underCents, l.underLiquidityUsd, l.underTokenId, l.overIsOutcomeOne === undefined ? undefined : !l.overIsOutcomeOne] as const,
     ]) {
       if (priceCents <= 0 || priceCents >= 100) continue;
       const liquidityUsd = Number.isFinite(liqUsd) ? Math.round(liqUsd) : 0;
@@ -47,7 +62,7 @@ function normalizeVenueTotals(
         marketId: `${venueId}:${game.id}:total:${l.line}:${outcome}`,
         // Kalshi totals: buying OVER = buy YES, UNDER = buy NO, on the line's ticker.
         nativeMarketId: l.marketId,
-        nativeSide: venueId === "kalshi" ? (outcome === "over" ? "yes" : "no") : undefined,
+        nativeSide: nativeSideFor(venueId, { kalshiYesNo: outcome === "over" ? "yes" : "no", polyTokenId: tokenId, sxIsOne }),
         sport,
         league,
         startTime: game.date,
@@ -83,9 +98,9 @@ function normalizeVenueTwoWay(
   const line = marketType === "spread" ? q.homeSignedLine ?? null : null;
   const lineKey = marketType === "spread" ? String(q.homeSignedLine ?? 0) : "0";
   const rows: NormalizedMarket[] = [];
-  for (const [outcome, priceCents, liqUsd] of [
-    ["home", q.homeCents, q.homeLiquidityUsd] as const,
-    ["away", q.awayCents, q.awayLiquidityUsd] as const,
+  for (const [outcome, priceCents, liqUsd, tokenId, sxIsOne] of [
+    ["home", q.homeCents, q.homeLiquidityUsd, q.homeTokenId, q.homeIsOutcomeOne] as const,
+    ["away", q.awayCents, q.awayLiquidityUsd, q.awayTokenId, q.homeIsOutcomeOne === undefined ? undefined : !q.homeIsOutcomeOne] as const,
   ]) {
     if (priceCents <= 0 || priceCents >= 100) continue;
     const liquidityUsd = Number.isFinite(liqUsd) ? Math.round(liqUsd) : 0;
@@ -94,7 +109,11 @@ function normalizeVenueTwoWay(
       marketId: `${venueId}:${game.id}:${marketType}:${lineKey}:${outcome}`,
       // Kalshi two-way: buy YES on the team the market's YES side represents, else NO.
       nativeMarketId: q.marketId,
-      nativeSide: venueId === "kalshi" ? (q.yesSide && outcome === q.yesSide ? "yes" : "no") : undefined,
+      nativeSide: nativeSideFor(venueId, {
+        kalshiYesNo: q.yesSide && outcome === q.yesSide ? "yes" : "no",
+        polyTokenId: tokenId,
+        sxIsOne,
+      }),
       sport,
       league,
       startTime: game.date,
