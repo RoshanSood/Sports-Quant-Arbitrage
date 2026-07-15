@@ -13,8 +13,6 @@ import {
   TrackedRecommendation,
   PerformanceBreakdown,
   RecordStats,
-  League,
-  MarketType,
 } from "@/types/performance";
 
 // ── Date helpers ──────────────────────────────────────────────────────────────
@@ -250,7 +248,11 @@ export default function PerformanceClient() {
     }
   }, []);
 
-  useEffect(() => { loadData(); }, [loadData]);
+  useEffect(() => {
+    // The effect synchronizes the page with the performance API.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    loadData();
+  }, [loadData]);
 
   const gradeNow = async () => {
     setGrading(true);

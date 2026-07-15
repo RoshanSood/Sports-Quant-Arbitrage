@@ -45,7 +45,7 @@ describe("settlement — hedged arb realizes expected profit", () => {
       "open",
       { expectedProfit: 4.4 }
     );
-    expect(computeRealized(t, { away: 5, home: 5, total: 10 })).toBe(4.4);
+    expect(computeRealized(t, { away: 5, home: 5, total: 10 })).toBe(2);
   });
 });
 
@@ -77,5 +77,23 @@ describe("settlement — naked spread graded by margin + signed line", () => {
     const t = mkTrade([mkLeg("kalshi:401:spread:-1.5:home", "home", 50, 40)], "naked", { nakedLegIndex: 0 });
     // margin +1; 1 + (-1.5) = -0.5 < 0 → away covers → home leg loses
     expect(computeRealized(t, { away: 7, home: 8, total: 15 })).toBe(-20);
+  });
+  it("refunds both sides on an integer-line push", () => {
+    const t = mkTrade([
+      mkLeg("kalshi:401:spread:-2:home", "home", 45, 20),
+      mkLeg("polymarket:401:spread:-2:away", "away", 50, 20),
+    ], "open");
+    expect(computeRealized(t, { away: 7, home: 9, total: 16 })).toBe(0);
+  });
+});
+
+describe("settlement — unequal fills", () => {
+  it("grades unmatched contracts directionally", () => {
+    const t = mkTrade([
+      mkLeg("kalshi:401:total:6.5:over", "over", 45, 40),
+      mkLeg("polymarket:401:total:6.5:under", "under", 50, 30),
+    ], "partial");
+    expect(computeRealized(t, { away: 5, home: 5, total: 10 })).toBe(7);
+    expect(computeRealized(t, { away: 2, home: 2, total: 4 })).toBe(-3);
   });
 });

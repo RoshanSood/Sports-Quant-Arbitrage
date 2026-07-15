@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { appendLog, getLogs } from "@/lib/arbitrage/arbLogStore";
+import { isAuthorized } from "@/lib/adminAuth";
 import type { ArbLog } from "@/types/arbitrage";
 
 export async function GET(request: NextRequest) {
@@ -14,11 +15,16 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
-    const log = (await request.json()) as ArbLog;
+    const body = (await request.json()) as ArbLog & { password?: string };
+    if (!isAuthorized(request, body.password)) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+    const log = { ...body };
+    delete log.password;
     if (!log.id || !log.date) {
       return NextResponse.json({ error: "Missing log id or date" }, { status: 400 });
     }
-    await appendLog(log);
+    await appendLog(log as ArbLog);
     return NextResponse.json({ ok: true });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });

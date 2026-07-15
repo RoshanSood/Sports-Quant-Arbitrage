@@ -59,6 +59,8 @@ export default function LineMovementClient() {
   }, []);
 
   useEffect(() => {
+    // The effect synchronizes the selected filters with the remote feed.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     load(date, league);
   }, [date, league, load]);
 

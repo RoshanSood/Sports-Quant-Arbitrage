@@ -22,6 +22,7 @@ const CREDS_KEY = "kalshi_api_creds";
 type StoredCreds = { keyId: string; privateKey: string };
 
 function loadStoredCreds(): StoredCreds | null {
+  if (typeof window === "undefined") return null;
   try {
     const raw = localStorage.getItem(CREDS_KEY);
     return raw ? (JSON.parse(raw) as StoredCreds) : null;
@@ -146,7 +147,7 @@ function unitLabel(confidence: number): string {
 export default function LiveTradingClient() {
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [history, setHistory] = useState<LiveTrade[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => Boolean(loadStoredCreds()));
   const [executing, setExecuting] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [executeResults, setExecuteResults] = useState<ExecuteResult[]>([]);
@@ -154,21 +155,11 @@ export default function LiveTradingClient() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
   // Credentials state
-  const [savedCreds, setSavedCreds] = useState<StoredCreds | null>(null);
-  const [showCredsForm, setShowCredsForm] = useState(false);
+  const [savedCreds, setSavedCreds] = useState<StoredCreds | null>(loadStoredCreds);
+  const [showCredsForm, setShowCredsForm] = useState(() => !loadStoredCreds());
   const [formKeyId, setFormKeyId] = useState("");
   const [formPrivateKey, setFormPrivateKey] = useState("");
   const [credsSaved, setCredsSaved] = useState(false);
-
-  // Load credentials from localStorage on mount
-  useEffect(() => {
-    const creds = loadStoredCreds();
-    setSavedCreds(creds);
-    if (!creds) {
-      setShowCredsForm(true);
-      setLoading(false);
-    }
-  }, []);
 
   const saveCreds = () => {
     if (!formKeyId.trim() || !formPrivateKey.trim()) return;
@@ -212,7 +203,9 @@ export default function LiveTradingClient() {
         throw new Error(err.error ?? "Failed to load proposals");
       }
       const { proposals: p } = await propRes.json();
-      setProposals(p ?? []);
+      const nextProposals = (p ?? []) as Proposal[];
+      setProposals(nextProposals);
+      setSelectedIds(new Set(nextProposals.filter((proposal) => proposal.target && !proposal.alreadyTraded).map((proposal) => proposal.rec.id)));
 
       if (histRes.ok) {
         const { trades } = await histRes.json();
@@ -233,12 +226,6 @@ export default function LiveTradingClient() {
   const eligibleTrades = proposals.filter(
     (p) => p.target && !p.alreadyTraded
   );
-
-  // Auto-select all eligible trades when proposals first load
-  useEffect(() => {
-    setSelectedIds(new Set(eligibleTrades.map((p) => p.rec.id)));
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [proposals]);
 
   const toggleTrade = (id: string) => {
     setSelectedIds((prev) => {
@@ -419,8 +406,8 @@ export default function LiveTradingClient() {
               style={{ background: "#0e1014", borderTop: "1px solid #1e2130" }}
             >
               <p className="text-xs text-gray-500">
-                Credentials are saved in your browser only and never sent to our
-                servers except to sign Kalshi API requests.
+                Credentials stay in browser storage but are forwarded to this app&apos;s
+                server for each signed Kalshi request. Use a trusted local deployment.
               </p>
               <div className="space-y-2">
                 <div>

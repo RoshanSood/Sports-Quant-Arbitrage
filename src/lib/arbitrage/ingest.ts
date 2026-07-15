@@ -11,18 +11,22 @@ import {
   type VenueTotalLine,
   type VenueTwoWay,
 } from "@/lib/kalshi";
-import {
-  fetchPolymarketMoneylineByGame,
-  fetchPolymarketSpreadByGame,
-  fetchPolymarketTotalsByGame,
-} from "@/lib/polymarket";
+import { fetchPolymarketArbMarkets } from "@/lib/polymarketArbitrage";
 import { fetchSxBetMLBMarkets, type SxBetMarkets } from "@/lib/sxbet";
 import type { NormalizedMarket, Outcome, Sport, VenueId } from "@/types/arbitrage";
 import { decimalOddsFromCents, impliedProbFromCents } from "./arbMath";
-import { saveMarkets, setRunning } from "./marketStore";
+import { ingestionLockFile, marketCacheAgeMs, saveMarkets, setRunning } from "./marketStore";
+import { withFileLock } from "./jsonStore";
 import { SPORTS, type ArbGame } from "./sports";
 
 const EMPTY_SX: SxBetMarkets = { moneyline: new Map(), spread: new Map(), totals: new Map() };
+
+function gameMarketState(game: ArbGame): Pick<NormalizedMarket, "live" | "status"> {
+  const status = game.status.toLowerCase();
+  if (/final|completed|canceled|cancelled|postponed/.test(status)) return { live: false, status: "closed" };
+  if (/delayed|suspended/.test(status)) return { live: false, status: "suspended" };
+  return { live: /in progress|inning|quarter|half/.test(status), status: "open" };
+}
 
 function normalizeVenueTotals(
   venueId: VenueId,
@@ -34,6 +38,7 @@ function normalizeVenueTotals(
 ): NormalizedMarket[] {
   if (!lines?.length) return [];
   const teams: [string, string] = [game.awayTeam.shortName, game.homeTeam.shortName];
+  const state = gameMarketState(game);
   const rows: NormalizedMarket[] = [];
   for (const l of lines) {
     for (const [outcome, priceCents, liqUsd] of [
@@ -46,11 +51,14 @@ function normalizeVenueTotals(
         venueId,
         marketId: `${venueId}:${game.id}:total:${l.line}:${outcome}`,
         // Kalshi totals: buying OVER = buy YES, UNDER = buy NO, on the line's ticker.
-        nativeMarketId: l.marketId,
-        nativeSide: venueId === "kalshi" ? (outcome === "over" ? "yes" : "no") : undefined,
+        nativeMarketId: outcome === "over" ? l.overNativeMarketId ?? l.marketId : l.underNativeMarketId ?? l.marketId,
+        nativeSide:
+          outcome === "over"
+            ? l.overNativeSide ?? (venueId === "kalshi" ? "yes" : undefined)
+            : l.underNativeSide ?? (venueId === "kalshi" ? "no" : undefined),
         sport,
         league,
-        startTime: game.date,
+        startTime: game.startTimeIso,
         teams,
         marketType: "total",
         line: l.line,
@@ -60,8 +68,7 @@ function normalizeVenueTotals(
         impliedProbability: impliedProbFromCents(priceCents),
         depth: priceCents > 0 ? Math.floor(liquidityUsd / (priceCents / 100)) : 0,
         liquidityUsd,
-        live: true,
-        status: "open",
+        ...state,
         lastUpdated: now,
       });
     }
@@ -80,6 +87,7 @@ function normalizeVenueTwoWay(
 ): NormalizedMarket[] {
   if (!q) return [];
   const teams: [string, string] = [game.awayTeam.shortName, game.homeTeam.shortName];
+  const state = gameMarketState(game);
   const line = marketType === "spread" ? q.homeSignedLine ?? null : null;
   const lineKey = marketType === "spread" ? String(q.homeSignedLine ?? 0) : "0";
   const rows: NormalizedMarket[] = [];
@@ -93,11 +101,14 @@ function normalizeVenueTwoWay(
       venueId,
       marketId: `${venueId}:${game.id}:${marketType}:${lineKey}:${outcome}`,
       // Kalshi two-way: buy YES on the team the market's YES side represents, else NO.
-      nativeMarketId: q.marketId,
-      nativeSide: venueId === "kalshi" ? (q.yesSide && outcome === q.yesSide ? "yes" : "no") : undefined,
+      nativeMarketId: outcome === "home" ? q.homeNativeMarketId ?? q.marketId : q.awayNativeMarketId ?? q.marketId,
+      nativeSide:
+        outcome === "home"
+          ? q.homeNativeSide ?? (venueId === "kalshi" ? (q.yesSide === "home" ? "yes" : "no") : undefined)
+          : q.awayNativeSide ?? (venueId === "kalshi" ? (q.yesSide === "away" ? "yes" : "no") : undefined),
       sport,
       league,
-      startTime: game.date,
+      startTime: game.startTimeIso,
       teams,
       marketType,
       line,
@@ -107,8 +118,7 @@ function normalizeVenueTwoWay(
       impliedProbability: impliedProbFromCents(priceCents),
       depth: priceCents > 0 ? Math.floor(liquidityUsd / (priceCents / 100)) : 0,
       liquidityUsd,
-      live: true,
-      status: "open",
+      ...state,
       lastUpdated: now,
     });
   }
@@ -138,13 +148,15 @@ export async function ingestTotals(date: string): Promise<IngestResult> {
       gameCount += games.length;
       if (!games.length) return;
 
-      const [kTot, pTot, kML, pML, kSp, pSp, sx] = await Promise.all([
+      const [kTot, poly, kML, kSp, sx] = await Promise.all([
         fetchKalshiTotalsByGame(games, cfg.kalshi.total).catch(() => new Map<string, VenueTotalLine[]>()),
-        fetchPolymarketTotalsByGame(games, cfg.polyTag).catch(() => new Map<string, VenueTotalLine[]>()),
+        fetchPolymarketArbMarkets(games, cfg.polyTag).catch(() => ({
+          totals: new Map<string, VenueTotalLine[]>(),
+          moneyline: new Map<string, VenueTwoWay>(),
+          spread: new Map<string, VenueSpread>(),
+        })),
         fetchKalshiMoneylineByGame(games, cfg.kalshi.game).catch(() => new Map<string, VenueTwoWay>()),
-        fetchPolymarketMoneylineByGame(games, cfg.polyTag).catch(() => new Map<string, VenueTwoWay>()),
         fetchKalshiSpreadByGame(games, cfg.kalshi.spread, cfg.spreadFixedLine).catch(() => new Map<string, VenueSpread>()),
-        fetchPolymarketSpreadByGame(games, cfg.polyTag).catch(() => new Map<string, VenueSpread>()),
         fetchSxBetMLBMarkets(games, cfg.sxLeagueId).catch(() => EMPTY_SX),
       ]);
 
@@ -155,9 +167,9 @@ export async function ingestTotals(date: string): Promise<IngestResult> {
           ...normalizeVenueTwoWay("kalshi", game, kSp.get(game.id), "spread", cfg.sport, cfg.league, now),
         ];
         const pRows = [
-          ...normalizeVenueTotals("polymarket", game, pTot.get(game.id), cfg.sport, cfg.league, now),
-          ...normalizeVenueTwoWay("polymarket", game, pML.get(game.id), "moneyline", cfg.sport, cfg.league, now),
-          ...normalizeVenueTwoWay("polymarket", game, pSp.get(game.id), "spread", cfg.sport, cfg.league, now),
+          ...normalizeVenueTotals("polymarket", game, poly.totals.get(game.id), cfg.sport, cfg.league, now),
+          ...normalizeVenueTwoWay("polymarket", game, poly.moneyline.get(game.id), "moneyline", cfg.sport, cfg.league, now),
+          ...normalizeVenueTwoWay("polymarket", game, poly.spread.get(game.id), "spread", cfg.sport, cfg.league, now),
         ];
         const sRows = [
           ...normalizeVenueTotals("sxbet", game, sx.totals.get(game.id), cfg.sport, cfg.league, now),
@@ -180,11 +192,15 @@ export async function ingestTotals(date: string): Promise<IngestResult> {
 export async function runIngestion(date: string): Promise<void> {
   setRunning(date, true);
   try {
-    const r = await ingestTotals(date);
-    console.log(
-      `[arbitrage/ingest] ${date}: ${r.gameCount} games, ` +
-        `${r.venueCounts.kalshi} Kalshi + ${r.venueCounts.polymarket} Polymarket + ${r.venueCounts.sxbet} SX.bet quotes`
-    );
+    await withFileLock(ingestionLockFile(date), async () => {
+      // Another worker may have completed the same scan while this one waited.
+      if (await marketCacheAgeMs(date) < 30_000) return;
+      const r = await ingestTotals(date);
+      console.log(
+        `[arbitrage/ingest] ${date}: ${r.gameCount} games, ` +
+          `${r.venueCounts.kalshi} Kalshi + ${r.venueCounts.polymarket} Polymarket + ${r.venueCounts.sxbet} SX.bet quotes`
+      );
+    });
   } catch (e) {
     console.error(`[arbitrage/ingest] ${date} failed:`, e);
   } finally {

@@ -42,7 +42,7 @@ export default function WNBATeamRow({ team, isAway, market, side }: Props) {
               <span className="text-xs text-gray-400 whitespace-nowrap">{team.record}</span>
             </div>
             {team.injuries.length > 0 && (
-              <InjuryReport injuries={team.injuries} teamName={team.shortName} />
+              <InjuryReport injuries={team.injuries} />
             )}
           </div>
         </div>

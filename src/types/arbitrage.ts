@@ -62,6 +62,8 @@ export type ReasonCode =
   | "kill_switch"
   | "venue_view_only"
   | "exposure_exceeded"
+  | "daily_loss_exceeded"
+  | "open_positions_exceeded"
   | "final_refresh_failed"
   | "naked_position";
 
@@ -69,7 +71,7 @@ export type ArbResult = "executed" | "halted" | "failed" | "partial" | "naked";
 
 // ── Supporting shapes ────────────────────────────────────────────────────────
 
-export type FeeModel = "kalshi_tier" | "polymarket_flat" | "sxbet_flat" | "placeholder";
+export type FeeModel = "kalshi_tier" | "polymarket_sports" | "sxbet_flat" | "placeholder";
 
 export type FeeBreakdown = {
   venueId: VenueId;
@@ -186,6 +188,7 @@ export type MatchedLeg = {
   decimalOdds: number;
   impliedProbability: number;
   liquidityUsd: number; // executable $ at the ask
+  lastUpdated: string;
   label: string; // human-readable side, e.g. "over 6.5" or team name
 };
 

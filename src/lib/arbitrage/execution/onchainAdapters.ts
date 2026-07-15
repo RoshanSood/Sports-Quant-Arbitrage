@@ -24,6 +24,10 @@ class OnchainScaffold implements ExecutionAdapter {
     return Boolean(process.env[this.signerEnvVar]) && false; // hard-disabled until implemented
   }
 
+  supportsFillOrKill(): boolean {
+    return false;
+  }
+
   async getBalanceUsd(): Promise<number | null> {
     return null;
   }

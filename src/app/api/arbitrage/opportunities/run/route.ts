@@ -1,9 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isRunning, saveOpportunities, setRunning } from "@/lib/arbitrage/opportunityStore";
 import { isAuthorized } from "@/lib/adminAuth";
+import { runIngestion } from "@/lib/arbitrage/ingest";
+import { getMarkets } from "@/lib/arbitrage/marketStore";
+import { matchMarkets } from "@/lib/arbitrage/matching";
+import { detectArbs } from "@/lib/arbitrage/arbEngine";
+import { getAgent } from "@/lib/arbitrage/agentStore";
+import { getRiskSettings } from "@/lib/arbitrage/riskStore";
+import { DEFAULT_AGENT } from "@/lib/arbitrage/seed";
 
-// Async-job stub following the value-plays/run pattern. Phase 3 replaces the body
-// with real cross-venue ingestion + arb detection; here it just marks a scan slot.
+// Protected async scan: refresh venue books, match events, and persist real arbs.
 
 function todayDateStr(): string {
   const d = new Date();
@@ -11,7 +17,7 @@ function todayDateStr(): string {
 }
 
 export async function POST(request: NextRequest) {
-  let body: { date?: string; password?: string } = {};
+  let body: { date?: string; agent?: string; password?: string } = {};
   try {
     body = await request.json();
   } catch {
@@ -27,12 +33,20 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ status: "already-running", date });
   }
 
-  // Fire-and-forget scan placeholder. Real detection lands in Phase 3.
+  // Return immediately while the client polls the read-only opportunity endpoint.
   setRunning(date, true);
   (async () => {
     try {
-      // Phase 3: ingest Kalshi + Polymarket totals, match, detect arbs, size, then:
-      await saveOpportunities(date, []);
+      const agentId = body.agent ?? DEFAULT_AGENT.id;
+      await runIngestion(date);
+      const [markets, agent, risk] = await Promise.all([
+        getMarkets(date),
+        getAgent(agentId).then((a) => a ?? DEFAULT_AGENT),
+        getRiskSettings(),
+      ]);
+      const { matched } = matchMarkets(markets);
+      const { opportunities } = detectArbs(matched, agent, risk.minLiquidityUsd);
+      await saveOpportunities(date, opportunities);
     } catch (e) {
       console.error(`[arbitrage/opportunities/run] ${date} failed:`, e);
     } finally {

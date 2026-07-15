@@ -27,6 +27,9 @@ export function getAdapter(venueId: string, mode: ExecMode, creds?: ExecCreds): 
 // Which venues currently have a working live adapter (feeds the gate).
 export function venueSupportsLive(venues: string[], creds?: ExecCreds): Record<string, boolean> {
   const out: Record<string, boolean> = {};
-  for (const v of venues) out[v] = liveAdapter(v, creds).supportsLive();
+  for (const v of venues) {
+    const adapter = liveAdapter(v, creds);
+    out[v] = adapter.supportsLive() && adapter.supportsFillOrKill();
+  }
   return out;
 }

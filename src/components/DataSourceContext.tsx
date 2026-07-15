@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useCallback, useContext, useEffect, useState, ReactNode } from "react";
+import { createContext, useCallback, useContext, useState, ReactNode } from "react";
 
 export type DataSource = "polymarket" | "kalshi";
 
@@ -17,17 +17,15 @@ const DataSourceCtx = createContext<Ctx>({
 });
 
 export function DataSourceProvider({ children }: { children: ReactNode }) {
-  const [source, setSourceState] = useState<DataSource>("polymarket");
-
-  // Hydrate from localStorage on mount
-  useEffect(() => {
+  const [source, setSourceState] = useState<DataSource>(() => {
+    if (typeof window === "undefined") return "polymarket";
     try {
       const stored = localStorage.getItem(STORAGE_KEY);
-      if (stored === "kalshi" || stored === "polymarket") setSourceState(stored);
+      return stored === "kalshi" || stored === "polymarket" ? stored : "polymarket";
     } catch {
-      // localStorage unavailable — fine
+      return "polymarket";
     }
-  }, []);
+  });
 
   const setSource = useCallback((s: DataSource) => {
     setSourceState(s);

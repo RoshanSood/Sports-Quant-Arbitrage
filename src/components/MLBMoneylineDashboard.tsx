@@ -216,49 +216,49 @@ function GameCardDesktop({ row }: { row: GameMarketRow }) {
 
 // ── Mobile: compact card per game ─────────────────────────────────────────────
 
+function TeamPriceRow({
+  logo, abbr, record, side, kalshi, poly, better, divider,
+}: {
+  logo: string; abbr: string; record: string; side: string;
+  kalshi: MarketPrice | null; poly: MarketPrice | null;
+  better: "a" | "b" | "tie" | null; divider?: boolean;
+}) {
+  return (
+    <div
+      className="flex items-center gap-2 py-2.5"
+      style={divider ? { borderBottom: "1px solid #1e2130" } : {}}
+    >
+      <TeamLogo src={logo} alt={abbr} />
+      <div className="flex flex-col min-w-[60px]">
+        <span className="text-white text-sm font-semibold">{abbr}</span>
+        <span className="text-gray-600 text-xs">{record} · {side}</span>
+      </div>
+      <div className="ml-auto flex items-center gap-3">
+        <div className="flex flex-col items-center">
+          <span className="text-gray-500 text-xs mb-0.5">Kalshi</span>
+          {kalshi
+            ? <span className={`text-sm font-bold tabular-nums ${better === "a" ? "text-green-400" : "text-white"}`}>{cents(kalshi.probability)}</span>
+            : <span className="text-gray-600 text-xs">N/A</span>}
+        </div>
+        <div className="flex flex-col items-center">
+          <span className="text-gray-500 text-xs mb-0.5">Poly</span>
+          {poly
+            ? <span className={`text-sm font-bold tabular-nums ${better === "b" ? "text-green-400" : "text-white"}`}>{cents(poly.probability)}</span>
+            : <span className="text-gray-600 text-xs">N/A</span>}
+        </div>
+        {better && better !== "tie" && (
+          <span className="text-xs px-2 py-0.5 rounded-full font-medium" style={{ background: "#0d2b1a", color: "#4ade80" }}>
+            {better === "a" ? "Kalshi" : "Poly"}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function GameCardMobile({ row }: { row: GameMarketRow }) {
   const awayBetter = betterSide(row.kalshi.away, row.polymarket.away);
   const homeBetter = betterSide(row.kalshi.home, row.polymarket.home);
-
-  function TeamPriceRow({
-    logo, abbr, record, side, kalshi, poly, better, divider,
-  }: {
-    logo: string; abbr: string; record: string; side: string;
-    kalshi: MarketPrice | null; poly: MarketPrice | null;
-    better: "a" | "b" | "tie" | null; divider?: boolean;
-  }) {
-    return (
-      <div
-        className="flex items-center gap-2 py-2.5"
-        style={divider ? { borderBottom: "1px solid #1e2130" } : {}}
-      >
-        <TeamLogo src={logo} alt={abbr} />
-        <div className="flex flex-col min-w-[60px]">
-          <span className="text-white text-sm font-semibold">{abbr}</span>
-          <span className="text-gray-600 text-xs">{record} · {side}</span>
-        </div>
-        <div className="ml-auto flex items-center gap-3">
-          <div className="flex flex-col items-center">
-            <span className="text-gray-500 text-xs mb-0.5">Kalshi</span>
-            {kalshi
-              ? <span className={`text-sm font-bold tabular-nums ${better === "a" ? "text-green-400" : "text-white"}`}>{cents(kalshi.probability)}</span>
-              : <span className="text-gray-600 text-xs">N/A</span>}
-          </div>
-          <div className="flex flex-col items-center">
-            <span className="text-gray-500 text-xs mb-0.5">Poly</span>
-            {poly
-              ? <span className={`text-sm font-bold tabular-nums ${better === "b" ? "text-green-400" : "text-white"}`}>{cents(poly.probability)}</span>
-              : <span className="text-gray-600 text-xs">N/A</span>}
-          </div>
-          {better && better !== "tie" && (
-            <span className="text-xs px-2 py-0.5 rounded-full font-medium" style={{ background: "#0d2b1a", color: "#4ade80" }}>
-              {better === "a" ? "Kalshi" : "Poly"}
-            </span>
-          )}
-        </div>
-      </div>
-    );
-  }
 
   const statusLabel = row.status === "In Progress" ? "🔴 LIVE" : row.status === "Final" ? "Final" : row.startTime;
 
@@ -298,6 +298,8 @@ export default function MLBMoneylineDashboard() {
   }, []);
 
   useEffect(() => {
+    // The effect synchronizes the selected date with both market feeds.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     loadData(date);
   }, [date, loadData]);
 

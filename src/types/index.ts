@@ -25,6 +25,7 @@ export type GameMarket = {
 export type MLBGame = {
   id: string;
   date: string;
+  startTimeIso: string;
   startTime: string;
   status: string;
   awayTeam: TeamInfo;

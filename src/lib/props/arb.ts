@@ -15,7 +15,7 @@ export type ArbLegInput = { bookId: string; american: number | null; available: 
 function bestLeg(list: ArbLegInput[]): ArbLegPick | null {
   let best: ArbLegPick | null = null;
   for (const q of list) {
-    if (q.american == null || !Number.isFinite(q.american)) continue;
+    if (!q.available || q.american == null || !Number.isFinite(q.american)) continue;
     const decimal = americanToDecimal(q.american);
     // Highest decimal = best payout for the bettor on that side.
     if (!best || decimal > best.decimal) {
@@ -43,7 +43,7 @@ export function computeTwoWayArb(overs: ArbLegInput[], unders: ArbLegInput[], li
     combinedImplied,
     edgePct,
     holdPct: Number((-edgePct).toFixed(3)),
-    isArb: combinedImplied < 1,
+    isArb: combinedImplied < 1 && over.available && under.available,
     stake,
     bothAvailable: over.available && under.available,
   };

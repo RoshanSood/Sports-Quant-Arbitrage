@@ -1,7 +1,7 @@
 // Phase: settlement & reconciliation (manual §14). Auto-closes open paper positions
 // once the underlying game is FINAL, computing realized P&L from the result.
 //
-//   - Hedged arb (both legs filled): guaranteed — realizes its expected profit.
+//   - Hedged arb (both legs filled): grades each confirmed fill and actual fee.
 //   - Naked position (one leg filled): graded against the final total (win/lose).
 //
 // Uses ESPN's public scoreboard for final status + scores. gameId is embedded in the
@@ -81,25 +81,21 @@ export function computeRealized(t: Trade, result: { away: number; home: number; 
     winner = result.home > result.away ? "home" : result.away > result.home ? "away" : "push";
   } else if (type === "spread") {
     // line is the SIGNED home line (e.g. -1.5). Home covers when margin + line > 0.
-    if (line == null) return t.expectedProfit;
+    if (line == null) throw new Error("Spread line is missing");
     const homeMargin = result.home - result.away;
-    winner = homeMargin + line > 0 ? "home" : "away";
+    winner = homeMargin + line > 0 ? "home" : homeMargin + line < 0 ? "away" : "push";
   } else {
-    if (line == null) return t.expectedProfit;
+    if (line == null) throw new Error("Total line is missing");
     winner = result.total > line ? "over" : result.total < line ? "under" : "push";
   }
 
-  // Naked: only one leg filled — grade that directional bet against the winner.
-  if (t.status === "naked" && t.nakedLegIndex != null) {
-    const leg = t.legs[t.nakedLegIndex];
-    if (!leg) return t.expectedProfit;
+  let pnl = 0;
+  for (const leg of t.legs) {
     const cost = round2((leg.size * leg.priceCents) / 100);
-    const won = leg.outcome === winner;
-    return round2(won ? leg.size - cost : -cost);
+    const payout = winner === "push" ? cost : leg.outcome === winner ? leg.size : 0;
+    pnl += payout - cost - leg.feeCents / 100;
   }
-
-  // Hedged / partial: the arb is guaranteed — one leg always wins $1/contract.
-  return t.expectedProfit;
+  return round2(pnl);
 }
 
 export type SettlementResult = { checked: number; settled: number };
@@ -133,7 +129,13 @@ export async function settleFinalPositions(): Promise<SettlementResult> {
     const { gameId } = parseLeg(t.legs[0]?.marketId ?? "");
     const r = gameId ? results.get(gameId) : undefined;
     if (!r || !r.final) continue;
-    const realizedPnl = computeRealized(t, r);
+    let realizedPnl: number;
+    try {
+      realizedPnl = computeRealized(t, r);
+    } catch (error) {
+      console.error(`[arbitrage/settle] could not grade ${t.id}:`, error);
+      continue;
+    }
     await updateTrade(t.id, t.date, {
       status: "settled",
       realizedPnl,

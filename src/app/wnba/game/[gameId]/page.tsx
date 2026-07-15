@@ -3,7 +3,6 @@ import Link from "next/link";
 import Image from "next/image";
 import { WNBAGame } from "@/types/wnba";
 import { OddsOption } from "@/types";
-import InjuryReport from "@/components/InjuryReport";
 
 async function getGame(gameId: string): Promise<WNBAGame | null> {
   try {

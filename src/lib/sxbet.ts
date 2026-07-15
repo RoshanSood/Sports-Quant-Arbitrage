@@ -29,7 +29,7 @@ type SxMarket = {
   gameTime: number;
 };
 
-type SxOrder = {
+export type SxOrder = {
   marketHash: string;
   percentageOdds: string;
   totalBetSize: string;
@@ -40,7 +40,7 @@ type SxOrder = {
 // Best taker price + liquidity for each side of a market's order book.
 type BookPrices = { o1Cents: number; o2Cents: number; o1LiqUsd: number; o2LiqUsd: number };
 
-function bestPrices(orders: SxOrder[] | undefined): BookPrices | null {
+export function bestPrices(orders: SxOrder[] | undefined): BookPrices | null {
   if (!orders?.length) return null;
   // Makers betting outcome TWO let a taker BUY outcome ONE, and vice versa.
   let bestPforO1 = 0;
@@ -48,26 +48,31 @@ function bestPrices(orders: SxOrder[] | undefined): BookPrices | null {
   let bestPforO2 = 0;
   let o2Liq = 0;
   for (const o of orders) {
-    const avail = Number(o.totalBetSize) - Number(o.fillAmount);
-    if (avail <= 0) continue;
+    const remainingMaker = Number(o.totalBetSize) - Number(o.fillAmount);
+    if (remainingMaker <= 0) continue;
     const p = Number(o.percentageOdds) / 1e20;
     if (p <= 0 || p >= 1) continue;
+    const takerUsd = (remainingMaker * (1 - p)) / p / USDC_DECIMALS;
     if (!o.isMakerBettingOutcomeOne) {
       if (p > bestPforO1) {
         bestPforO1 = p;
-        o1Liq = avail;
+        o1Liq = takerUsd;
+      } else if (p === bestPforO1) {
+        o1Liq += takerUsd;
       }
     } else if (p > bestPforO2) {
       bestPforO2 = p;
-      o2Liq = avail;
+      o2Liq = takerUsd;
+    } else if (p === bestPforO2) {
+      o2Liq += takerUsd;
     }
   }
   if (bestPforO1 === 0 || bestPforO2 === 0) return null; // one-sided book
   return {
     o1Cents: Math.round((1 - bestPforO1) * 100),
     o2Cents: Math.round((1 - bestPforO2) * 100),
-    o1LiqUsd: o1Liq / USDC_DECIMALS,
-    o2LiqUsd: o2Liq / USDC_DECIMALS,
+    o1LiqUsd: o1Liq,
+    o2LiqUsd: o2Liq,
   };
 }
 
@@ -153,6 +158,8 @@ export async function fetchSxBetMLBMarkets(games: ArbGame[], leagueId: number = 
           awayLiquidityUsd: oneIsAway ? bp.o1LiqUsd : bp.o2LiqUsd,
           homeLiquidityUsd: oneIsAway ? bp.o2LiqUsd : bp.o1LiqUsd,
           marketId: ml.marketHash,
+          awayNativeSide: oneIsAway ? "outcome_one" : "outcome_two",
+          homeNativeSide: oneIsAway ? "outcome_two" : "outcome_one",
         });
       }
     }
@@ -172,6 +179,8 @@ export async function fetchSxBetMLBMarkets(games: ArbGame[], leagueId: number = 
           awayLiquidityUsd: oneIsHome ? bp.o2LiqUsd : bp.o1LiqUsd,
           homeSignedLine,
           marketId: sp.marketHash,
+          homeNativeSide: oneIsHome ? "outcome_one" : "outcome_two",
+          awayNativeSide: oneIsHome ? "outcome_two" : "outcome_one",
         });
       }
     }
@@ -191,6 +200,8 @@ export async function fetchSxBetMLBMarkets(games: ArbGame[], leagueId: number = 
         overLiquidityUsd: overIsOne ? bp.o1LiqUsd : bp.o2LiqUsd,
         underLiquidityUsd: overIsOne ? bp.o2LiqUsd : bp.o1LiqUsd,
         marketId: t.marketHash,
+        overNativeSide: overIsOne ? "outcome_one" : "outcome_two",
+        underNativeSide: overIsOne ? "outcome_two" : "outcome_one",
       });
     }
     if (totalRows.length) result.totals.set(game.id, totalRows);

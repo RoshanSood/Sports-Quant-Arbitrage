@@ -1,6 +1,7 @@
 import fs from "fs/promises";
 import path from "path";
 import type { Trade } from "@/types/arbitrage";
+import { mutateJson, readJson } from "./jsonStore";
 
 // Ported from src/lib/liveTradeStore.ts — date-keyed JSON, retains `mode` so paper
 // and real trades coexist in the same store.
@@ -15,26 +16,25 @@ function tradeFile(date: string) {
 }
 
 async function readDateFile(date: string): Promise<Trade[]> {
-  try {
-    return JSON.parse(await fs.readFile(tradeFile(date), "utf-8"));
-  } catch {
-    return [];
-  }
+  return readJson(tradeFile(date), [] as Trade[]);
 }
 
 export async function saveTrade(trade: Trade): Promise<void> {
   await ensureDir();
-  const existing = await readDateFile(trade.date);
-  await fs.writeFile(tradeFile(trade.date), JSON.stringify([...existing, trade], null, 2), "utf-8");
+  await mutateJson(tradeFile(trade.date), [] as Trade[], (existing) => ({
+    value: [...existing, trade],
+    result: undefined,
+  }));
 }
 
 export async function updateTrade(id: string, date: string, updates: Partial<Trade>): Promise<boolean> {
-  const trades = await readDateFile(date);
-  const idx = trades.findIndex((t) => t.id === id);
-  if (idx === -1) return false;
-  trades[idx] = { ...trades[idx], ...updates };
-  await fs.writeFile(tradeFile(date), JSON.stringify(trades, null, 2), "utf-8");
-  return true;
+  return mutateJson(tradeFile(date), [] as Trade[], (trades) => {
+    const idx = trades.findIndex((trade) => trade.id === id);
+    if (idx === -1) return { value: trades, result: false };
+    const next = [...trades];
+    next[idx] = { ...next[idx], ...updates };
+    return { value: next, result: true };
+  });
 }
 
 export async function getTradesByDate(date: string): Promise<Trade[]> {

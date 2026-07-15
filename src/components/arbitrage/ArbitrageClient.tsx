@@ -31,9 +31,35 @@ export type PanelKey = "arbs" | "portfolio" | "risk" | "log" | "matchmap" | "ana
 // states) — never mock fixtures. Venues start from the seed so the arena has nodes.
 const USE_MOCK = false;
 
-// Auto-scan cadence while Scanning is on. Each scan re-ingests both venues (~11MB
-// Polymarket pull), so keep it modest to avoid hammering the public APIs.
-const SCAN_INTERVAL_MS = 45000;
+const SCAN_INTERVAL_MS = 120000;
+const ADMIN_SESSION_KEY = "arbitrage_admin_password";
+
+function adminPassword(promptIfMissing: boolean): string | null {
+  const stored = sessionStorage.getItem(ADMIN_SESSION_KEY);
+  if (stored || !promptIfMissing) return stored;
+  const supplied = window.prompt("Admin password required for this change");
+  if (!supplied) return null;
+  sessionStorage.setItem(ADMIN_SESSION_KEY, supplied);
+  return supplied;
+}
+
+async function adminJson(
+  url: string,
+  method: "POST" | "PATCH",
+  body: Record<string, unknown>,
+  promptIfMissing = true
+): Promise<Record<string, unknown> | null> {
+  const password = adminPassword(promptIfMissing);
+  if (!password) return null;
+  const response = await fetch(url, {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...body, password }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (response.status === 401) sessionStorage.removeItem(ADMIN_SESSION_KEY);
+  return response.ok ? data : null;
+}
 
 function todayDateStr(): string {
   const d = new Date();
@@ -101,7 +127,10 @@ export default function ArbitrageClient() {
         if (o?.opportunities) setOpportunities(o.opportunities);
         if (tr?.trades) setTrades(tr.trades);
         if (lg?.logs) setLogs(lg.logs);
-        if (rk?.risk) setRisk(rk.risk);
+        if (rk?.risk) {
+          setRisk(rk.risk);
+          setKillSwitch(Boolean(rk.risk.killSwitch));
+        }
       } catch (e) {
         console.error("[arbitrage] initial load failed:", e);
       }
@@ -186,38 +215,32 @@ export default function ArbitrageClient() {
     };
   }, []);
 
-  const updateVenue = useCallback((id: string, partial: Partial<Venue>) => {
-    setVenues((prev) => prev.map((v) => (v.id === id ? { ...v, ...partial } : v)));
-    if (!USE_MOCK) {
-      fetch("/api/arbitrage/venues", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id, ...partial }),
-      }).catch(console.error);
-    }
+  const updateVenue = useCallback(async (id: string, partial: Partial<Venue>) => {
+    if (USE_MOCK) return setVenues((prev) => prev.map((v) => (v.id === id ? { ...v, ...partial } : v)));
+    const response = await adminJson("/api/arbitrage/venues", "PATCH", { id, ...partial });
+    const updated = response?.venue as Venue | undefined;
+    if (updated) setVenues((prev) => prev.map((venue) => (venue.id === id ? updated : venue)));
   }, []);
 
-  const updateAgent = useCallback((partial: Partial<Agent>) => {
-    setAgent((prev) => ({ ...prev, ...partial }));
-    if (!USE_MOCK) {
-      fetch("/api/arbitrage/agents", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: agent.id, ...partial }),
-      }).catch(console.error);
-    }
+  const updateAgent = useCallback(async (partial: Partial<Agent>) => {
+    if (USE_MOCK) return setAgent((prev) => ({ ...prev, ...partial }));
+    const response = await adminJson("/api/arbitrage/agents", "PATCH", { id: agent.id, ...partial });
+    const updated = response?.agent as Agent | undefined;
+    if (updated) setAgent(updated);
   }, [agent.id]);
 
-  const toggleKill = useCallback((v: boolean) => {
-    setKillSwitch(v);
-    setRisk((prev) => ({ ...prev, killSwitch: v }));
+  const toggleKill = useCallback(async (v: boolean) => {
     if (v) setScanning(false);
+    const response = await adminJson("/api/arbitrage/risk", "PATCH", { killSwitch: v });
+    const updated = response?.risk as RiskSettings | undefined;
+    if (updated) {
+      setRisk(updated);
+      setKillSwitch(updated.killSwitch);
+    }
   }, []);
 
-  // Pull real paper positions + logs written by the execution pipeline. First run
-  // auto-settlement so any finished games close out and land in realized P&L.
+  // Pull positions and logs written by the execution pipeline.
   const refreshPortfolio = useCallback(async () => {
-    await fetch("/api/arbitrage/settle", { method: "POST" }).catch(() => null);
     // Load all positions/logs (across dates) so multi-day open positions show + settle.
     const [tr, lg] = await Promise.all([
       fetch(`/api/arbitrage/trades`).then((r) => r.json()).catch(() => null),
@@ -233,8 +256,6 @@ export default function ArbitrageClient() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      // Auto-settle finished games before loading positions.
-      await fetch("/api/arbitrage/settle", { method: "POST" }).catch(() => null);
       const [tr, lg] = await Promise.all([
         fetch(`/api/arbitrage/trades`).then((r) => r.json()).catch(() => null),
         fetch(`/api/arbitrage/logs`).then((r) => r.json()).catch(() => null),
@@ -263,11 +284,7 @@ export default function ArbitrageClient() {
 
       let ok = false;
       try {
-        const res = await fetch("/api/arbitrage/trades", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ opportunityId: opp.id, date: todayDateStr(), mode: "paper" }),
-        }).then((r) => r.json());
+        const res = await adminJson("/api/arbitrage/trades", "POST", { opportunityId: opp.id, date: todayDateStr(), mode: "paper" });
         ok = res?.result === "executed" || res?.result === "partial";
       } catch (e) {
         console.error(e);
@@ -286,11 +303,8 @@ export default function ArbitrageClient() {
 
   const settleTrade = useCallback(
     async (trade: Trade) => {
-      await fetch("/api/arbitrage/trades", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: trade.id, date: trade.date, status: "settled" }),
-      }).catch(console.error);
+      void trade;
+      await adminJson("/api/arbitrage/settle", "POST", {});
       await refreshPortfolio();
     },
     [refreshPortfolio]
@@ -298,12 +312,12 @@ export default function ArbitrageClient() {
 
   // Re-run the scan: re-ingest fresh quotes, then re-derive match map + opportunities
   // + the main-line watch board. Lets the user refresh the live prices on demand.
-  const refreshScan = useCallback(async () => {
+  const refreshScan = useCallback(async (promptIfMissing = true) => {
     const date = todayDateStr();
     setRefreshing(true);
     try {
-      // GET with refresh=1 re-triggers ingestion server-side (no admin password).
-      await fetch(`/api/arbitrage/markets?date=${date}&refresh=1`).catch(() => null);
+      const started = await adminJson("/api/arbitrage/markets/run", "POST", { date }, promptIfMissing);
+      if (!started) return;
 
       // Poll until ingestion settles, then pull derived data.
       for (let i = 0; i < 12; i++) {
@@ -357,7 +371,7 @@ export default function ArbitrageClient() {
     const id = setInterval(() => {
       if (scanInFlight.current) return;
       scanInFlight.current = true;
-      void Promise.all([refreshScan(), refreshPortfolio()]).finally(() => {
+      void Promise.all([refreshScan(false), refreshPortfolio()]).finally(() => {
         scanInFlight.current = false;
       });
     }, SCAN_INTERVAL_MS);
@@ -380,7 +394,7 @@ export default function ArbitrageClient() {
         onToggleAuto={() => !killSwitch && updateAgent({ autoTrade: !agent.autoTrade })}
         onOpenPanel={(k) => {
           setPanel(k);
-          if (k === "portfolio" || k === "analytics") refreshPortfolio(); // settle finished games on open
+          if (k === "portfolio" || k === "analytics") refreshPortfolio();
         }}
         onOpenAgent={() => setAgentOpen(true)}
         onReset={() => {

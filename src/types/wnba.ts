@@ -19,6 +19,7 @@ export type WNBATeamInfo = {
 export type WNBAGame = {
   id: string;
   date: string;
+  startTimeIso: string;
   startTime: string;
   status: string;
   awayTeam: WNBATeamInfo;

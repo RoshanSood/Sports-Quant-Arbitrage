@@ -59,6 +59,8 @@ const REASON_LABELS: Record<ReasonCode, string> = {
   kill_switch: "Kill switch",
   venue_view_only: "Venue view-only",
   exposure_exceeded: "Exposure cap",
+  daily_loss_exceeded: "Daily loss cap",
+  open_positions_exceeded: "Open position cap",
   final_refresh_failed: "Final refresh failed",
   naked_position: "Naked position",
 };

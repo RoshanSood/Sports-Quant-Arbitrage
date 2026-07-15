@@ -1,22 +1,62 @@
 // Kalshi live execution adapter (manual §12). Places real orders via the RSA-PSS
-// signed POST /portfolio/orders, using either per-request credentials (forwarded from
-// the user's browser) or the server env. Emulates immediate-or-cancel: cross the
-// spread, poll the order, and CANCEL any un-filled remainder so we never leave a
-// resting (naked) order. Guarded upstream by the execution gate.
+// signed V2 order endpoint, using either per-request credentials (forwarded from
+// the user's browser) or the server env. Every order is fill-or-kill.
 
 import crypto from "node:crypto";
-import { isKalshiConfigured, kalshiDelete, kalshiGet, kalshiPost, type KalshiCreds } from "@/lib/kalshiAuth";
+import { isKalshiConfigured, kalshiGet, kalshiPost, type KalshiCreds } from "@/lib/kalshiAuth";
 import type { ExecutionAdapter, OrderRequest, OrderResult } from "./types";
 
 type KalshiBalance = { balance?: number }; // cents
-type KalshiOrder = { order_id?: string; status?: string; taker_fill_count?: number; remaining_count?: number };
-type KalshiOrderResp = { order?: KalshiOrder };
+type KalshiOrder = {
+  order_id?: string;
+  fill_count?: string | number;
+  fill_count_fp?: string | number;
+  average_fill_price?: string | number;
+  average_fill_price_dollars?: string | number;
+};
+type KalshiOrderResp = { order?: KalshiOrder } & KalshiOrder;
 
-function filledCount(o: KalshiOrder | undefined, requested: number): number {
-  if (!o) return 0;
-  if (typeof o.taker_fill_count === "number") return o.taker_fill_count;
-  if (typeof o.remaining_count === "number") return Math.max(0, requested - o.remaining_count);
-  return o.status === "executed" ? requested : 0;
+export type KalshiFokOrderBody = {
+  ticker: string;
+  side: "bid" | "ask";
+  count: string;
+  price: string;
+  client_order_id: string;
+  time_in_force: "fill_or_kill";
+  self_trade_prevention_type: "taker_at_cross";
+  post_only: false;
+  cancel_order_on_pause: true;
+};
+
+export function buildKalshiFokOrder(
+  req: OrderRequest,
+  clientOrderId: string = crypto.randomUUID()
+): KalshiFokOrderBody | null {
+  const ticker = req.nativeMarketId;
+  const side = (req.nativeSide ?? "").toLowerCase();
+  if (
+    !ticker
+    || (side !== "yes" && side !== "no")
+    || !Number.isFinite(req.sizeContracts)
+    || req.sizeContracts <= 0
+    || !Number.isFinite(req.limitPriceCents)
+    || req.limitPriceCents <= 0
+    || req.limitPriceCents >= 100
+  ) return null;
+
+  // V2 quotes the YES book: buying NO is an ask at the complementary price.
+  const yesPrice = side === "yes" ? req.limitPriceCents / 100 : 1 - req.limitPriceCents / 100;
+  return {
+    ticker,
+    side: side === "yes" ? "bid" : "ask",
+    count: req.sizeContracts.toFixed(2),
+    price: yesPrice.toFixed(4),
+    client_order_id: clientOrderId,
+    time_in_force: "fill_or_kill",
+    self_trade_prevention_type: "taker_at_cross",
+    post_only: false,
+    cancel_order_on_pause: true,
+  };
 }
 
 export class KalshiExecutionAdapter implements ExecutionAdapter {
@@ -25,6 +65,10 @@ export class KalshiExecutionAdapter implements ExecutionAdapter {
 
   supportsLive(): boolean {
     return isKalshiConfigured(this.creds);
+  }
+
+  supportsFillOrKill(): boolean {
+    return true;
   }
 
   async getBalanceUsd(): Promise<number | null> {
@@ -42,44 +86,33 @@ export class KalshiExecutionAdapter implements ExecutionAdapter {
     if (!this.supportsLive()) {
       return reject(req, "Kalshi credentials not configured");
     }
-    const ticker = req.nativeMarketId;
     const side = (req.nativeSide ?? "").toLowerCase();
-    if (!ticker || (side !== "yes" && side !== "no")) {
+    const body = buildKalshiFokOrder(req);
+    if (!body) {
       return reject(req, "missing Kalshi native ticker/side — live order not wired for this leg");
     }
-
-    const body: Record<string, unknown> = {
-      ticker,
-      action: "buy",
-      side,
-      count: req.sizeContracts,
-      type: "limit",
-      client_order_id: crypto.randomUUID(),
-      [side === "yes" ? "yes_price" : "no_price"]: req.limitPriceCents,
-    };
+    const yesPrice = Number(body.price);
 
     try {
-      const resp = await kalshiPost<KalshiOrderResp>("/portfolio/orders", body, this.creds);
-      const order = resp.order ?? {};
+      const resp = await kalshiPost<KalshiOrderResp>("/portfolio/events/orders", body, this.creds);
+      const order = resp.order ?? resp;
       const orderId = order.order_id ?? null;
-      let filled = filledCount(order, req.sizeContracts);
-
-      // If it didn't fully fill immediately, re-read once, then cancel the remainder
-      // (IOC emulation) so no naked resting order is left on the book.
-      if (orderId && filled < req.sizeContracts) {
-        try {
-          const got = await kalshiGet<KalshiOrderResp>(`/portfolio/orders/${orderId}`, {}, this.creds);
-          filled = filledCount(got.order, req.sizeContracts);
-          if (filled < req.sizeContracts && got.order?.status !== "canceled") {
-            await kalshiDelete(`/portfolio/orders/${orderId}`, this.creds).catch((e) => console.error("[exec/kalshi] cancel failed:", e));
-          }
-        } catch (e) {
-          console.error("[exec/kalshi] order poll failed:", e);
-        }
-      }
-
-      const status = filled >= req.sizeContracts ? "filled" : filled > 0 ? "partial" : "unfilled";
-      return { ok: filled > 0, orderId, filledContracts: filled, avgPriceCents: req.limitPriceCents, status, raw: resp };
+      const filled = Number(order.fill_count_fp ?? order.fill_count ?? 0);
+      const rawAverage = Number(order.average_fill_price_dollars ?? order.average_fill_price);
+      const yesAverage = Number.isFinite(rawAverage) && rawAverage > 0
+        ? rawAverage > 1 ? rawAverage / 100 : rawAverage
+        : yesPrice;
+      const averageCents = (side === "yes" ? yesAverage : 1 - yesAverage) * 100;
+      const fullyFilled = filled >= req.sizeContracts;
+      return {
+        ok: fullyFilled,
+        orderId,
+        filledContracts: fullyFilled ? req.sizeContracts : 0,
+        avgPriceCents: Number(averageCents.toFixed(4)),
+        status: fullyFilled ? "filled" : "unfilled",
+        error: fullyFilled ? undefined : "Fill-or-kill order was not fully filled",
+        raw: resp,
+      };
     } catch (e) {
       return reject(req, String(e));
     }

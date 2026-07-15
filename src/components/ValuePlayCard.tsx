@@ -50,10 +50,6 @@ export default function ValuePlayCard({ play }: Props) {
     ? `/game/${play.gameId}`
     : `/wnba/game/${play.gameId}`;
 
-  const fullAnalysisRoute = play.league === "MLB"
-    ? `/game/${play.gameId}`
-    : `/wnba/game/${play.gameId}`;
-
   return (
     <div className="bg-[#1a1d24] border border-[#2a2d35] rounded-2xl px-4 py-3 hover:border-[#3a3d45] transition-colors">
       {/* Header row */}

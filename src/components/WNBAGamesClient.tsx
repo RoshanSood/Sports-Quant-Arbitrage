@@ -47,6 +47,8 @@ export default function WNBAGamesClient() {
   }, []);
 
   useEffect(() => {
+    // The effect synchronizes the selected date/source with the remote feed.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     loadGames(date, source);
   }, [date, source, loadGames]);
 

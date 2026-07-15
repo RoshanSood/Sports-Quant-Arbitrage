@@ -138,8 +138,8 @@ function CredentialsTab({ venueId }: { venueId: string }) {
     <div className="space-y-3">
       <div className="rounded-lg border px-3 py-2 flex items-start gap-2 text-[11px]" style={{ borderColor: "#14532d", background: "#0d1a0f", color: "#86efac" }}>
         <ShieldCheck className="w-4 h-4 shrink-0 mt-0.5" />
-        Stored only in THIS browser (localStorage) and sent to the venue to sign your own orders. Never committed,
-        logged, or shared. Clear them any time.
+        Stored in this browser, then forwarded to this app&apos;s server for per-request Kalshi signing. Use only on a
+        trusted local deployment; the server does not persist them. Clear them any time.
       </div>
       {venueId === "kalshi" ? <KalshiCredsForm /> : <OnchainCredsNote venueId={venueId} />}
     </div>

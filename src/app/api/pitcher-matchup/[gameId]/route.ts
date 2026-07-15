@@ -6,7 +6,6 @@ import {
   fetchPitcherSeasonStats,
   fetchPitcherGameLogs,
   computeRecentForm,
-  mlbHeadshotUrl,
 } from "@/lib/mlbStatsApi";
 import { MLBGame } from "@/types";
 import { PitcherMatchupData, PitcherMatchupAnalysis } from "@/types/pitcherMatchup";
@@ -88,7 +87,6 @@ export async function POST(
 
   // ── Step 1: Find MLB Stats API pitcher IDs ────────────────────────────────
   // gameDate is "Sat, May 10" — convert to YYYY-MM-DD for MLB API
-  const dateParts = game.date || gameDate; // game.date is already "YYYY-MM-DD" from ESPN
   const mlbDate = game.date.includes("-") ? game.date : (() => {
     const d = new Date(gameDate + " 2026");
     return d.toISOString().split("T")[0];
@@ -235,4 +233,3 @@ Return ONLY valid JSON. No markdown.`;
 
   return NextResponse.json({ matchup: result });
 }
-

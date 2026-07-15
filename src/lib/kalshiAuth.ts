@@ -61,6 +61,7 @@ export async function kalshiGet<T = unknown>(
   _options: { revalidate?: number } = {},
   creds?: KalshiCreds
 ): Promise<T> {
+  void _options;
   // The signature must NOT include the query string. Split it off before signing.
   const queryIdx = pathWithQuery.indexOf("?");
   const pathOnly = queryIdx === -1 ? pathWithQuery : pathWithQuery.slice(0, queryIdx);

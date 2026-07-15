@@ -391,6 +391,10 @@ export type VenueTotalLine = {
   overLiquidityUsd: number; // $ executable at the over ask (top of book)
   underLiquidityUsd: number; // $ executable at the under ask
   marketId: string;
+  overNativeMarketId?: string;
+  underNativeMarketId?: string;
+  overNativeSide?: string;
+  underNativeSide?: string;
 };
 
 // A two-way market (moneyline) priced from each venue at the executable ask.
@@ -400,6 +404,10 @@ export type VenueTwoWay = {
   homeLiquidityUsd: number;
   awayLiquidityUsd: number;
   marketId: string;
+  homeNativeMarketId?: string;
+  awayNativeMarketId?: string;
+  homeNativeSide?: string;
+  awayNativeSide?: string;
   // Kalshi only: which team the market's YES side represents, so execution knows to
   // buy YES (that team) or NO (the other). Undefined for venues without a yes/no book.
   yesSide?: "home" | "away";
@@ -440,8 +448,8 @@ export async function fetchKalshiMoneylineByGame(
     const noAskCents = Math.round((1 - bid) * 100);
     const yesSize = Number(m.yes_ask_size_fp ?? 0);
     const noSize = Number(m.yes_bid_size_fp ?? 0);
-    const yesUsd = yesSize > 0 ? yesSize * ask : 1e9;
-    const noUsd = noSize > 0 ? noSize * (1 - bid) : 1e9;
+    const yesUsd = yesSize > 0 ? yesSize * ask : 0;
+    const noUsd = noSize > 0 ? noSize * (1 - bid) : 0;
 
     result.set(game.id, {
       homeCents: yesSide === "home" ? yesAskCents : noAskCents,
@@ -497,8 +505,8 @@ export async function fetchKalshiSpreadByGame(
     const noAskCents = Math.round((1 - bid) * 100);
     const yesSize = Number(m.yes_ask_size_fp ?? 0);
     const noSize = Number(m.yes_bid_size_fp ?? 0);
-    const yesUsd = yesSize > 0 ? yesSize * ask : 1e9;
-    const noUsd = noSize > 0 ? noSize * (1 - bid) : 1e9;
+    const yesUsd = yesSize > 0 ? yesSize * ask : 0;
+    const noUsd = noSize > 0 ? noSize * (1 - bid) : 0;
 
     result.set(game.id, {
       homeCents: yesSide === "home" ? yesAskCents : noAskCents,
@@ -551,10 +559,9 @@ export async function fetchKalshiTotalsByGame(
         // UNDER fills against the no ask = yes bid resting size (yes_bid_size).
         const overSize = Number(m.yes_ask_size_fp ?? 0);
         const underSize = Number(m.yes_bid_size_fp ?? 0);
-        // Large sentinel when size is unavailable (JSON-safe, unlike Infinity) — the
-        // cross-venue min then defers to the other leg's real liquidity.
-        const overUsd = overSize > 0 ? overSize * overAsk : 1e9;
-        const underUsd = underSize > 0 ? underSize * underAsk : 1e9;
+        // Unknown size is not executable size, so fail closed with zero depth.
+        const overUsd = overSize > 0 ? overSize * overAsk : 0;
+        const underUsd = underSize > 0 ? underSize * underAsk : 0;
         const prev = byLine.get(line);
         if (!prev || spread < prev.spread) {
           byLine.set(line, { overAsk, underAsk, overUsd, underUsd, spread, ticker: m.ticker });

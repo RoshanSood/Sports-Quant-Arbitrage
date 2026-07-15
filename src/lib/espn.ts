@@ -118,6 +118,7 @@ export async function fetchESPNGames(date: string): Promise<MLBGame[]> {
     return {
       id: event.id as string,
       date: (event.date as string)?.split("T")[0] || date,
+      startTimeIso: (event.date as string) || "",
       startTime: formatTime(event.date as string),
       status,
       awayTeam: parseCompetitor(away as Record<string, unknown>),
@@ -149,6 +150,7 @@ export async function fetchESPNGame(gameId: string): Promise<MLBGame | null> {
   return {
     id: gameId,
     date: dateStr.split("T")[0] || "",
+    startTimeIso: dateStr,
     startTime: formatTime(dateStr),
     status,
     awayTeam: parseCompetitor(away as Record<string, unknown>),

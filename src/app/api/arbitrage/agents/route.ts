@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAgents, updateAgent } from "@/lib/arbitrage/agentStore";
 import type { Agent } from "@/types/arbitrage";
+import { isAuthorized } from "@/lib/adminAuth";
+import { validateAgentPatch } from "@/lib/arbitrage/validation";
 
 export async function GET() {
   try {
@@ -13,11 +15,14 @@ export async function GET() {
 
 export async function PATCH(request: NextRequest) {
   try {
-    const body = (await request.json()) as { id?: string } & Partial<Agent>;
+    const body = (await request.json()) as { id?: string; password?: string } & Partial<Agent>;
+    if (!isAuthorized(request, body.password)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     if (!body.id) {
       return NextResponse.json({ error: "Missing agent id" }, { status: 400 });
     }
-    const { id, ...partial } = body;
+    const { id, password: _password, ...candidate } = body;
+    void _password;
+    const partial = validateAgentPatch(candidate);
 
     // Validate edge thresholds if provided.
     const agents = await getAgents();
@@ -32,6 +37,6 @@ export async function PATCH(request: NextRequest) {
     const updated = await updateAgent(id, partial);
     return NextResponse.json({ ok: true, agent: updated });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return NextResponse.json({ error: String(error) }, { status: 400 });
   }
 }

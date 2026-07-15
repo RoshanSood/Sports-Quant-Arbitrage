@@ -113,6 +113,7 @@ function toLeg(m: NormalizedMarket): MatchedLeg {
     decimalOdds: m.decimalOdds,
     impliedProbability: m.impliedProbability,
     liquidityUsd: m.liquidityUsd,
+    lastUpdated: m.lastUpdated,
     label: legLabel(m),
   };
 }

@@ -30,6 +30,8 @@ export interface ExecutionAdapter {
   id: string;
   // True only when real credentials / a wallet signer are configured for this venue.
   supportsLive(): boolean;
+  // Live arbitrage only uses all-or-nothing venue orders.
+  supportsFillOrKill(): boolean;
   // Account balance in USD, or null if unknown/unconfigured.
   getBalanceUsd(): Promise<number | null>;
   placeOrder(req: OrderRequest): Promise<OrderResult>;

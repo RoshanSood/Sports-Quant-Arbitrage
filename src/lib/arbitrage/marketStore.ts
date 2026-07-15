@@ -1,6 +1,7 @@
 import fs from "fs/promises";
 import path from "path";
 import type { NormalizedMarket } from "@/types/arbitrage";
+import { readJson, writeJsonAtomic } from "./jsonStore";
 
 // Date-keyed normalized-market cache (Phase 3 ingestion output). Mirrors the
 // valuePlaysCache pattern: in-memory Map for hot reads + a running-set so an
@@ -17,8 +18,7 @@ function marketFile(date: string) {
 export async function getMarkets(date: string): Promise<NormalizedMarket[]> {
   if (memStore.has(date)) return memStore.get(date)!;
   try {
-    const raw = await fs.readFile(marketFile(date), "utf-8");
-    const list = JSON.parse(raw) as NormalizedMarket[];
+    const list = await readJson(marketFile(date), [] as NormalizedMarket[]);
     memStore.set(date, list);
     return list;
   } catch {
@@ -27,9 +27,17 @@ export async function getMarkets(date: string): Promise<NormalizedMarket[]> {
 }
 
 export async function saveMarkets(date: string, list: NormalizedMarket[]): Promise<void> {
+  await writeJsonAtomic(marketFile(date), list);
   memStore.set(date, list);
-  await fs.mkdir(DATA_DIR, { recursive: true });
-  await fs.writeFile(marketFile(date), JSON.stringify(list, null, 2), "utf-8");
+}
+
+export async function marketCacheAgeMs(date: string): Promise<number> {
+  const stat = await fs.stat(marketFile(date)).catch(() => null);
+  return stat ? Math.max(0, Date.now() - stat.mtimeMs) : Number.POSITIVE_INFINITY;
+}
+
+export function ingestionLockFile(date: string): string {
+  return path.join(DATA_DIR, `${date}.ingestion`);
 }
 
 export function isRunning(date: string): boolean {

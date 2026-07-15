@@ -2,27 +2,25 @@ import fs from "fs/promises";
 import path from "path";
 import type { RiskSettings } from "@/types/arbitrage";
 import { DEFAULT_RISK } from "./seed";
+import { mutateJson, readJson, writeJsonAtomic } from "./jsonStore";
 
 const DATA_DIR = path.join(process.cwd(), "data", "arbitrage");
 const FILE = path.join(DATA_DIR, "risk.json");
 
 export async function getRiskSettings(): Promise<RiskSettings> {
-  try {
-    return JSON.parse(await fs.readFile(FILE, "utf-8")) as RiskSettings;
-  } catch {
-    await write(DEFAULT_RISK);
-    return DEFAULT_RISK;
-  }
+  const risk = await readJson(FILE, DEFAULT_RISK);
+  if (risk === DEFAULT_RISK) await write(DEFAULT_RISK);
+  return risk;
 }
 
 async function write(risk: RiskSettings): Promise<void> {
   await fs.mkdir(DATA_DIR, { recursive: true });
-  await fs.writeFile(FILE, JSON.stringify(risk, null, 2), "utf-8");
+  await writeJsonAtomic(FILE, risk);
 }
 
 export async function updateRiskSettings(partial: Partial<RiskSettings>): Promise<RiskSettings> {
-  const current = await getRiskSettings();
-  const next = { ...current, ...partial };
-  await write(next);
-  return next;
+  return mutateJson(FILE, DEFAULT_RISK, (current) => {
+    const next = { ...current, ...partial };
+    return { value: next, result: next };
+  });
 }

@@ -207,4 +207,15 @@ describe("computeTwoWayArb", () => {
     expect(arb.isArb).toBe(false);
     expect(arb.holdPct ?? 0).toBeGreaterThan(0);
   });
+
+  it("does not treat unavailable prices as executable arb legs", () => {
+    const arb = computeTwoWayArb(
+      [{ bookId: "fd", american: 250, available: false }],
+      [{ bookId: "dk", american: 250, available: false }],
+      1.5
+    );
+    expect(arb.isArb).toBe(false);
+    expect(arb.bothAvailable).toBe(false);
+    expect(arb.stake).toBeNull();
+  });
 });

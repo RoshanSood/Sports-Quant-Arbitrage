@@ -3,6 +3,8 @@
 // local dev it falls back to "123" so the existing UI keeps working. A CRON_SECRET
 // bearer token is also accepted for scheduled jobs. Never log these values.
 
+import crypto from "node:crypto";
+
 export function adminPassword(): string | null {
   const p = process.env.ADMIN_PASSWORD;
   if (p) return p;
@@ -15,5 +17,9 @@ export function isAuthorized(req: Request, bodyPassword?: string): boolean {
   const auth = req.headers.get("authorization") ?? "";
   if (cronSecret && auth === `Bearer ${cronSecret}`) return true;
   const pw = adminPassword();
-  return pw != null && bodyPassword != null && bodyPassword === pw;
+  const supplied = req.headers.get("x-admin-password") ?? bodyPassword;
+  if (pw == null || supplied == null) return false;
+  const expected = Buffer.from(pw);
+  const actual = Buffer.from(supplied);
+  return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
 }

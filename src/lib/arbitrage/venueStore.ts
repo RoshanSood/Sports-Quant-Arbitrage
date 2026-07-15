@@ -2,23 +2,20 @@ import fs from "fs/promises";
 import path from "path";
 import type { Venue } from "@/types/arbitrage";
 import { DEFAULT_VENUES } from "./seed";
+import { mutateJson, readJson, writeJsonAtomic } from "./jsonStore";
 
 const DATA_DIR = path.join(process.cwd(), "data", "arbitrage");
 const FILE = path.join(DATA_DIR, "venues.json");
 
 async function read(): Promise<Venue[]> {
-  try {
-    return JSON.parse(await fs.readFile(FILE, "utf-8")) as Venue[];
-  } catch {
-    // Seed on first miss (write-through) so the file exists for subsequent updates.
-    await write(DEFAULT_VENUES);
-    return DEFAULT_VENUES;
-  }
+  const venues = await readJson(FILE, DEFAULT_VENUES);
+  if (venues === DEFAULT_VENUES) await write(venues);
+  return venues;
 }
 
 async function write(venues: Venue[]): Promise<void> {
   await fs.mkdir(DATA_DIR, { recursive: true });
-  await fs.writeFile(FILE, JSON.stringify(venues, null, 2), "utf-8");
+  await writeJsonAtomic(FILE, venues);
 }
 
 export async function getVenues(): Promise<Venue[]> {
@@ -30,10 +27,11 @@ export async function getVenue(id: string): Promise<Venue | null> {
 }
 
 export async function updateVenue(id: string, partial: Partial<Venue>): Promise<Venue | null> {
-  const venues = await read();
-  const idx = venues.findIndex((v) => v.id === id);
-  if (idx === -1) return null;
-  venues[idx] = { ...venues[idx], ...partial, id: venues[idx].id };
-  await write(venues);
-  return venues[idx];
+  return mutateJson(FILE, DEFAULT_VENUES, (venues) => {
+    const idx = venues.findIndex((venue) => venue.id === id);
+    if (idx === -1) return { value: venues, result: null };
+    const next = [...venues];
+    next[idx] = { ...next[idx], ...partial, id: next[idx].id };
+    return { value: next, result: next[idx] };
+  });
 }

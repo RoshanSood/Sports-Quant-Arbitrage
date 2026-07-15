@@ -1,14 +1,135 @@
-// The real executor. Runs the shared pre-execution checks, resolves the effective
-// mode through the safety gate (defaults to dry-run unless EVERY live switch is on),
-// then places each leg through its venue adapter and records the Trade + log. Dry-run
-// and live share this exact path — only the adapter differs.
-
-import type { ArbLeg, Trade } from "@/types/arbitrage";
-import { saveTrade } from "../tradeStore";
+import type { ArbLeg, ArbResult, FillStatus, ReasonCode, Trade, TradeStatus } from "@/types/arbitrage";
+import { computeFees } from "../feeEngine";
 import { prepareExecution, writeLog, type ExecutionOutcome } from "../executionPipeline";
+import { updateRiskSettings } from "../riskStore";
+import { saveTrade } from "../tradeStore";
 import { resolveExecutionMode, type ExecMode } from "./config";
 import { getAdapter, venueSupportsLive, type ExecCreds } from "./registry";
 import type { OrderResult } from "./types";
+
+type FillSummary = {
+  legs: ArbLeg[];
+  status: TradeStatus;
+  fillStatus: FillStatus;
+  result: ArbResult | "halted";
+  reasonCode: ReasonCode | null;
+  reason: string;
+  nakedLegIndex?: number;
+  totalCost: number;
+  expectedProfit: number;
+  netEdge: number;
+};
+
+function round(value: number, decimals = 4): number {
+  const factor = 10 ** decimals;
+  return Math.round(value * factor) / factor;
+}
+
+export function summarizeFills(planned: ArbLeg[], results: OrderResult[]): FillSummary {
+  const legs = planned.map((leg, index) => {
+    const fill = results[index];
+    const size = Math.max(0, fill?.filledContracts ?? 0);
+    const priceCents = size > 0 && fill?.avgPriceCents ? fill.avgPriceCents : leg.priceCents;
+    return {
+      ...leg,
+      size,
+      priceCents,
+      decimalOdds: priceCents > 0 ? 100 / priceCents : 0,
+      impliedProbability: priceCents / 100,
+      feeCents: 0,
+    };
+  });
+  const fees = computeFees(legs);
+  legs.forEach((leg, index) => (leg.feeCents = fees[index].feeCents));
+
+  const sizes = legs.map((leg) => leg.size);
+  const anyFilled = sizes.some((size) => size > 0);
+  const everyFilled = sizes.every((size) => size > 0);
+  const matchedSize = everyFilled ? Math.min(...sizes) : 0;
+  const totalCost = round(legs.reduce((sum, leg) => sum + (leg.size * leg.priceCents) / 100, 0), 4);
+  const totalFees = fees.reduce((sum, fee) => sum + fee.feeCents / 100, 0);
+  // This is the guaranteed floor; unmatched contracts are assumed to lose.
+  const expectedProfit = round(matchedSize - totalCost - totalFees, 4);
+  const netEdge = totalCost > 0 ? round(expectedProfit / totalCost, 6) : 0;
+
+  if (!anyFilled) {
+    return {
+      legs,
+      status: "failed",
+      fillStatus: "failed",
+      result: "halted",
+      reasonCode: "hedge_failed",
+      reason: results.find((result) => result?.error)?.error ?? "No legs filled",
+      totalCost,
+      expectedProfit,
+      netEdge,
+    };
+  }
+
+  const filledIndexes = sizes.map((size, index) => (size > 0 ? index : -1)).filter((index) => index >= 0);
+  if (!everyFilled) {
+    return {
+      legs,
+      status: "naked",
+      fillStatus: "partial",
+      result: "naked",
+      reasonCode: "naked_position",
+      reason: "One leg filled and the hedge did not",
+      nakedLegIndex: filledIndexes.length === 1 ? filledIndexes[0] : undefined,
+      totalCost,
+      expectedProfit,
+      netEdge,
+    };
+  }
+
+  const equalSizes = sizes.every((size) => Math.abs(size - sizes[0]) < 1e-9);
+  const fullyFilled = equalSizes && sizes.every((size, index) => size >= planned[index].size);
+  if (fullyFilled) {
+    return {
+      legs,
+      status: "open",
+      fillStatus: "filled",
+      result: "executed",
+      reasonCode: null,
+      reason: "Both fill-or-kill legs filled",
+      totalCost,
+      expectedProfit,
+      netEdge,
+    };
+  }
+
+  return {
+    legs,
+    status: "partial",
+    fillStatus: "partial",
+    result: "partial",
+    reasonCode: equalSizes ? null : "naked_position",
+    reason: equalSizes ? "Both legs filled at a reduced matched size" : "Leg sizes differ; unmatched exposure remains",
+    totalCost,
+    expectedProfit,
+    netEdge,
+  };
+}
+function unattempted(leg: ArbLeg): OrderResult {
+  return {
+    ok: false,
+    orderId: null,
+    filledContracts: 0,
+    avgPriceCents: leg.priceCents,
+    status: "unfilled",
+    error: "Not attempted after an earlier leg failed",
+  };
+}
+
+function breakEvenHedgeLimit(first: ArbLeg, hedge: ArbLeg): number {
+  for (let cents = 99; cents >= hedge.priceCents; cents -= 0.01) {
+    const candidate = { ...hedge, priceCents: cents, impliedProbability: cents / 100 };
+    const fees = computeFees([first, candidate]).reduce((sum, fee) => sum + fee.feeCents / 100, 0);
+    const profit = first.size - (first.size * first.priceCents) / 100 - (candidate.size * cents) / 100 - fees;
+    if (profit >= 0) return round(cents, 2);
+  }
+  return hedge.priceCents;
+}
 
 export async function runExecution(
   opportunityId: string,
@@ -16,11 +137,10 @@ export async function runExecution(
   requestedMode: ExecMode,
   creds?: ExecCreds
 ): Promise<ExecutionOutcome & { mode: ExecMode; blockers: string[] }> {
-  const prep = await prepareExecution(opportunityId, date);
+  const prep = await prepareExecution(opportunityId, date, requestedMode);
   if (prep.kind === "halt") return { ...prep.outcome, mode: "dry_run", blockers: [] };
   const ctx = prep.ctx;
 
-  // ── Resolve effective mode through the hard gate ────────────────────────────
   const gate = resolveExecutionMode({
     requestedMode,
     agentPaper: ctx.agent.paper,
@@ -29,115 +149,114 @@ export async function runExecution(
     stakeUsd: ctx.totalStake,
     venuesSupportLive: venueSupportsLive(ctx.venues, creds),
   });
+  if (requestedMode === "live" && gate.mode !== "live") {
+    const reason = `Live execution blocked: ${gate.blockers.join("; ")}`;
+    await writeLog(ctx.agent, ctx.opportunityMatchup, ctx.venues, ctx.netAfter, "halted", "venue_view_only", reason, { gateBlockers: gate.blockers }, date, "live");
+    return { result: "halted", reasonCode: "venue_view_only", reason, trade: null, mode: "dry_run", blockers: gate.blockers };
+  }
   const mode = gate.mode;
 
-  // ── Place each leg through its adapter ──────────────────────────────────────
-  const results: OrderResult[] = [];
-  for (const leg of ctx.executedLegs) {
+  if (mode === "live") {
+    for (const venue of ctx.venues) {
+      const required = (ctx.legSizes[venue] ?? 0) + ctx.fees.filter((fee) => fee.venueId === venue).reduce((sum, fee) => sum + fee.feeCents / 100, 0);
+      const balance = await getAdapter(venue, mode, creds).getBalanceUsd();
+      if (balance == null || balance < required) {
+        const reason = balance == null ? `${venue} balance could not be verified` : `${venue} balance ${balance.toFixed(2)} < required ${required.toFixed(2)}`;
+        await writeLog(ctx.agent, ctx.opportunityMatchup, ctx.venues, ctx.netAfter, "halted", "insufficient_balance", reason, { venue, balance, required }, date, "live");
+        return { result: "halted", reasonCode: "insufficient_balance", reason, trade: null, mode, blockers: [] };
+      }
+    }
+  }
+
+  const results = ctx.executedLegs.map(unattempted);
+  const order = ctx.executedLegs
+    .map((leg, index) => ({ leg, index }))
+    .sort((a, b) => (a.leg.liquidityUsd ?? 0) - (b.leg.liquidityUsd ?? 0));
+
+  for (let position = 0; position < order.length; position += 1) {
+    const { leg, index } = order[position];
+    const prior = position > 0 ? results[order[position - 1].index] : null;
+    const sizeContracts = prior ? Math.min(leg.size, prior.filledContracts) : leg.size;
+    if (sizeContracts <= 0) break;
     const adapter = getAdapter(leg.venueId, mode, creds);
-    const res = await adapter.placeOrder({
+    const request = {
       venueId: leg.venueId,
       marketId: leg.marketId,
       nativeMarketId: leg.nativeMarketId,
       nativeSide: leg.nativeSide,
       outcome: leg.outcome,
-      sizeContracts: leg.size,
+      sizeContracts,
       limitPriceCents: leg.priceCents,
-    });
-    results.push(res);
+    };
+    let placed = await adapter.placeOrder(request);
+
+    // A second FOK attempt may spend the remaining edge to avoid a naked first leg.
+    if (mode === "live" && position > 0 && placed.filledContracts === 0 && prior && prior.filledContracts > 0) {
+      const firstLeg = { ...order[position - 1].leg, size: prior.filledContracts, priceCents: prior.avgPriceCents };
+      const hedgeLeg = { ...leg, size: prior.filledContracts };
+      const rescueLimit = breakEvenHedgeLimit(firstLeg, hedgeLeg);
+      if (rescueLimit > request.limitPriceCents) {
+        placed = await adapter.placeOrder({ ...request, limitPriceCents: rescueLimit });
+      }
+    }
+    results[index] = placed;
+    if (placed.filledContracts <= 0) break;
   }
 
-  // ── Derive position status from per-leg fills ───────────────────────────────
-  const filledFlags = results.map((r) => r.filledContracts > 0);
-  const fullyFilled = results.every((r, i) => r.filledContracts >= ctx.executedLegs[i].size);
-  const anyFilled = filledFlags.some(Boolean);
-  const allFilled = filledFlags.every(Boolean);
-
-  let status: Trade["status"];
-  let fillStatus: Trade["fillStatus"];
-  let result: ExecutionOutcome["result"];
-  let reasonCode: ExecutionOutcome["reasonCode"] = null;
-  let reason: string;
-  let nakedLegIndex: number | undefined;
-
-  if (allFilled && fullyFilled) {
-    status = "open";
-    fillStatus = "filled";
-    result = "executed";
-    reason = mode === "live" ? "Both legs filled (live)" : "Both legs filled (dry-run)";
-  } else if (allFilled) {
-    status = "partial";
-    fillStatus = "partial";
-    result = "partial";
-    reason = "Partial fill — reduced size";
-  } else if (anyFilled) {
-    status = "naked";
-    fillStatus = "partial";
-    result = "naked";
-    reasonCode = "naked_position";
-    reason = "One leg filled, the hedge did not — unhedged exposure";
-    nakedLegIndex = filledFlags.findIndex(Boolean);
-  } else {
-    // Nothing filled — treat as a hedge failure with no exposure.
-    status = "failed";
-    fillStatus = "failed";
-    result = "halted";
-    reasonCode = "hedge_failed";
-    reason = results.find((r) => r.error)?.error ?? "No legs filled";
-  }
-
-  // Reflect actual executed prices/sizes on the legs.
-  const legs: ArbLeg[] = ctx.executedLegs.map((l, i) => {
-    const r = results[i];
-    const cents = r.avgPriceCents || l.priceCents;
-    return { ...l, priceCents: cents, decimalOdds: 100 / cents, impliedProbability: cents / 100, size: r.filledContracts || (status === "failed" ? 0 : l.size) };
-  });
-
-  const opened = new Date().toISOString();
+  const summary = summarizeFills(ctx.executedLegs, results);
+  const openedAt = new Date().toISOString();
   const tradeMode = mode === "live" ? "live" : "paper";
-  const trade: Trade | null =
-    status === "failed"
-      ? null
-      : {
-          id: `trade-${ctx.opportunityId}-${Date.now()}`,
-          mode: tradeMode,
-          opportunityId: ctx.opportunityId,
-          agentId: ctx.agent.id,
-          matchup: ctx.opportunityMatchup,
-          legs,
-          orderIds: results.map((r) => r.orderId),
-          fillStatus,
-          totalCost: ctx.totalStake,
-          expectedProfit: ctx.expectedProfit,
-          realizedPnl: null,
-          netEdge: ctx.netAfter,
-          clvDrift: null,
-          status,
-          openedAt: opened,
-          closedAt: null,
-          date,
-          nakedLegIndex,
-        };
+  const trade: Trade | null = summary.status === "failed" ? null : {
+    id: `trade-${ctx.opportunityId}-${Date.now()}`,
+    mode: tradeMode,
+    opportunityId: ctx.opportunityId,
+    agentId: ctx.agent.id,
+    matchup: ctx.opportunityMatchup,
+    legs: summary.legs,
+    orderIds: results.map((result) => result.orderId),
+    fillStatus: summary.fillStatus,
+    totalCost: summary.totalCost,
+    expectedProfit: summary.expectedProfit,
+    realizedPnl: null,
+    netEdge: summary.netEdge,
+    clvDrift: null,
+    status: summary.status,
+    openedAt,
+    closedAt: null,
+    date,
+    nakedLegIndex: summary.nakedLegIndex,
+  };
 
   if (trade) await saveTrade(trade);
+  const hasUnmatchedExposure = summary.status === "naked" || (summary.status === "partial" && summary.reasonCode === "naked_position");
+  if (mode === "live" && hasUnmatchedExposure && ctx.risk.pauseOnNaked) {
+    await updateRiskSettings({ killSwitch: true });
+  }
+
   await writeLog(
     ctx.agent,
     ctx.opportunityMatchup,
     ctx.venues,
-    ctx.netAfter,
-    result === "halted" ? "halted" : result,
-    reasonCode,
-    reason,
+    summary.netEdge,
+    summary.result === "halted" ? "halted" : summary.result,
+    summary.reasonCode,
+    summary.reason,
     {
       effectiveMode: mode,
-      gateBlockers: gate.blockers,
-      orders: results.map((r, i) => ({ venue: ctx.executedLegs[i].venueId, orderId: r.orderId, status: r.status, filled: r.filledContracts, error: r.error })),
-      totalCost: ctx.totalStake,
-      expectedProfit: ctx.expectedProfit,
+      orders: results.map((result, index) => ({ venue: ctx.executedLegs[index].venueId, orderId: result.orderId, status: result.status, filled: result.filledContracts, error: result.error })),
+      actualCost: summary.totalCost,
+      guaranteedFloor: summary.expectedProfit,
     },
     date,
     tradeMode
   );
 
-  return { result, reasonCode, reason, trade, mode, blockers: gate.blockers };
+  return {
+    result: summary.result,
+    reasonCode: summary.reasonCode,
+    reason: summary.reason,
+    trade,
+    mode,
+    blockers: gate.blockers,
+  };
 }

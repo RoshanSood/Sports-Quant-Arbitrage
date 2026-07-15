@@ -66,6 +66,8 @@ export default function ValuePlaysClient() {
 
   // Load on date or source change
   useEffect(() => {
+    // These resets belong to a new remote-cache selection.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoading(true);
     setEntry(null);
     setServerRunning(false);

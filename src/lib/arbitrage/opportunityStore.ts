@@ -1,6 +1,6 @@
-import fs from "fs/promises";
 import path from "path";
 import type { ArbOpportunity } from "@/types/arbitrage";
+import { readJson, writeJsonAtomic } from "./jsonStore";
 
 // Date-keyed opportunity cache. Mirrors src/lib/valuePlaysCache.ts: in-memory Map
 // for hot reads + a running-set so a scan can be fired once and polled.
@@ -16,8 +16,7 @@ function oppFile(date: string) {
 export async function getOpportunities(date: string): Promise<ArbOpportunity[]> {
   if (memStore.has(date)) return memStore.get(date)!;
   try {
-    const raw = await fs.readFile(oppFile(date), "utf-8");
-    const list = JSON.parse(raw) as ArbOpportunity[];
+    const list = await readJson(oppFile(date), [] as ArbOpportunity[]);
     memStore.set(date, list);
     return list;
   } catch {
@@ -26,9 +25,8 @@ export async function getOpportunities(date: string): Promise<ArbOpportunity[]> 
 }
 
 export async function saveOpportunities(date: string, list: ArbOpportunity[]): Promise<void> {
+  await writeJsonAtomic(oppFile(date), list);
   memStore.set(date, list);
-  await fs.mkdir(DATA_DIR, { recursive: true });
-  await fs.writeFile(oppFile(date), JSON.stringify(list, null, 2), "utf-8");
 }
 
 export function isRunning(date: string): boolean {

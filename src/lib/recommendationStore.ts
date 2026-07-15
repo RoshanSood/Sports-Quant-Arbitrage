@@ -137,10 +137,6 @@ async function updateInDate(
 
 // ── Stats computation ─────────────────────────────────────────────────────────
 
-function emptyStats(): RecordStats {
-  return { wins: 0, losses: 0, pushes: 0, pending: 0, winRate: 0, unitsPL: 0, roi: 0 };
-}
-
 function computeStats(recs: TrackedRecommendation[]): RecordStats {
   let wins = 0, losses = 0, pushes = 0, pending = 0, unitsPL = 0;
 

@@ -32,7 +32,7 @@ export const DEFAULT_VENUES: Venue[] = [
     currency: "USDC",
     status: "connected", // public Gamma API needs no credentials
     enabled: true,
-    viewOnly: false,
+    viewOnly: true, // execution stays disabled until a vetted FOK adapter is wired
     supportsCancel: false,
     supportsPartialFill: false,
     isIrreversible: true, // CLOB orders treated as irreversible

@@ -2,7 +2,6 @@ import { InjuredPlayer } from "@/types/wnba";
 
 type Props = {
   injuries: InjuredPlayer[];
-  teamName: string;
 };
 
 const STATUS_STYLES: Record<string, string> = {
@@ -17,7 +16,7 @@ function statusStyle(status: string): string {
   return STATUS_STYLES[status.toLowerCase()] ?? "text-gray-400";
 }
 
-export default function InjuryReport({ injuries, teamName }: Props) {
+export default function InjuryReport({ injuries }: Props) {
   if (injuries.length === 0) return null;
 
   return (

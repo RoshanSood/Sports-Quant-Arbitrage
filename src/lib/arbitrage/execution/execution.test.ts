@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { resolveExecutionMode, type GateInput } from "./config";
+import { summarizeFills } from "./executor";
+import { DryRunAdapter } from "./dryRunAdapter";
+import type { ArbLeg } from "@/types/arbitrage";
+import type { OrderResult } from "./types";
 
 // The gate must FAIL CLOSED: live only when every independent switch passes.
 const base: GateInput = {
@@ -55,5 +59,51 @@ describe("execution safety gate", () => {
     const d = resolveExecutionMode({ ...base, venues: ["kalshi", "polymarket"], venuesSupportLive: { kalshi: true, polymarket: false } });
     expect(d.mode).toBe("dry_run");
     expect(d.blockers.some((b) => b.includes("polymarket"))).toBe(true);
+  });
+});
+
+function planned(priceCents: number): ArbLeg {
+  return {
+    venueId: priceCents === 45 ? "kalshi" : "polymarket",
+    marketId: `venue:1:total:6.5:${priceCents === 45 ? "over" : "under"}`,
+    outcome: priceCents === 45 ? "over" : "under",
+    priceCents,
+    decimalOdds: 100 / priceCents,
+    impliedProbability: priceCents / 100,
+    size: 20,
+    feeCents: 0,
+  };
+}
+
+function fill(filledContracts: number, priceCents: number): OrderResult {
+  return { ok: filledContracts > 0, orderId: "o", filledContracts, avgPriceCents: priceCents, status: filledContracts > 0 ? "partial" : "unfilled" };
+}
+
+describe("execution fill accounting", () => {
+  it("never substitutes requested size for a zero fill", () => {
+    const summary = summarizeFills([planned(45), planned(50)], [fill(20, 45), fill(0, 50)]);
+    expect(summary.legs.map((leg) => leg.size)).toEqual([20, 0]);
+    expect(summary.status).toBe("naked");
+    expect(summary.totalCost).toBe(9);
+    expect(summary.expectedProfit).toBeLessThan(0);
+  });
+
+  it("marks unequal nonzero fills as directional partial exposure", () => {
+    const summary = summarizeFills([planned(45), planned(50)], [fill(20, 45), fill(10, 50)]);
+    expect(summary.status).toBe("partial");
+    expect(summary.reasonCode).toBe("naked_position");
+    expect(summary.totalCost).toBe(14);
+  });
+
+  it("paper execution fills the refreshed FOK size without random slippage", async () => {
+    const request = {
+      venueId: "kalshi",
+      marketId: "kalshi:1:total:6.5:over",
+      outcome: "over",
+      sizeContracts: 20,
+      limitPriceCents: 45,
+    };
+    const result = await new DryRunAdapter("kalshi").placeOrder(request);
+    expect(result).toMatchObject({ ok: true, filledContracts: 20, avgPriceCents: 45, status: "filled" });
   });
 });
