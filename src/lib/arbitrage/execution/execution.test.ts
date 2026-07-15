@@ -5,6 +5,7 @@ import { resolveExecutionMode, type GateInput } from "./config";
 const base: GateInput = {
   requestedMode: "live",
   agentPaper: false,
+  agentLive: true,
   killSwitch: false,
   venues: ["kalshi"],
   stakeUsd: 1,
@@ -42,9 +43,10 @@ describe("execution safety gate", () => {
     expect(resolveExecutionMode({ ...base, requestedMode: "dry_run" }).mode).toBe("dry_run");
   });
 
-  it("blocks live for paper agent, kill switch, or over the stake cap", () => {
+  it("blocks live for paper agent, disabled live switch, kill switch, or over the stake cap", () => {
     armEnv();
     expect(resolveExecutionMode({ ...base, agentPaper: true }).mode).toBe("dry_run");
+    expect(resolveExecutionMode({ ...base, agentLive: false }).mode).toBe("dry_run");
     expect(resolveExecutionMode({ ...base, killSwitch: true }).mode).toBe("dry_run");
     expect(resolveExecutionMode({ ...base, stakeUsd: 999 }).mode).toBe("dry_run");
   });

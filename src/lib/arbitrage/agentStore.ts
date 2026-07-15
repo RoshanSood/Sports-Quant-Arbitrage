@@ -28,11 +28,36 @@ export async function getAgent(id: string): Promise<Agent | null> {
   return (await read()).find((a) => a.id === id) ?? null;
 }
 
+function applyExecutionModeInvariant(agent: Agent, partial: Partial<Agent>): Agent {
+  const next = { ...agent, ...partial, id: agent.id };
+  if (partial.live === undefined && partial.paper === undefined) return next;
+
+  if (partial.live === true) {
+    next.live = true;
+    next.paper = false;
+  } else if (partial.paper === true) {
+    next.paper = true;
+    next.live = false;
+  } else if (partial.live === false) {
+    next.live = false;
+    next.paper = true;
+  } else if (partial.paper === false) {
+    next.paper = false;
+    next.live = true;
+  }
+
+  if (next.live === next.paper) {
+    next.live = Boolean(next.live);
+    next.paper = !next.live;
+  }
+  return next;
+}
+
 export async function updateAgent(id: string, partial: Partial<Agent>): Promise<Agent | null> {
   const agents = await read();
   const idx = agents.findIndex((a) => a.id === id);
   if (idx === -1) return null;
-  agents[idx] = { ...agents[idx], ...partial, id: agents[idx].id };
+  agents[idx] = applyExecutionModeInvariant(agents[idx], partial);
   await write(agents);
   return agents[idx];
 }

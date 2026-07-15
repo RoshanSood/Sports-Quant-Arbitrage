@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { ChevronDown, ChevronRight, Lock } from "lucide-react";
+import { ChevronDown, ChevronRight } from "lucide-react";
 import type { Agent, ArbLog } from "@/types/arbitrage";
 import { Drawer, Toggle } from "./ui";
 import { formatClock, formatEdgePct, reasonCodeLabel } from "./arbFormat";
@@ -47,13 +47,10 @@ export default function AgentDrawer({
             <Toggle checked={agent.enabled} onChange={(v) => onChange({ enabled: v })} />
           </SettingRow>
           <SettingRow label="Paper Trading" hint="default">
-            <Toggle checked={agent.paper} onChange={(v) => onChange({ paper: v })} />
+            <Toggle checked={agent.paper} onChange={(v) => onChange({ paper: v, live: !v })} />
           </SettingRow>
-          <SettingRow label="Live Execution" hint="Locked · Alpha build">
-            <span className="inline-flex items-center gap-1 text-gray-600">
-              <Lock className="w-3 h-3" />
-              <Toggle checked={agent.live} disabled />
-            </span>
+          <SettingRow label="Live Execution">
+            <Toggle checked={agent.live} onChange={(v) => onChange({ live: v, paper: !v })} />
           </SettingRow>
           <SettingRow label="Auto-trade" hint="paper · fills arbs without a click">
             <Toggle checked={agent.autoTrade} onChange={(v) => onChange({ autoTrade: v })} />

@@ -52,6 +52,7 @@ export function onchainOrdersEnabled(): boolean {
 export type GateInput = {
   requestedMode: ExecMode;
   agentPaper: boolean;
+  agentLive: boolean;
   killSwitch: boolean;
   venues: string[];
   stakeUsd: number;
@@ -67,6 +68,7 @@ export function resolveExecutionMode(g: GateInput): GateDecision {
   if (g.requestedMode !== "live") blockers.push("caller did not request live");
   if (getExecutionMode() !== "live") blockers.push("ARB_EXECUTION_MODE is not 'live'");
   if (g.agentPaper) blockers.push("agent is in paper mode");
+  if (!g.agentLive) blockers.push("agent live execution switch is off");
   if (g.killSwitch) blockers.push("risk kill switch is on");
   if (g.stakeUsd > maxLiveStakeUsd()) blockers.push(`stake $${g.stakeUsd} exceeds live cap $${maxLiveStakeUsd()}`);
   for (const v of g.venues) {

@@ -25,6 +25,7 @@ export async function runExecution(
   const gate = resolveExecutionMode({
     requestedMode,
     agentPaper: ctx.agent.paper,
+    agentLive: ctx.agent.live,
     killSwitch: ctx.risk.killSwitch,
     venues: ctx.venues,
     stakeUsd: ctx.totalStake,
