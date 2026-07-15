@@ -16,10 +16,11 @@ import { SX_CHAIN_ID } from "./chains";
 import { onchainOrdersEnabled } from "./config";
 import { getSxMetadata } from "./sxMeta";
 import { verifySx } from "./verify";
-import type { ExecutionAdapter, OrderRequest, OrderResult } from "./types";
-import { hasWalletKey, signerFor } from "./wallet";
+import type { ExecutionAdapter, FillConfirmation, OrderRequest, OrderResult } from "./types";
+import { deriveEoa, hasWalletKey, signerFor } from "./wallet";
 
 const SX_FILL_URL = "https://api.sx.bet/orders/fill/v2";
+const SX_TRADES_URL = "https://api.sx.bet/trades";
 
 // USDC risked (in 6-decimal wei) to buy `sizeContracts` at `limitPriceCents`:
 // cost = contracts × price. Each contract pays $1 on win, costs price/100 now.
@@ -202,6 +203,29 @@ export class SxBetExecutionAdapter implements ExecutionAdapter {
       };
     } catch (e) {
       return reject(req, String(e).slice(0, 200));
+    }
+  }
+
+  // SX settles the fill on-chain AFTER the API ack (PENDING → SUCCESS/FAILED), so confirm
+  // by polling /trades for our fillHash. Best-effort: any miss/parse issue → "pending"
+  // (never a false "failed"), so reconciliation won't wrongly flag a leg naked.
+  async confirmFill(orderId: string, req: OrderRequest): Promise<FillConfirmation> {
+    const taker = deriveEoa("sxbet");
+    const marketHash = req.nativeMarketId;
+    if (!taker || !marketHash) return { status: "unknown" };
+    try {
+      const url = `${SX_TRADES_URL}?bettor=${taker}&marketHashes=${marketHash}`;
+      const res = await fetch(url, { cache: "no-store", headers: { Accept: "application/json" } });
+      if (!res.ok) return { status: "pending" };
+      const json = (await res.json()) as { data?: { trades?: Array<{ fillHash?: string; tradeStatus?: string; status?: string; settled?: boolean }> } };
+      const trade = (json.data?.trades ?? []).find((t) => t.fillHash === orderId);
+      if (!trade) return { status: "pending" };
+      const s = (trade.tradeStatus ?? trade.status ?? "").toUpperCase();
+      if (s === "SUCCESS" || trade.settled === true) return { status: "settled" };
+      if (s === "FAILED") return { status: "failed", filledContracts: 0 };
+      return { status: "pending" };
+    } catch {
+      return { status: "unknown" };
     }
   }
 }

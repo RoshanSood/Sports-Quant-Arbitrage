@@ -6,7 +6,7 @@
 
 import crypto from "node:crypto";
 import { isKalshiConfigured, kalshiDelete, kalshiGet, kalshiPost, type KalshiCreds } from "@/lib/kalshiAuth";
-import type { ExecutionAdapter, OrderRequest, OrderResult } from "./types";
+import type { ExecutionAdapter, FillConfirmation, OrderRequest, OrderResult } from "./types";
 
 type KalshiBalance = { balance?: number }; // cents
 type KalshiOrder = { order_id?: string; status?: string; taker_fill_count?: number; remaining_count?: number };
@@ -82,6 +82,19 @@ export class KalshiExecutionAdapter implements ExecutionAdapter {
       return { ok: filled > 0, orderId, filledContracts: filled, avgPriceCents: req.limitPriceCents, status, raw: resp };
     } catch (e) {
       return reject(req, String(e));
+    }
+  }
+
+  // Re-read the order to confirm the fill (Kalshi settles synchronously; IOC leaves no
+  // resting order, so a zero-fill order is a genuine failure).
+  async confirmFill(orderId: string, req: OrderRequest): Promise<FillConfirmation> {
+    try {
+      const got = await kalshiGet<KalshiOrderResp>(`/portfolio/orders/${orderId}`, {}, this.creds);
+      const filled = filledCount(got.order, req.sizeContracts);
+      if (filled > 0) return { status: "settled", filledContracts: filled };
+      return { status: "failed", filledContracts: 0 };
+    } catch {
+      return { status: "unknown" };
     }
   }
 }

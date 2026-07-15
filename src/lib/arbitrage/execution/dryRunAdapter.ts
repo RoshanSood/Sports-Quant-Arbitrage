@@ -2,7 +2,7 @@
 // the fill (latency, slippage, occasional partial/reject) instead of hitting a venue.
 // This is what every venue uses unless the full live gate passes.
 
-import type { ExecutionAdapter, OrderRequest, OrderResult } from "./types";
+import type { ExecutionAdapter, FillConfirmation, OrderRequest, OrderResult } from "./types";
 
 function slip(cents: number): number {
   return Math.min(99, cents + Math.round(Math.random())); // ≤1¢ adverse depth walk
@@ -31,5 +31,11 @@ export class DryRunAdapter implements ExecutionAdapter {
       return { ok: true, orderId: oid, filledContracts: filled, avgPriceCents: slip(req.limitPriceCents), status: filled > 0 ? "partial" : "unfilled" };
     }
     return { ok: true, orderId: oid, filledContracts: req.sizeContracts, avgPriceCents: slip(req.limitPriceCents), status: "filled" };
+  }
+
+  // Simulated finality — a dry-run order "settles" immediately.
+  async confirmFill(_orderId: string, req: OrderRequest): Promise<FillConfirmation> {
+    void _orderId;
+    return { status: "settled", filledContracts: req.sizeContracts };
   }
 }

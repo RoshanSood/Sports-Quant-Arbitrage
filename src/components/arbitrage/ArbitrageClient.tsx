@@ -27,6 +27,16 @@ import AnalyticsPanel from "./AnalyticsPanel";
 
 export type PanelKey = "arbs" | "portfolio" | "risk" | "log" | "matchmap" | "analytics";
 
+// Server response from POST /api/arbitrage/trades. `mode` is the EFFECTIVE mode actually
+// run (dry_run unless every gate switch passed); `blockers` says why live was downgraded.
+export type ExecResponse = {
+  result?: string;
+  reason?: string;
+  mode?: "dry_run" | "live";
+  blockers?: string[];
+  error?: string;
+} | null;
+
 // Live-only: the dashboard renders real ingested data (or honest empty/scanning
 // states) — never mock fixtures. Venues start from the seed so the arena has nodes.
 const USE_MOCK = false;
@@ -251,34 +261,52 @@ export default function ArbitrageClient() {
     };
   }, []);
 
-  // Paper "Play" — animate the agent sliding to leg A + edge to leg B, run the full
-  // execution pipeline server-side, then mark the agent ✓/✗ by the real result and
-  // refresh the Portfolio + Arb Log.
-  const playOpportunity = useCallback(
-    async (opp: ArbOpportunity) => {
+  // Execute an opportunity — animate the agent sliding to leg A + edge to leg B, run the
+  // full pipeline server-side, mark the agent ✓/✗ by the real result, refresh Portfolio +
+  // Arb Log. `mode:"live"` forwards the admin password + (base64) Kalshi creds; the server
+  // still runs it through the execution gate and downgrades to dry-run if any switch fails.
+  const executeOpportunity = useCallback(
+    async (opp: ArbOpportunity, mode: "paper" | "live", password?: string): Promise<ExecResponse> => {
       const legA = opp.legs[0]?.venueId ?? "kalshi";
       const legB = opp.legs[1]?.venueId ?? "polymarket";
       if (tradeTimer.current) clearTimeout(tradeTimer.current);
       setAgentTrade({ legA, legB, status: "pending" });
 
-      let ok = false;
+      let res: ExecResponse = null;
       try {
-        const res = await fetch("/api/arbitrage/trades", {
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (mode === "live") {
+          try {
+            const raw = localStorage.getItem("kalshi_api_creds");
+            const c = raw ? (JSON.parse(raw) as { keyId?: string; privateKey?: string }) : null;
+            if (c?.keyId && c?.privateKey) {
+              headers["x-kalshi-key-id"] = c.keyId;
+              headers["x-kalshi-private-key"] = btoa(c.privateKey); // server base64-decodes
+            }
+          } catch {
+            // no forwarded creds → server env is used
+          }
+        }
+        res = await fetch("/api/arbitrage/trades", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ opportunityId: opp.id, date: todayDateStr(), mode: "paper" }),
+          headers,
+          body: JSON.stringify({ opportunityId: opp.id, date: todayDateStr(), mode, password }),
         }).then((r) => r.json());
-        ok = res?.result === "executed" || res?.result === "partial";
       } catch (e) {
         console.error(e);
       }
 
+      const ok = res?.result === "executed" || res?.result === "partial";
       setAgentTrade({ legA, legB, status: ok ? "success" : "fail" });
       await refreshPortfolio();
       tradeTimer.current = setTimeout(() => setAgentTrade(null), 2800);
+      return res;
     },
     [refreshPortfolio]
   );
+
+  // Auto-trade (paper) always uses paper mode.
+  const playOpportunity = useCallback((opp: ArbOpportunity) => executeOpportunity(opp, "paper"), [executeOpportunity]);
 
   useEffect(() => () => {
     if (tradeTimer.current) clearTimeout(tradeTimer.current);
@@ -436,7 +464,7 @@ export default function ArbitrageClient() {
           />
         )}
         {playOpp && (
-          <PlayModal opp={playOpp} onClose={() => setPlayOpp(null)} onConfirm={playOpportunity} />
+          <PlayModal opp={playOpp} onClose={() => setPlayOpp(null)} onExecute={executeOpportunity} />
         )}
       </div>
     </div>

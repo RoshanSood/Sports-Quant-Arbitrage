@@ -26,6 +26,14 @@ export type OrderResult = {
   raw?: unknown;
 };
 
+// Post-placement settlement confirmation. On-chain venues (SX.bet especially) ack an
+// order before it settles on-chain (PENDING → SUCCESS/FAILED), so the placement result
+// is not final truth — reconciliation re-queries the venue to confirm.
+export type FillConfirmation = {
+  status: "settled" | "pending" | "failed" | "unknown";
+  filledContracts?: number;
+};
+
 export interface ExecutionAdapter {
   id: string;
   // True only when real credentials / a wallet signer are configured for this venue.
@@ -33,4 +41,7 @@ export interface ExecutionAdapter {
   // Account balance in USD, or null if unknown/unconfigured.
   getBalanceUsd(): Promise<number | null>;
   placeOrder(req: OrderRequest): Promise<OrderResult>;
+  // Optional: re-query the venue to confirm an order actually settled. Absent ⇒ the
+  // placement result is treated as authoritative (e.g. Kalshi IOC, Polymarket FOK).
+  confirmFill?(orderId: string, req: OrderRequest): Promise<FillConfirmation>;
 }

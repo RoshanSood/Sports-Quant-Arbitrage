@@ -8,7 +8,8 @@ import { saveTrade } from "../tradeStore";
 import { prepareExecution, writeLog, type ExecutionOutcome } from "../executionPipeline";
 import { resolveExecutionMode, type ExecMode } from "./config";
 import { getAdapter, venueSupportsLive, type ExecCreds } from "./registry";
-import type { OrderResult } from "./types";
+import { applyReconciliation, reconcileLegs, type LegReconciliation } from "./reconcile";
+import type { ExecutionAdapter, OrderRequest } from "./types";
 
 export async function runExecution(
   opportunityId: string,
@@ -31,20 +32,30 @@ export async function runExecution(
   });
   const mode = gate.mode;
 
-  // ── Place each leg through its adapter ──────────────────────────────────────
-  const results: OrderResult[] = [];
-  for (const leg of ctx.executedLegs) {
-    const adapter = getAdapter(leg.venueId, mode, creds);
-    const res = await adapter.placeOrder({
-      venueId: leg.venueId,
-      marketId: leg.marketId,
-      nativeMarketId: leg.nativeMarketId,
-      nativeSide: leg.nativeSide,
-      outcome: leg.outcome,
-      sizeContracts: leg.size,
-      limitPriceCents: leg.priceCents,
-    });
-    results.push(res);
+  // ── Place ALL legs concurrently ─────────────────────────────────────────────
+  // A cross-venue arb must fire both legs at once: placing them sequentially leaves a
+  // window where leg A is filled and leg B's price has moved, creating naked exposure.
+  const adapters: ExecutionAdapter[] = ctx.executedLegs.map((leg) => getAdapter(leg.venueId, mode, creds));
+  const requests: OrderRequest[] = ctx.executedLegs.map((leg) => ({
+    venueId: leg.venueId,
+    marketId: leg.marketId,
+    nativeMarketId: leg.nativeMarketId,
+    nativeSide: leg.nativeSide,
+    outcome: leg.outcome,
+    sizeContracts: leg.size,
+    limitPriceCents: leg.priceCents,
+  }));
+  const placed = await Promise.all(adapters.map((a, i) => a.placeOrder(requests[i])));
+
+  // ── Reconcile settlement (live only) ────────────────────────────────────────
+  // Re-query venues to confirm the orders actually settled (on-chain venues ack before
+  // finality). Folds an explicit settlement failure back into the fill counts so a
+  // half-settled arb is correctly flagged naked instead of falsely reported filled.
+  let reconciliation: LegReconciliation[] = [];
+  let results = placed;
+  if (mode === "live") {
+    reconciliation = await reconcileLegs(adapters, requests, placed);
+    results = applyReconciliation(placed, reconciliation);
   }
 
   // ── Derive position status from per-leg fills ───────────────────────────────
@@ -132,6 +143,9 @@ export async function runExecution(
       effectiveMode: mode,
       gateBlockers: gate.blockers,
       orders: results.map((r, i) => ({ venue: ctx.executedLegs[i].venueId, orderId: r.orderId, status: r.status, filled: r.filledContracts, error: r.error })),
+      reconciliation: reconciliation.length
+        ? reconciliation.map((rc) => ({ venue: rc.venue, orderId: rc.orderId, settlement: rc.confirmation?.status ?? "n/a" }))
+        : undefined,
       totalCost: ctx.totalStake,
       expectedProfit: ctx.expectedProfit,
     },
