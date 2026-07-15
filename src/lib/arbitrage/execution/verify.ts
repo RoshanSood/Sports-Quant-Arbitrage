@@ -3,8 +3,9 @@
 // confirm your funded wallets connect before order code is ever enabled. All reads;
 // no signing, no orders.
 
-import { isKalshiConfigured, kalshiGet } from "@/lib/kalshiAuth";
+import { isKalshiConfigured, kalshiGet, type KalshiCreds } from "@/lib/kalshiAuth";
 import { POLYGON_CHAIN_ID, SX_CHAIN_ID, polygonUsdcAddress } from "./chains";
+import type { OnchainCreds, PolymarketCreds, SxbetCreds } from "./onchainCreds";
 import { getSxMetadata } from "./sxMeta";
 import { deriveEoa, hasWalletKey, providerFor, usdcAllowance, usdcBalance } from "./wallet";
 
@@ -20,10 +21,10 @@ export type VenueVerification = {
   message?: string;
 };
 
-export async function verifyKalshi(): Promise<VenueVerification> {
+export async function verifyKalshi(creds?: KalshiCreds): Promise<VenueVerification> {
   const base: VenueVerification = {
     venueId: "kalshi",
-    configured: isKalshiConfigured(),
+    configured: isKalshiConfigured(creds),
     address: null,
     chainId: null,
     usdcBalance: null,
@@ -33,7 +34,7 @@ export async function verifyKalshi(): Promise<VenueVerification> {
   };
   if (!base.configured) return base;
   try {
-    const b = await kalshiGet<{ balance?: number }>("/portfolio/balance");
+    const b = await kalshiGet<{ balance?: number }>("/portfolio/balance", {}, creds);
     const bal = typeof b.balance === "number" ? b.balance / 100 : null;
     return { ...base, usdcBalance: bal, status: bal && bal > 0 ? "verified" : "no_balance" };
   } catch (e) {
@@ -41,10 +42,10 @@ export async function verifyKalshi(): Promise<VenueVerification> {
   }
 }
 
-export async function verifyPolymarket(): Promise<VenueVerification> {
+export async function verifyPolymarket(creds?: PolymarketCreds): Promise<VenueVerification> {
   const base: VenueVerification = {
     venueId: "polymarket",
-    configured: hasWalletKey("polymarket"),
+    configured: hasWalletKey("polymarket", creds?.key),
     address: null,
     chainId: POLYGON_CHAIN_ID,
     usdcBalance: null,
@@ -53,9 +54,9 @@ export async function verifyPolymarket(): Promise<VenueVerification> {
     status: "missing",
   };
   if (!base.configured) return base;
-  const eoa = deriveEoa("polymarket");
-  if (!eoa) return { ...base, status: "error", message: "invalid POLYMARKET_WALLET_KEY" };
-  const owner = process.env.POLYMARKET_FUNDER?.trim() || eoa; // proxy wallets fund via a funder addr
+  const eoa = deriveEoa("polymarket", creds?.key);
+  if (!eoa) return { ...base, status: "error", message: "invalid Polymarket wallet key" };
+  const owner = creds?.funder?.trim() || process.env.POLYMARKET_FUNDER?.trim() || eoa; // proxy wallets fund via a funder addr
   try {
     const provider = providerFor("polymarket");
     const bal = await usdcBalance(provider, polygonUsdcAddress(), owner);
@@ -65,10 +66,10 @@ export async function verifyPolymarket(): Promise<VenueVerification> {
   }
 }
 
-export async function verifySx(): Promise<VenueVerification> {
+export async function verifySx(creds?: SxbetCreds): Promise<VenueVerification> {
   const base: VenueVerification = {
     venueId: "sxbet",
-    configured: hasWalletKey("sxbet"),
+    configured: hasWalletKey("sxbet", creds?.key),
     address: null,
     chainId: SX_CHAIN_ID,
     usdcBalance: null,
@@ -77,8 +78,8 @@ export async function verifySx(): Promise<VenueVerification> {
     status: "missing",
   };
   if (!base.configured) return base;
-  const eoa = deriveEoa("sxbet");
-  if (!eoa) return { ...base, status: "error", message: "invalid SXBET_WALLET_KEY" };
+  const eoa = deriveEoa("sxbet", creds?.key);
+  if (!eoa) return { ...base, status: "error", message: "invalid SX.bet wallet key" };
   const meta = await getSxMetadata();
   if (!meta?.usdcAddress) return { ...base, address: eoa, status: "error", message: "SX /metadata missing USDC address" };
   const spender = meta.tokenTransferProxy ?? meta.executorAddress;
@@ -95,6 +96,12 @@ export async function verifySx(): Promise<VenueVerification> {
   }
 }
 
-export async function verifyAllVenues(): Promise<VenueVerification[]> {
-  return Promise.all([verifyKalshi(), verifyPolymarket(), verifySx()]);
+export async function verifyAllVenues(
+  creds?: { kalshiCreds?: KalshiCreds } & OnchainCreds
+): Promise<VenueVerification[]> {
+  return Promise.all([
+    verifyKalshi(creds?.kalshiCreds),
+    verifyPolymarket(creds?.polymarket),
+    verifySx(creds?.sxbet),
+  ]);
 }

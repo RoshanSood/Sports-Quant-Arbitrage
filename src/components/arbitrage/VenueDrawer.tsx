@@ -5,6 +5,7 @@ import { KeyRound, ShieldCheck } from "lucide-react";
 import type { ArbOpportunity, NormalizedMarket, Venue } from "@/types/arbitrage";
 import { Drawer, Toggle, Pill } from "./ui";
 import { formatCents, formatEdgePct, formatOdds, venueStatusColor, venueStatusLabel } from "./arbFormat";
+import { clearVenueCreds, loadVenueCreds, onchainAuthHeaders, saveVenueCreds, type PolyCreds } from "./venueCreds";
 
 type Tab = "status" | "live" | "edges" | "settings" | "credentials";
 
@@ -249,7 +250,6 @@ type ExecGate = { onchainOrdersEnabled?: boolean };
 
 function OnchainStatus({ venueId }: { venueId: string }) {
   const name = venueId === "polymarket" ? "Polymarket" : venueId === "sxbet" ? "SX.bet" : venueId;
-  const envVar = venueId === "polymarket" ? "POLYMARKET_WALLET_KEY" : "SXBET_WALLET_KEY";
   const chainName = venueId === "polymarket" ? "Polygon" : "SX Network";
   const [status, setStatus] = useState<ExecStatus | null>(null);
   const [gate, setGate] = useState<ExecGate | null>(null);
@@ -258,9 +258,20 @@ function OnchainStatus({ venueId }: { venueId: string }) {
   const [approving, setApproving] = useState(false);
   const [approveMsg, setApproveMsg] = useState<string | null>(null);
 
+  // Credential entry (write-only). We track only whether a key is stored — never re-read
+  // or display it. The masked wallet address comes back from the server after verifying.
+  // Initialize lazily from localStorage (no set-state-in-effect).
+  const stored = () => (typeof window === "undefined" ? null : loadVenueCreds(venueId));
+  const [hasKey, setHasKey] = useState(() => Boolean(stored()?.key));
+  const [keyInput, setKeyInput] = useState("");
+  const [funder, setFunder] = useState(() => (venueId === "polymarket" ? (stored() as PolyCreds | null)?.funder ?? "" : ""));
+  const [sigType, setSigType] = useState(() => (venueId === "polymarket" ? (stored() as PolyCreds | null)?.sigType ?? 0 : 0));
+  const [editing, setEditing] = useState(() => !stored()?.key);
+
   const load = useCallback(() => {
     let cancelled = false;
-    fetch("/api/arbitrage/execution/status")
+    // Forward the UI-entered wallet key (header) so verification reflects it.
+    fetch("/api/arbitrage/execution/status", { headers: onchainAuthHeaders() })
       .then((r) => r.json())
       .then((d: { venues?: ExecStatus[]; gate?: ExecGate }) => {
         if (cancelled) return;
@@ -278,13 +289,32 @@ function OnchainStatus({ venueId }: { venueId: string }) {
 
   useEffect(() => load(), [load]);
 
+  function saveKey() {
+    const key = keyInput.trim();
+    if (!key) return;
+    saveVenueCreds(venueId, venueId === "polymarket" ? { key, funder: funder.trim() || undefined, sigType } : { key });
+    setKeyInput("");
+    setHasKey(true);
+    setEditing(false);
+    setLoading(true);
+    load();
+  }
+
+  function clearKey() {
+    clearVenueCreds(venueId);
+    setHasKey(false);
+    setEditing(true);
+    setStatus(null);
+    load();
+  }
+
   async function approve() {
     setApproving(true);
     setApproveMsg(null);
     try {
       const res = await fetch("/api/arbitrage/execution/approve", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...onchainAuthHeaders() },
         body: JSON.stringify({ venue: venueId, password: pw }),
       });
       const d = await res.json();
@@ -303,13 +333,77 @@ function OnchainStatus({ venueId }: { venueId: string }) {
   return (
     <div className="space-y-3">
       <div className="rounded-lg border px-3 py-2 text-[11px]" style={{ borderColor: "#3f2d10", background: "#1a160e", color: "#fbbf24" }}>
-        <div className="font-semibold">On-chain venue — server-side wallet</div>
+        <div className="font-semibold">On-chain wallet key</div>
         <p className="text-gray-400 mt-0.5">
-          {name} orders sign with a wallet private key that controls all wallet funds. It&apos;s set{" "}
-          <strong>server-side by the operator</strong> as <code className="text-gray-300">{envVar}</code> (an env var on
-          the host), never typed into a browser. Order signing is implemented; it only fires when{" "}
-          <code className="text-gray-300">ARB_ONCHAIN_ORDERS_ENABLED=true</code> AND every execution-gate switch passes.
+          A wallet private key controls <strong>all</strong> funds in that wallet. It&apos;s kept only in{" "}
+          <strong>this browser</strong>, sent to sign transactions, and never stored on the server or shown again. Use a
+          dedicated wallet funded with just your trading USDC. Order signing only fires when{" "}
+          <code className="text-gray-300">ARB_ONCHAIN_ORDERS_ENABLED=true</code> and every execution-gate switch passes.
         </p>
+      </div>
+
+      {/* Credential entry */}
+      <div className="rounded-lg border px-3 py-2" style={{ borderColor: "#1e2130", background: "#0e1014" }}>
+        {hasKey && !editing ? (
+          <div className="flex items-center justify-between text-[11px]">
+            <span className="inline-flex items-center gap-1.5 text-emerald-400">
+              <span className="w-2 h-2 rounded-full" style={{ background: "#22c55e" }} /> Key stored in this browser
+            </span>
+            <div className="flex gap-2">
+              <button onClick={() => setEditing(true)} className="text-gray-400 hover:text-white">Replace</button>
+              <button onClick={clearKey} className="text-red-400 hover:text-red-300">Clear</button>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-1.5">
+            <label className="text-[10px] uppercase tracking-wide text-gray-500">{name} wallet private key ({chainName})</label>
+            <input
+              type="password"
+              value={keyInput}
+              onChange={(e) => setKeyInput(e.target.value)}
+              placeholder="0x… (64-hex private key)"
+              autoComplete="off"
+              className="w-full rounded bg-[#0b0d11] border px-2 py-1 text-[11px] text-gray-200 font-mono"
+              style={{ borderColor: "#2a2f3e" }}
+            />
+            {venueId === "polymarket" && (
+              <>
+                <label className="text-[10px] uppercase tracking-wide text-gray-500">Funder address (optional — proxy/safe wallets)</label>
+                <input
+                  value={funder}
+                  onChange={(e) => setFunder(e.target.value)}
+                  placeholder="0x… leave blank for a direct EOA wallet"
+                  className="w-full rounded bg-[#0b0d11] border px-2 py-1 text-[11px] text-gray-200 font-mono"
+                  style={{ borderColor: "#2a2f3e" }}
+                />
+                <label className="text-[10px] uppercase tracking-wide text-gray-500">Signature type</label>
+                <select
+                  value={sigType}
+                  onChange={(e) => setSigType(Number(e.target.value))}
+                  className="w-full rounded bg-[#0b0d11] border px-2 py-1 text-[11px] text-gray-200"
+                  style={{ borderColor: "#2a2f3e" }}
+                >
+                  <option value={0}>EOA — direct wallet (default)</option>
+                  <option value={1}>Polymarket proxy (email/Magic)</option>
+                  <option value={2}>Gnosis Safe</option>
+                </select>
+              </>
+            )}
+            <div className="flex gap-2 pt-0.5">
+              <button
+                onClick={saveKey}
+                disabled={!keyInput.trim()}
+                className="rounded px-2 py-1 text-[11px] font-semibold text-white disabled:opacity-40"
+                style={{ background: "#2563eb" }}
+              >
+                Save key
+              </button>
+              {hasKey && (
+                <button onClick={() => setEditing(false)} className="rounded px-2 py-1 text-[11px] text-gray-400 hover:text-white">Cancel</button>
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
       {status?.configured && (
@@ -328,9 +422,9 @@ function OnchainStatus({ venueId }: { venueId: string }) {
         ) : !status || !status.configured ? (
           <div className="text-[11px] text-gray-400">
             <span className="inline-flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full" style={{ background: "#6b7280" }} /> Not configured
+              <span className="w-2 h-2 rounded-full" style={{ background: "#6b7280" }} /> No key
             </span>
-            <p className="mt-1 text-gray-600">Set <code className="text-gray-400">{envVar}</code> on the server, then reopen this tab.</p>
+            <p className="mt-1 text-gray-600">Enter your {name} wallet key above to verify balance + allowance.</p>
           </div>
         ) : (
           <div className="space-y-1.5 text-[11px]">
@@ -350,7 +444,7 @@ function OnchainStatus({ venueId }: { venueId: string }) {
 
             <div className="pt-2 mt-1 border-t space-y-1.5" style={{ borderColor: "#1e2130" }}>
               <p className="text-[10px] text-gray-500">
-                One-time: approve the {name} exchange to spend USDC (required before any fill). Signed server-side; admin only.
+                One-time: approve the {name} exchange to spend USDC (required before any fill). Signed with your key; admin password gates the action.
               </p>
               <div className="flex gap-1.5">
                 <input

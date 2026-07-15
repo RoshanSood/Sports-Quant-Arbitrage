@@ -16,8 +16,9 @@ import { SX_CHAIN_ID } from "./chains";
 import { onchainOrdersEnabled } from "./config";
 import { getSxMetadata } from "./sxMeta";
 import { verifySx } from "./verify";
+import type { SxbetCreds } from "./onchainCreds";
 import type { ExecutionAdapter, FillConfirmation, OrderRequest, OrderResult } from "./types";
-import { deriveEoa, hasWalletKey, signerFor } from "./wallet";
+import { deriveEoa, signerFor, walletKey } from "./wallet";
 
 const SX_FILL_URL = "https://api.sx.bet/orders/fill/v2";
 const SX_TRADES_URL = "https://api.sx.bet/trades";
@@ -121,18 +122,23 @@ type SxFillResponse = { status?: string; message?: string; data?: { fillHash?: s
 
 export class SxBetExecutionAdapter implements ExecutionAdapter {
   id = "sxbet";
+  constructor(private creds?: SxbetCreds) {}
+
+  private key(): string | undefined {
+    return walletKey("sxbet", this.creds?.key);
+  }
 
   supportsLive(): boolean {
-    return hasWalletKey("sxbet") && onchainOrdersEnabled();
+    return Boolean(this.key()) && onchainOrdersEnabled();
   }
 
   async getBalanceUsd(): Promise<number | null> {
-    if (!hasWalletKey("sxbet")) return null;
-    return (await verifySx()).usdcBalance;
+    if (!this.key()) return null;
+    return (await verifySx(this.creds)).usdcBalance;
   }
 
   async placeOrder(req: OrderRequest): Promise<OrderResult> {
-    if (!hasWalletKey("sxbet")) return reject(req, "SX.bet wallet key not configured");
+    if (!this.key()) return reject(req, "SX.bet wallet key not configured");
     if (!onchainOrdersEnabled()) return reject(req, "on-chain orders disabled (set ARB_ONCHAIN_ORDERS_ENABLED=true after $1 validation)");
 
     const marketHash = req.nativeMarketId;
@@ -140,8 +146,8 @@ export class SxBetExecutionAdapter implements ExecutionAdapter {
     if (!marketHash || (side !== "one" && side !== "two")) {
       return reject(req, "missing SX.bet marketHash/outcome side — live order not wired for this leg");
     }
-    const wallet = signerFor("sxbet");
-    if (!wallet) return reject(req, "invalid SXBET_WALLET_KEY");
+    const wallet = signerFor("sxbet", this.creds?.key);
+    if (!wallet) return reject(req, "invalid SX.bet wallet key");
 
     const meta = await getSxMetadata();
     if (!meta?.usdcAddress || !meta.eip712FillHasher || !meta.domainVersion) {
@@ -210,7 +216,7 @@ export class SxBetExecutionAdapter implements ExecutionAdapter {
   // by polling /trades for our fillHash. Best-effort: any miss/parse issue → "pending"
   // (never a false "failed"), so reconciliation won't wrongly flag a leg naked.
   async confirmFill(orderId: string, req: OrderRequest): Promise<FillConfirmation> {
-    const taker = deriveEoa("sxbet");
+    const taker = deriveEoa("sxbet", this.creds?.key);
     const marketHash = req.nativeMarketId;
     if (!taker || !marketHash) return { status: "unknown" };
     try {

@@ -10,43 +10,41 @@ import { ClobClient, type ApiKeyCreds, Chain, OrderType, Side, SignatureType } f
 import { Wallet } from "ethers";
 import { POLYGON_CHAIN_ID, polymarketClobHost } from "./chains";
 import { onchainOrdersEnabled } from "./config";
+import type { PolymarketCreds } from "./onchainCreds";
 import { verifyPolymarket } from "./verify";
 import type { ExecutionAdapter, OrderRequest, OrderResult } from "./types";
-import { clobSignerShim, hasWalletKey, walletKey } from "./wallet";
+import { clobSignerShim, walletKey } from "./wallet";
 
 // Which signature scheme the funded wallet uses. Default EOA (direct wallet). Users
-// whose USDC lives in a Polymarket proxy/safe set POLYMARKET_FUNDER + POLYMARKET_SIG_TYPE.
-function signatureType(): SignatureType {
-  const v = Number(process.env.POLYMARKET_SIG_TYPE);
+// whose USDC lives in a Polymarket proxy/safe pass funder + sigType (UI or env).
+function signatureType(sig?: number): SignatureType {
+  const v = sig ?? Number(process.env.POLYMARKET_SIG_TYPE);
   if (v === 1) return SignatureType.POLY_PROXY;
   if (v === 2) return SignatureType.POLY_GNOSIS_SAFE;
   return SignatureType.EOA;
 }
 
-// Cache the authenticated (L2) client per process — deriving API creds signs + hits
-// the network, so we do it once.
-let cachedClient: ClobClient | null = null;
-let cachedForKey: string | null = null;
+// Cache authenticated (L2) clients per wallet key — deriving API creds signs + hits the
+// network, so we do it once per key (UI-entered or env). Keyed by the raw key string.
+const clientCache = new Map<string, ClobClient>();
 
-async function getClient(): Promise<ClobClient> {
-  const key = walletKey("polymarket");
-  if (!key) throw new Error("POLYMARKET_WALLET_KEY not set");
-  if (cachedClient && cachedForKey === key) return cachedClient;
+async function buildClient(key: string, funderOverride?: string, sigType?: number): Promise<ClobClient> {
+  const cached = clientCache.get(key);
+  if (cached) return cached;
 
   const wallet = new Wallet(key);
   const signer = clobSignerShim(wallet);
   const host = polymarketClobHost();
   const chainId = POLYGON_CHAIN_ID as Chain;
-  const sigType = signatureType();
-  const funder = process.env.POLYMARKET_FUNDER?.trim() || (await wallet.getAddress());
+  const st = signatureType(sigType);
+  const funder = funderOverride?.trim() || process.env.POLYMARKET_FUNDER?.trim() || (await wallet.getAddress());
 
   // L1: sign to create-or-derive the L2 API credentials, then build the L2 client.
-  const l1 = new ClobClient(host, chainId, signer, undefined, sigType, funder);
+  const l1 = new ClobClient(host, chainId, signer, undefined, st, funder);
   const creds: ApiKeyCreds = await l1.createOrDeriveApiKey();
-  const client = new ClobClient(host, chainId, signer, creds, sigType, funder);
+  const client = new ClobClient(host, chainId, signer, creds, st, funder);
 
-  cachedClient = client;
-  cachedForKey = key;
+  clientCache.set(key, client);
   return client;
 }
 
@@ -72,18 +70,24 @@ function avgCentsFrom(resp: PostOrderResponse, limitCents: number): number {
 
 export class PolymarketExecutionAdapter implements ExecutionAdapter {
   id = "polymarket";
+  constructor(private creds?: PolymarketCreds) {}
+
+  private key(): string | undefined {
+    return walletKey("polymarket", this.creds?.key);
+  }
 
   supportsLive(): boolean {
-    return hasWalletKey("polymarket") && onchainOrdersEnabled();
+    return Boolean(this.key()) && onchainOrdersEnabled();
   }
 
   async getBalanceUsd(): Promise<number | null> {
-    if (!hasWalletKey("polymarket")) return null;
-    return (await verifyPolymarket()).usdcBalance;
+    if (!this.key()) return null;
+    return (await verifyPolymarket(this.creds)).usdcBalance;
   }
 
   async placeOrder(req: OrderRequest): Promise<OrderResult> {
-    if (!hasWalletKey("polymarket")) return reject(req, "Polymarket wallet key not configured");
+    const key = this.key();
+    if (!key) return reject(req, "Polymarket wallet key not configured");
     if (!onchainOrdersEnabled()) return reject(req, "on-chain orders disabled (set ARB_ONCHAIN_ORDERS_ENABLED=true after $1 validation)");
 
     // For Polymarket we thread the ERC-1155 CLOB token id as the leg's nativeSide.
@@ -92,7 +96,7 @@ export class PolymarketExecutionAdapter implements ExecutionAdapter {
 
     const price = req.limitPriceCents / 100; // probability price 0..1
     try {
-      const client = await getClient();
+      const client = await buildClient(key, this.creds?.funder, this.creds?.sigType);
       // createOrder auto-resolves tickSize + negRisk for the token and rounds price.
       const signed = await client.createOrder({ tokenID, price, size: req.sizeContracts, side: Side.BUY });
       const resp = (await client.postOrder(signed, OrderType.FOK)) as PostOrderResponse;

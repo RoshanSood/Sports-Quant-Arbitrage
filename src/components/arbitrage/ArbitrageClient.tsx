@@ -24,6 +24,7 @@ import AgentDrawer from "./AgentDrawer";
 import VenueDrawer from "./VenueDrawer";
 import PlayModal from "./PlayModal";
 import AnalyticsPanel from "./AnalyticsPanel";
+import { allAuthHeaders } from "./venueCreds";
 
 export type PanelKey = "arbs" | "portfolio" | "risk" | "log" | "matchmap" | "analytics";
 
@@ -274,19 +275,10 @@ export default function ArbitrageClient() {
 
       let res: ExecResponse = null;
       try {
+        // Live: forward the venue creds entered in the UI (localStorage → headers). The
+        // server uses them transiently and never persists them; env is the fallback.
         const headers: Record<string, string> = { "Content-Type": "application/json" };
-        if (mode === "live") {
-          try {
-            const raw = localStorage.getItem("kalshi_api_creds");
-            const c = raw ? (JSON.parse(raw) as { keyId?: string; privateKey?: string }) : null;
-            if (c?.keyId && c?.privateKey) {
-              headers["x-kalshi-key-id"] = c.keyId;
-              headers["x-kalshi-private-key"] = btoa(c.privateKey); // server base64-decodes
-            }
-          } catch {
-            // no forwarded creds → server env is used
-          }
-        }
+        if (mode === "live") Object.assign(headers, allAuthHeaders());
         res = await fetch("/api/arbitrage/trades", {
           method: "POST",
           headers,

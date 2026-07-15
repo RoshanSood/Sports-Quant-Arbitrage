@@ -4,6 +4,7 @@ import { settledPnl } from "@/lib/arbitrage/executionPipeline";
 import { runExecution } from "@/lib/arbitrage/execution/executor";
 import { isAuthorized } from "@/lib/adminAuth";
 import { extractCredsFromHeaders } from "@/lib/kalshiAuth";
+import { extractOnchainCredsFromHeaders } from "@/lib/arbitrage/execution/onchainCreds";
 import type { Trade, TradeMode } from "@/types/arbitrage";
 
 function todayDateStr(): string {
@@ -38,10 +39,11 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Live execution requires admin authorization" }, { status: 401 });
     }
     const date = body.date ?? todayDateStr();
-    // Kalshi creds forwarded from the browser (localStorage → headers); undefined
-    // falls back to server env inside the adapter.
+    // Venue creds forwarded from the browser (localStorage → headers); undefined falls
+    // back to server env inside each adapter. Used transiently, never persisted/logged.
     const kalshiCreds = extractCredsFromHeaders(request.headers);
-    const outcome = await runExecution(body.opportunityId, date, requestedMode, { kalshiCreds });
+    const onchain = extractOnchainCredsFromHeaders(request.headers);
+    const outcome = await runExecution(body.opportunityId, date, requestedMode, { kalshiCreds, ...onchain });
     return NextResponse.json({
       ok: outcome.result !== "halted",
       result: outcome.result,

@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { verifyAllVenues } from "@/lib/arbitrage/execution/verify";
+import { extractOnchainCredsFromHeaders } from "@/lib/arbitrage/execution/onchainCreds";
+import { extractCredsFromHeaders } from "@/lib/kalshiAuth";
 import { getExecutionMode, liveVenueAllowlist, maxLiveStakeUsd, onchainOrdersEnabled } from "@/lib/arbitrage/execution/config";
 
 // Execution readiness per venue (manual §19, §24): masked wallet identity + USDC
@@ -10,9 +12,12 @@ function maskAddress(a: string | null): string | null {
   return `${a.slice(0, 6)}…${a.slice(-4)}`;
 }
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
-    const venues = await verifyAllVenues();
+    // Reflect UI-entered creds (forwarded as headers) as well as server-env creds.
+    const kalshiCreds = extractCredsFromHeaders(request.headers);
+    const onchain = extractOnchainCredsFromHeaders(request.headers);
+    const venues = await verifyAllVenues({ kalshiCreds, ...onchain });
     return NextResponse.json({
       venues: venues.map((v) => ({ ...v, address: maskAddress(v.address) })),
       gate: {

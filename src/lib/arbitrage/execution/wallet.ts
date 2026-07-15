@@ -8,19 +8,23 @@ import { ERC20_ABI, USDC_DECIMALS, polygonRpcUrl, sxRpcUrl } from "./chains";
 
 export type OnchainVenue = "polymarket" | "sxbet";
 
-export function walletKey(venue: OnchainVenue): string | undefined {
+// Resolve the wallet key for a venue. A per-request `override` (forwarded from the
+// user's browser) wins over the server env var, so credentials can be entered in the
+// UI instead of set on the host. Never logged.
+export function walletKey(venue: OnchainVenue, override?: string): string | undefined {
+  if (override && override.trim()) return override.trim();
   const raw = venue === "polymarket" ? process.env.POLYMARKET_WALLET_KEY : process.env.SXBET_WALLET_KEY;
   return raw?.trim() || undefined;
 }
 
-export function hasWalletKey(venue: OnchainVenue): boolean {
-  return Boolean(walletKey(venue));
+export function hasWalletKey(venue: OnchainVenue, override?: string): boolean {
+  return Boolean(walletKey(venue, override));
 }
 
 // Derive the public EOA address from the configured key, offline. Returns null if
 // the key is missing or malformed (never throws the key into a stack trace).
-export function deriveEoa(venue: OnchainVenue): string | null {
-  const key = walletKey(venue);
+export function deriveEoa(venue: OnchainVenue, override?: string): string | null {
+  const key = walletKey(venue, override);
   if (!key) return null;
   try {
     return new Wallet(key).address;
@@ -33,9 +37,9 @@ export function providerFor(venue: OnchainVenue): JsonRpcProvider {
   return new JsonRpcProvider(venue === "polymarket" ? polygonRpcUrl() : sxRpcUrl());
 }
 
-// A signer connected to the venue's chain (for reads + later order signing).
-export function signerFor(venue: OnchainVenue): Wallet | null {
-  const key = walletKey(venue);
+// A signer connected to the venue's chain (for reads + order signing).
+export function signerFor(venue: OnchainVenue, override?: string): Wallet | null {
+  const key = walletKey(venue, override);
   if (!key) return null;
   try {
     return new Wallet(key, providerFor(venue));
@@ -70,9 +74,10 @@ export async function approveUsdc(
   venue: OnchainVenue,
   usdcAddress: string,
   spender: string,
-  amountUsd?: number
+  amountUsd?: number,
+  keyOverride?: string
 ): Promise<ApproveResult> {
-  const signer = signerFor(venue);
+  const signer = signerFor(venue, keyOverride);
   if (!signer) return { ok: false, error: `no wallet key for ${venue}` };
   try {
     const c = new Contract(usdcAddress, ERC20_ABI, signer);

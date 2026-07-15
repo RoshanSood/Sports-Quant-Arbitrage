@@ -12,6 +12,7 @@ import {
   polygonUsdcAddress,
 } from "@/lib/arbitrage/execution/chains";
 import { getSxMetadata } from "@/lib/arbitrage/execution/sxMeta";
+import { extractOnchainCredsFromHeaders } from "@/lib/arbitrage/execution/onchainCreds";
 import { approveUsdc, hasWalletKey } from "@/lib/arbitrage/execution/wallet";
 
 type Body = { venue?: "polymarket" | "sxbet"; password?: string; amountUsd?: number };
@@ -31,16 +32,19 @@ export async function POST(req: Request) {
   if (venue !== "polymarket" && venue !== "sxbet") {
     return NextResponse.json({ error: "venue must be 'polymarket' or 'sxbet'" }, { status: 400 });
   }
-  if (!hasWalletKey(venue)) {
-    return NextResponse.json({ error: `${venue} wallet key not configured server-side` }, { status: 400 });
+  // Wallet key from the UI (header) or server env.
+  const onchain = extractOnchainCredsFromHeaders(req.headers);
+  const keyOverride = venue === "polymarket" ? onchain.polymarket?.key : onchain.sxbet?.key;
+  if (!hasWalletKey(venue, keyOverride)) {
+    return NextResponse.json({ error: `${venue} wallet key not provided (enter it in the venue Credentials tab or set it server-side)` }, { status: 400 });
   }
 
   try {
     if (venue === "polymarket") {
       const usdc = polygonUsdcAddress();
       // Approve both exchanges (regular + neg-risk) so either market type can fill.
-      const ctf = await approveUsdc("polymarket", usdc, POLYMARKET_CTF_EXCHANGE, body.amountUsd);
-      const negRisk = await approveUsdc("polymarket", usdc, POLYMARKET_NEG_RISK_EXCHANGE, body.amountUsd);
+      const ctf = await approveUsdc("polymarket", usdc, POLYMARKET_CTF_EXCHANGE, body.amountUsd, keyOverride);
+      const negRisk = await approveUsdc("polymarket", usdc, POLYMARKET_NEG_RISK_EXCHANGE, body.amountUsd, keyOverride);
       return NextResponse.json({ venue, spenders: { ctfExchange: ctf, negRiskExchange: negRisk } });
     }
     // sxbet: approve the TokenTransferProxy from live metadata.
@@ -49,7 +53,7 @@ export async function POST(req: Request) {
     if (!meta?.usdcAddress || !spender) {
       return NextResponse.json({ error: "SX /metadata missing USDC address or transfer proxy" }, { status: 502 });
     }
-    const result = await approveUsdc("sxbet", meta.usdcAddress, spender, body.amountUsd);
+    const result = await approveUsdc("sxbet", meta.usdcAddress, spender, body.amountUsd, keyOverride);
     return NextResponse.json({ venue, spender, result });
   } catch (e) {
     return NextResponse.json({ error: String(e).slice(0, 200) }, { status: 500 });
