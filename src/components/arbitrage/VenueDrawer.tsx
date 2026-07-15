@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { KeyRound, ShieldCheck } from "lucide-react";
 import type { ArbOpportunity, NormalizedMarket, Venue } from "@/types/arbitrage";
 import { Drawer, Toggle, Pill } from "./ui";
@@ -141,7 +141,7 @@ function CredentialsTab({ venueId }: { venueId: string }) {
         Stored only in THIS browser (localStorage) and sent to the venue to sign your own orders. Never committed,
         logged, or shared. Clear them any time.
       </div>
-      {venueId === "kalshi" ? <KalshiCredsForm /> : <OnchainCredsNote venueId={venueId} />}
+      {venueId === "kalshi" ? <KalshiCredsForm /> : <OnchainStatus venueId={venueId} />}
     </div>
   );
 }
@@ -226,16 +226,90 @@ function KalshiCredsForm() {
   );
 }
 
-function OnchainCredsNote({ venueId }: { venueId: string }) {
+type ExecStatus = {
+  venueId: string;
+  configured: boolean;
+  address: string | null;
+  chainId: number | null;
+  usdcBalance: number | null;
+  allowance: number | null;
+  status: string;
+  message?: string;
+};
+
+const STATUS_STYLE: Record<string, { color: string; label: string }> = {
+  missing: { color: "#6b7280", label: "Not configured" },
+  verified: { color: "#22c55e", label: "Verified" },
+  no_balance: { color: "#f59e0b", label: "No USDC balance" },
+  needs_allowance: { color: "#f59e0b", label: "Needs USDC allowance" },
+  error: { color: "#ef4444", label: "Error" },
+};
+
+function OnchainStatus({ venueId }: { venueId: string }) {
   const name = venueId === "polymarket" ? "Polymarket" : venueId === "sxbet" ? "SX.bet" : venueId;
+  const envVar = venueId === "polymarket" ? "POLYMARKET_WALLET_KEY" : "SXBET_WALLET_KEY";
+  const chainName = venueId === "polymarket" ? "Polygon" : "SX Network";
+  const [status, setStatus] = useState<ExecStatus | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/arbitrage/execution/status")
+      .then((r) => r.json())
+      .then((d: { venues?: ExecStatus[] }) => {
+        if (cancelled) return;
+        setStatus((d.venues ?? []).find((v) => v.venueId === venueId) ?? null);
+        setLoading(false);
+      })
+      .catch(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [venueId]);
+
+  const s = status ? STATUS_STYLE[status.status] ?? STATUS_STYLE.error : null;
+
   return (
-    <div className="rounded-lg border px-3 py-2 text-[11px] space-y-1" style={{ borderColor: "#3f2d10", background: "#1a160e", color: "#fbbf24" }}>
-      <div className="font-semibold">On-chain venue — no key entry here</div>
-      <p className="text-gray-400">
-        {name} orders are signed with a wallet private key that controls all funds in the wallet. For safety that
-        key is configured <strong>server-side by the operator</strong> (an environment variable on the host), never
-        typed into a browser. On-chain live execution is not yet enabled.
-      </p>
+    <div className="space-y-3">
+      <div className="rounded-lg border px-3 py-2 text-[11px]" style={{ borderColor: "#3f2d10", background: "#1a160e", color: "#fbbf24" }}>
+        <div className="font-semibold">On-chain venue — server-side wallet</div>
+        <p className="text-gray-400 mt-0.5">
+          {name} orders sign with a wallet private key that controls all wallet funds. It&apos;s set{" "}
+          <strong>server-side by the operator</strong> as <code className="text-gray-300">{envVar}</code> (an env var on
+          the host), never typed into a browser. Live order execution is not yet enabled — this tab verifies the wallet.
+        </p>
+      </div>
+
+      <div className="rounded-lg border px-3 py-2" style={{ borderColor: "#1e2130", background: "#0e1014" }}>
+        {loading ? (
+          <div className="text-[11px] text-gray-500">Checking wallet…</div>
+        ) : !status || !status.configured ? (
+          <div className="text-[11px] text-gray-400">
+            <span className="inline-flex items-center gap-1.5">
+              <span className="w-2 h-2 rounded-full" style={{ background: "#6b7280" }} /> Not configured
+            </span>
+            <p className="mt-1 text-gray-600">Set <code className="text-gray-400">{envVar}</code> on the server, then reopen this tab.</p>
+          </div>
+        ) : (
+          <div className="space-y-1.5 text-[11px]">
+            <KV label="Status">
+              <span className="inline-flex items-center gap-1.5" style={{ color: s?.color }}>
+                <span className="w-2 h-2 rounded-full" style={{ background: s?.color }} />
+                {s?.label}
+              </span>
+            </KV>
+            <KV label="Wallet"><span className="text-gray-300 font-mono">{status.address ?? "—"}</span></KV>
+            <KV label="Chain"><span className="text-gray-300">{chainName} ({status.chainId})</span></KV>
+            <KV label="USDC Balance"><span className="text-gray-200">{status.usdcBalance != null ? `$${status.usdcBalance.toFixed(2)}` : "—"}</span></KV>
+            {venueId === "sxbet" && (
+              <KV label="USDC Allowance"><span className="text-gray-200">{status.allowance != null ? `$${status.allowance.toFixed(2)}` : "—"}</span></KV>
+            )}
+            {status.message && <p className="text-[10px] text-red-400 pt-1">{status.message}</p>}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

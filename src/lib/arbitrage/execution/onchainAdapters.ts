@@ -1,31 +1,26 @@
-// On-chain venue execution adapters (Polymarket CLOB, SX.bet) — SCAFFOLDS.
-//
-// These venues settle on a blockchain: placing an order means EIP-712-signing it with
-// a funded wallet's private key (USDC on Polygon for Polymarket, SX Network for
-// SX.bet) via each venue's SDK. That signer is intentionally NOT wired here — it
-// requires the user's wallet key + the venue SDK + a funded on-chain balance, set up
-// deliberately. Until a signer is configured, supportsLive() is false and placeOrder
-// refuses, so the gate keeps these in dry-run.
-//
-// To go live on one of these: add a server-side wallet signer (key from a secret
-// store, never the browser), install the venue SDK, thread the native tokenId /
-// marketHash onto the leg, and implement placeOrder against the SDK.
+// On-chain venue execution adapters (Polymarket, SX.bet). Balance reads are LIVE once
+// a server-side wallet key is set, but supportsLive() stays FALSE until order signing
+// is implemented + validated (manual §2 — no live orders before signer/paper/recon).
+// Order placement lands in the order phase; until then placeOrder refuses.
 
 import type { ExecutionAdapter, OrderRequest, OrderResult } from "./types";
+import { hasWalletKey, type OnchainVenue } from "./wallet";
+import { verifyPolymarket, verifySx } from "./verify";
 
-class OnchainScaffold implements ExecutionAdapter {
-  constructor(
-    public id: string,
-    private signerEnvVar: string
-  ) {}
+class OnchainAdapter implements ExecutionAdapter {
+  constructor(public id: OnchainVenue) {}
 
   supportsLive(): boolean {
-    // A live signer would be detected here (e.g. a configured wallet key). None yet.
-    return Boolean(process.env[this.signerEnvVar]) && false; // hard-disabled until implemented
+    // A funded, verified wallet is not enough — order signing isn't wired yet, so the
+    // gate must keep this venue out of live execution. Flip to (hasWalletKey && ...)
+    // only once placeOrder is implemented and testnet/$1-validated.
+    return false;
   }
 
   async getBalanceUsd(): Promise<number | null> {
-    return null;
+    if (!hasWalletKey(this.id)) return null;
+    const v = this.id === "polymarket" ? await verifyPolymarket() : await verifySx();
+    return v.usdcBalance;
   }
 
   async placeOrder(req: OrderRequest): Promise<OrderResult> {
@@ -35,19 +30,19 @@ class OnchainScaffold implements ExecutionAdapter {
       filledContracts: 0,
       avgPriceCents: req.limitPriceCents,
       status: "rejected",
-      error: `${this.id} live execution not implemented — on-chain wallet signer required`,
+      error: `${this.id} order placement not yet enabled (verification phase — see manual §2)`,
     };
   }
 }
 
-export class PolymarketExecutionAdapter extends OnchainScaffold {
+export class PolymarketExecutionAdapter extends OnchainAdapter {
   constructor() {
-    super("polymarket", "POLYMARKET_WALLET_KEY");
+    super("polymarket");
   }
 }
 
-export class SxBetExecutionAdapter extends OnchainScaffold {
+export class SxBetExecutionAdapter extends OnchainAdapter {
   constructor() {
-    super("sxbet", "SXBET_WALLET_KEY");
+    super("sxbet");
   }
 }
