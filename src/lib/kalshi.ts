@@ -142,6 +142,35 @@ function eventSearchText(event: KalshiEvent): string {
   return [event.title, event.sub_title].filter(Boolean).join(" ");
 }
 
+// Kalshi's expected expiration is the scheduled end of the game, typically a few
+// hours after ESPN's start time. Team-only matching is not sufficient because a
+// series can expose multiple consecutive games between the same teams at once.
+const EVENT_END_BEFORE_START_TOLERANCE_MS = 15 * 60_000;
+const MAX_EXPECTED_GAME_DURATION_MS = 8 * 60 * 60_000;
+
+export function eventTimingMatchesGame(
+  gameStartTime: string,
+  markets: Array<Pick<KalshiMarket, "expected_expiration_time">>
+): boolean {
+  const startMs = Date.parse(gameStartTime);
+  if (!Number.isFinite(startMs)) return true;
+
+  const expectedEndTimes = markets
+    .map((market) => Date.parse(market.expected_expiration_time ?? ""))
+    .filter(Number.isFinite);
+
+  // Preserve matching for older/partial API payloads that do not include timing.
+  if (expectedEndTimes.length === 0) return true;
+
+  return expectedEndTimes.some((endMs) => {
+    const durationMs = endMs - startMs;
+    return (
+      durationMs >= -EVENT_END_BEFORE_START_TOLERANCE_MS &&
+      durationMs <= MAX_EXPECTED_GAME_DURATION_MS
+    );
+  });
+}
+
 function eventMatchesGame(game: ArbGame, event: KalshiEvent): boolean {
   const text = eventSearchText(event);
   if (!text) return false;
@@ -157,7 +186,8 @@ function eventMatchesGame(game: ArbGame, event: KalshiEvent): boolean {
     game.homeTeam.abbreviation,
     text
   );
-  return awayHit && homeHit;
+  if (!awayHit || !homeHit) return false;
+  return eventTimingMatchesGame(game.startTimeIso || game.date, event.markets ?? []);
 }
 
 function marketYesSide(market: KalshiMarket, game: ArbGame): "away" | "home" | null {
