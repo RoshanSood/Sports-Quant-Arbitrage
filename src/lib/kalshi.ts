@@ -142,38 +142,71 @@ function eventSearchText(event: KalshiEvent): string {
   return [event.title, event.sub_title].filter(Boolean).join(" ");
 }
 
-function eventMatchesGame(game: ArbGame, event: KalshiEvent): boolean {
+const EVENT_END_BEFORE_START_TOLERANCE_MS = 15 * 60_000;
+const MAX_EXPECTED_GAME_DURATION_MS = 8 * 60 * 60_000;
+
+export function eventTimingMatchesGame(
+  gameStartTime: string,
+  markets: Array<Pick<KalshiMarket, "expected_expiration_time">>
+): boolean {
+  const startMs = Date.parse(gameStartTime);
+  if (!Number.isFinite(startMs)) return true;
+  const expectedEndTimes = markets
+    .map((market) => Date.parse(market.expected_expiration_time ?? ""))
+    .filter(Number.isFinite);
+  if (expectedEndTimes.length === 0) return true;
+  return expectedEndTimes.some((endMs) => {
+    const durationMs = endMs - startMs;
+    return (
+      durationMs >= -EVENT_END_BEFORE_START_TOLERANCE_MS &&
+      durationMs <= MAX_EXPECTED_GAME_DURATION_MS
+    );
+  });
+}
+
+function eventMatchesGame(game: ArbGame, event: KalshiEvent, league = "mlb"): boolean {
   const text = eventSearchText(event);
   if (!text) return false;
   const awayHit = teamMatchesTitle(
     game.awayTeam.name,
     game.awayTeam.shortName,
     game.awayTeam.abbreviation,
-    text
+    text,
+    league
   );
   const homeHit = teamMatchesTitle(
     game.homeTeam.name,
     game.homeTeam.shortName,
     game.homeTeam.abbreviation,
-    text
+    text,
+    league
   );
-  return awayHit && homeHit;
+  if (!awayHit || !homeHit) return false;
+  return game.startTimeIso
+    ? eventTimingMatchesGame(game.startTimeIso, event.markets ?? [])
+    : true;
 }
 
-function marketYesSide(market: KalshiMarket, game: ArbGame): "away" | "home" | null {
+function marketYesSide(
+  market: KalshiMarket,
+  game: ArbGame,
+  league = "mlb"
+): "away" | "home" | null {
   const text = market.yes_sub_title ?? "";
   if (!text.trim()) return null;
   const awayHit = teamMatchesTitle(
     game.awayTeam.name,
     game.awayTeam.shortName,
     game.awayTeam.abbreviation,
-    text
+    text,
+    league
   );
   const homeHit = teamMatchesTitle(
     game.homeTeam.name,
     game.homeTeam.shortName,
     game.homeTeam.abbreviation,
-    text
+    text,
+    league
   );
   if (awayHit && !homeHit) return "away";
   if (homeHit && !awayHit) return "home";
@@ -184,18 +217,25 @@ function marketYesSide(market: KalshiMarket, game: ArbGame): "away" | "home" | n
 
 // Extracts the magnitude of the spread line (always positive in Kalshi format).
 // "Los Angeles D wins by over 1.5 runs" → 1.5
-function extractSpreadLine(market: KalshiMarket): number | null {
+export function extractSpreadLine(
+  market: Pick<KalshiMarket, "title" | "subtitle" | "yes_sub_title">
+): number | null {
   const text = `${market.title ?? ""} ${market.subtitle ?? ""} ${market.yes_sub_title ?? ""}`;
-  const m = text.match(/(\d+(?:\.\d+)?)/);
+  // Prefer the market's line language so numeric team names (notably the 76ers)
+  // cannot be mistaken for the point spread.
+  const m =
+    text.match(/wins?\s+by\s+(?:over|more\s+than)\s+(\d+(?:\.\d+)?)/i) ??
+    text.match(/(?:spread|line)\D{0,12}([+-]?\s*\d+(?:\.\d+)?)/i) ??
+    text.match(/([+-]\s*\d+(?:\.\d+)?)\s*(?:points?|runs?)?/i);
   if (!m) return null;
-  const n = parseFloat(m[1]);
+  const n = Math.abs(parseFloat(m[1].replace(/\s+/g, "")));
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
 // Extracts the total line from "Over N.5 runs scored" format.
 function extractTotalLine(market: KalshiMarket): number | null {
   const text = `${market.title ?? ""} ${market.subtitle ?? ""} ${market.yes_sub_title ?? ""}`;
-  const m = text.match(/(\d+(?:\.\d+)?)/);
+  const m = text.match(/over\s+(\d+(?:\.\d+)?)/i) ?? text.match(/(\d+(?:\.\d+)?)/);
   return m ? parseFloat(m[1]) : null;
 }
 
@@ -420,7 +460,8 @@ export type VenueTwoWay = {
 // tuned team/side matching + top-of-book size logic as the totals fetch.
 export async function fetchKalshiMoneylineByGame(
   games: ArbGame[],
-  gameSeries: string = MLB_GAME_SERIES
+  gameSeries: string = MLB_GAME_SERIES,
+  league = "mlb"
 ): Promise<Map<string, VenueTwoWay>> {
   const result = new Map<string, VenueTwoWay>();
   if (!games.length) return result;
@@ -429,14 +470,14 @@ export async function fetchKalshiMoneylineByGame(
 
   for (const game of games) {
     const markets = gameEvents
-      .filter((ev) => eventMatchesGame(game, ev))
+      .filter((ev) => eventMatchesGame(game, ev, league))
       .flatMap((ev) => ev.markets ?? []);
 
     // Pick the most liquid (tightest bid/ask) winner market with a known YES side.
     let best: { m: KalshiMarket; yesSide: "away" | "home"; bid: number; ask: number; spread: number } | null = null;
     for (const m of markets) {
       if (!isUsable(m)) continue;
-      const yesSide = marketYesSide(m, game);
+      const yesSide = marketYesSide(m, game, league);
       if (!yesSide) continue;
       const { bid, ask } = readBidAsk(m);
       if (bid == null || ask == null) continue;
@@ -475,7 +516,8 @@ export type VenueSpread = VenueTwoWay & { homeSignedLine: number };
 export async function fetchKalshiSpreadByGame(
   games: ArbGame[],
   spreadSeries: string = MLB_SPREAD_SERIES,
-  fixedLine: number | undefined = 1.5
+  fixedLine: number | undefined = 1.5,
+  league = "mlb"
 ): Promise<Map<string, VenueSpread>> {
   const result = new Map<string, VenueSpread>();
   if (!games.length) return result;
@@ -484,14 +526,14 @@ export async function fetchKalshiSpreadByGame(
 
   for (const game of games) {
     const markets = events
-      .filter((ev) => eventMatchesGame(game, ev))
+      .filter((ev) => eventMatchesGame(game, ev, league))
       .flatMap((ev) => ev.markets ?? []);
 
     let best: { m: KalshiMarket; yesSide: "away" | "home"; bid: number; ask: number; line: number; spread: number } | null = null;
     for (const m of markets) {
       if (!isUsable(m)) continue;
       const line = extractSpreadLine(m);
-      const yesSide = marketYesSide(m, game);
+      const yesSide = marketYesSide(m, game, league);
       if (line == null || yesSide == null) continue;
       // MLB has a fixed 1.5 run-line; other sports use variable point spreads —
       // in that case take the most liquid line (tightest bid/ask) instead.
@@ -530,7 +572,8 @@ export async function fetchKalshiSpreadByGame(
 // venues — unlike buildTotal(), which collapses to a single main line for the UI.
 export async function fetchKalshiTotalsByGame(
   games: ArbGame[],
-  totalSeries: string = MLB_TOTAL_SERIES
+  totalSeries: string = MLB_TOTAL_SERIES,
+  league = "mlb"
 ): Promise<Map<string, VenueTotalLine[]>> {
   const result = new Map<string, VenueTotalLine[]>();
   if (!games.length) return result;
@@ -538,7 +581,7 @@ export async function fetchKalshiTotalsByGame(
   const totalEvents = await fetchEventsBySeries(totalSeries);
 
   for (const game of games) {
-    const events = totalEvents.filter((ev) => eventMatchesGame(game, ev));
+    const events = totalEvents.filter((ev) => eventMatchesGame(game, ev, league));
     if (!events.length) continue;
 
     // line -> best (tightest bid/ask) quote, so duplicate markets collapse per line.
