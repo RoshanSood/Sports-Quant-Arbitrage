@@ -4,6 +4,7 @@
 // Polymarket tag, which SX.bet league, and how spreads work.
 
 import { fetchESPNGames } from "@/lib/espn";
+import { fetchNbaSummerGames } from "@/lib/nbaSummerEspn";
 import { fetchWNBAGames } from "@/lib/wnbaEspn";
 import type { Sport } from "@/types/arbitrage";
 
@@ -11,15 +12,31 @@ import type { Sport } from "@/types/arbitrage";
 export type ArbGame = {
   id: string;
   date: string;
+  startTimeIso?: string;
+  status?: string;
   awayTeam: { name: string; shortName: string; abbreviation: string };
   homeTeam: { name: string; shortName: string; abbreviation: string };
 };
 
+const INELIGIBLE_STATUSES = [
+  "final",
+  "postponed",
+  "canceled",
+  "cancelled",
+  "suspended",
+  "abandoned",
+];
+
+export function isEligibleArbGame(game: ArbGame): boolean {
+  const status = (game.status ?? "").trim().toLowerCase();
+  return !INELIGIBLE_STATUSES.some((value) => status.includes(value));
+}
+
 export type SportConfig = {
   sport: Sport; // NormalizedMarket.sport
-  league: string; // "mlb" | "wnba"
+  league: string;
   kalshi: { game: string; total: string; spread: string };
-  polyTag: string;
+  polyTag?: string;
   sxLeagueId: number;
   // Fixed run-line for the spread market (MLB = 1.5). Undefined = variable point
   // spread (WNBA): pick the most liquid line instead of filtering to a fixed one.
@@ -45,5 +62,20 @@ export const SPORTS: SportConfig[] = [
     sxLeagueId: 1384,
     spreadFixedLine: undefined, // variable point spread
     fetchGames: fetchWNBAGames,
+  },
+  {
+    sport: "basketball",
+    league: "nba_summer",
+    kalshi: {
+      game: "KXNBASUMMERGAME",
+      total: "KXNBASUMMERTOTAL",
+      spread: "KXNBASUMMERSPREAD",
+    },
+    // Polymarket International does not currently list Summer League games.
+    // Kalshi and SX.bet are still fully scanned and matched against each other.
+    polyTag: undefined,
+    sxLeagueId: 1589,
+    spreadFixedLine: undefined,
+    fetchGames: fetchNbaSummerGames,
   },
 ];

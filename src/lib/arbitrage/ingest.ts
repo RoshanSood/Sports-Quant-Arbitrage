@@ -1,7 +1,7 @@
 // Ingestion: for each configured sport, fetch games + Kalshi/Polymarket/SX.bet
 // markets (totals / moneyline / spread), normalize into the shared NormalizedMarket
 // model, and persist. The matching + arb engines key events by sport:league:teams,
-// so MLB and WNBA share one pipeline without cross-matching.
+// so every configured league shares one pipeline without cross-matching.
 
 import {
   fetchKalshiMoneylineByGame,
@@ -20,7 +20,7 @@ import { fetchSxBetMLBMarkets, type SxBetMarkets } from "@/lib/sxbet";
 import type { NormalizedMarket, Outcome, Sport, VenueId } from "@/types/arbitrage";
 import { decimalOddsFromCents, impliedProbFromCents } from "./arbMath";
 import { saveMarkets, setRunning } from "./marketStore";
-import { SPORTS, type ArbGame } from "./sports";
+import { isEligibleArbGame, SPORTS, type ArbGame } from "./sports";
 
 const EMPTY_SX: SxBetMarkets = { moneyline: new Map(), spread: new Map(), totals: new Map() };
 
@@ -65,7 +65,7 @@ function normalizeVenueTotals(
         nativeSide: nativeSideFor(venueId, { kalshiYesNo: outcome === "over" ? "yes" : "no", polyTokenId: tokenId, sxIsOne }),
         sport,
         league,
-        startTime: game.date,
+        startTime: game.startTimeIso || game.date,
         teams,
         marketType: "total",
         line: l.line,
@@ -116,7 +116,7 @@ function normalizeVenueTwoWay(
       }),
       sport,
       league,
-      startTime: game.date,
+      startTime: game.startTimeIso || game.date,
       teams,
       marketType,
       line,
@@ -150,21 +150,28 @@ export async function ingestTotals(date: string): Promise<IngestResult> {
 
   await Promise.all(
     SPORTS.map(async (cfg) => {
-      const games: ArbGame[] = await cfg.fetchGames(date).catch((e) => {
+      const fetchedGames: ArbGame[] = await cfg.fetchGames(date).catch((e) => {
         console.error(`[arbitrage/ingest] ${cfg.league} games fetch failed:`, e);
         return [];
       });
+      const games = fetchedGames.filter(isEligibleArbGame);
       gameCount += games.length;
       if (!games.length) return;
 
       const [kTot, pTot, kML, pML, kSp, pSp, sx] = await Promise.all([
-        fetchKalshiTotalsByGame(games, cfg.kalshi.total).catch(() => new Map<string, VenueTotalLine[]>()),
-        fetchPolymarketTotalsByGame(games, cfg.polyTag).catch(() => new Map<string, VenueTotalLine[]>()),
-        fetchKalshiMoneylineByGame(games, cfg.kalshi.game).catch(() => new Map<string, VenueTwoWay>()),
-        fetchPolymarketMoneylineByGame(games, cfg.polyTag).catch(() => new Map<string, VenueTwoWay>()),
-        fetchKalshiSpreadByGame(games, cfg.kalshi.spread, cfg.spreadFixedLine).catch(() => new Map<string, VenueSpread>()),
-        fetchPolymarketSpreadByGame(games, cfg.polyTag).catch(() => new Map<string, VenueSpread>()),
-        fetchSxBetMLBMarkets(games, cfg.sxLeagueId).catch(() => EMPTY_SX),
+        fetchKalshiTotalsByGame(games, cfg.kalshi.total, cfg.league).catch(() => new Map<string, VenueTotalLine[]>()),
+        cfg.polyTag
+          ? fetchPolymarketTotalsByGame(games, cfg.polyTag).catch(() => new Map<string, VenueTotalLine[]>())
+          : Promise.resolve(new Map<string, VenueTotalLine[]>()),
+        fetchKalshiMoneylineByGame(games, cfg.kalshi.game, cfg.league).catch(() => new Map<string, VenueTwoWay>()),
+        cfg.polyTag
+          ? fetchPolymarketMoneylineByGame(games, cfg.polyTag).catch(() => new Map<string, VenueTwoWay>())
+          : Promise.resolve(new Map<string, VenueTwoWay>()),
+        fetchKalshiSpreadByGame(games, cfg.kalshi.spread, cfg.spreadFixedLine, cfg.league).catch(() => new Map<string, VenueSpread>()),
+        cfg.polyTag
+          ? fetchPolymarketSpreadByGame(games, cfg.polyTag).catch(() => new Map<string, VenueSpread>())
+          : Promise.resolve(new Map<string, VenueSpread>()),
+        fetchSxBetMLBMarkets(games, cfg.sxLeagueId, cfg.league).catch(() => EMPTY_SX),
       ]);
 
       for (const game of games) {

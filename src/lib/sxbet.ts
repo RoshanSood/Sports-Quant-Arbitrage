@@ -17,8 +17,9 @@ const TYPE_MONEYLINE = 226;
 const TYPE_TOTAL = 28;
 const TYPE_SPREAD = 342;
 const USDC_DECIMALS = 1e6; // SX.bet collateral is USDC (6 decimals)
+const START_TOLERANCE_MS = 20 * 60 * 1000;
 
-type SxMarket = {
+export type SxMarket = {
   marketHash: string;
   type: number;
   line: number | null;
@@ -107,17 +108,39 @@ async function fetchOrders(hashes: string[]): Promise<Map<string, SxOrder[]>> {
   return map;
 }
 
-function teamHit(name: string, team: { name: string; abbreviation: string }): boolean {
-  return teamsMatch(name, team.name) || name.toLowerCase().includes(team.abbreviation.toLowerCase());
+function teamHit(
+  name: string,
+  team: { name: string; abbreviation: string },
+  league: string
+): boolean {
+  return teamsMatch(name, team.name, league) || teamsMatch(name, team.abbreviation, league);
 }
 
 // A market matches a game when its two teams equal the game's away/home in either order.
-function marketMatchesGame(m: SxMarket, game: ArbGame): boolean {
+export function marketMatchesGame(m: SxMarket, game: ArbGame, league = "mlb"): boolean {
   const { awayTeam: a, homeTeam: h } = game;
+  const teamsMatchGame =
+    (teamHit(m.teamOneName, a, league) && teamHit(m.teamTwoName, h, league)) ||
+    (teamHit(m.teamOneName, h, league) && teamHit(m.teamTwoName, a, league));
+  if (!teamsMatchGame) return false;
+  if (!game.startTimeIso) return true;
+  const gameMs = Date.parse(game.startTimeIso);
+  const rawMarketMs = Number(m.gameTime);
+  const marketMs = rawMarketMs < 1e12 ? rawMarketMs * 1000 : rawMarketMs;
   return (
-    (teamHit(m.teamOneName, a) && teamHit(m.teamTwoName, h)) ||
-    (teamHit(m.teamOneName, h) && teamHit(m.teamTwoName, a))
+    Number.isFinite(gameMs) &&
+    Number.isFinite(marketMs) &&
+    Math.abs(marketMs - gameMs) <= START_TOLERANCE_MS
   );
+}
+
+export function signedSpreadLine(outcomeName: string, fallback: number): number | null {
+  const match = outcomeName.match(/([+-]\s*\d+(?:\.\d+)?)/);
+  if (match) {
+    const value = Number(match[1].replace(/\s+/g, ""));
+    if (Number.isFinite(value)) return value;
+  }
+  return Number.isFinite(fallback) ? fallback : null;
 }
 
 export type SxBetMarkets = {
@@ -127,7 +150,11 @@ export type SxBetMarkets = {
 };
 
 // Fetch + normalize all SX.bet markets for the given league + ESPN games.
-export async function fetchSxBetMLBMarkets(games: ArbGame[], leagueId: number = 171): Promise<SxBetMarkets> {
+export async function fetchSxBetMLBMarkets(
+  games: ArbGame[],
+  leagueId: number = 171,
+  league = "mlb"
+): Promise<SxBetMarkets> {
   const result: SxBetMarkets = { moneyline: new Map(), spread: new Map(), totals: new Map() };
   if (!games.length) return result;
 
@@ -138,7 +165,7 @@ export async function fetchSxBetMLBMarkets(games: ArbGame[], leagueId: number = 
   const books = await fetchOrders(relevant.map((m) => m.marketHash));
 
   for (const game of games) {
-    const gm = relevant.filter((m) => marketMatchesGame(m, game));
+    const gm = relevant.filter((m) => marketMatchesGame(m, game, league));
     if (!gm.length) continue;
 
     // Moneyline (226): team names → home/away.
@@ -146,7 +173,7 @@ export async function fetchSxBetMLBMarkets(games: ArbGame[], leagueId: number = 
     if (ml) {
       const bp = bestPrices(books.get(ml.marketHash));
       if (bp) {
-        const oneIsAway = teamHit(ml.teamOneName, game.awayTeam);
+        const oneIsAway = teamHit(ml.teamOneName, game.awayTeam, league);
         result.moneyline.set(game.id, {
           awayCents: oneIsAway ? bp.o1Cents : bp.o2Cents,
           homeCents: oneIsAway ? bp.o2Cents : bp.o1Cents,
@@ -163,18 +190,23 @@ export async function fetchSxBetMLBMarkets(games: ArbGame[], leagueId: number = 
     if (sp) {
       const bp = bestPrices(books.get(sp.marketHash));
       if (bp) {
-        const oneIsHome = teamHit(sp.teamOneName, game.homeTeam);
+        const oneIsHome = teamHit(sp.teamOneName, game.homeTeam, league);
         const homeOutcomeName = oneIsHome ? sp.outcomeOneName : sp.outcomeTwoName;
-        const homeSignedLine = homeOutcomeName.includes("-1.5") ? -1.5 : 1.5;
-        result.spread.set(game.id, {
-          homeCents: oneIsHome ? bp.o1Cents : bp.o2Cents,
-          awayCents: oneIsHome ? bp.o2Cents : bp.o1Cents,
-          homeLiquidityUsd: oneIsHome ? bp.o1LiqUsd : bp.o2LiqUsd,
-          awayLiquidityUsd: oneIsHome ? bp.o2LiqUsd : bp.o1LiqUsd,
-          homeSignedLine,
-          marketId: sp.marketHash,
-          homeIsOutcomeOne: oneIsHome,
-        });
+        const homeSignedLine = signedSpreadLine(
+          homeOutcomeName,
+          oneIsHome ? sp.line ?? 0 : -(sp.line ?? 0)
+        );
+        if (homeSignedLine != null) {
+          result.spread.set(game.id, {
+            homeCents: oneIsHome ? bp.o1Cents : bp.o2Cents,
+            awayCents: oneIsHome ? bp.o2Cents : bp.o1Cents,
+            homeLiquidityUsd: oneIsHome ? bp.o1LiqUsd : bp.o2LiqUsd,
+            awayLiquidityUsd: oneIsHome ? bp.o2LiqUsd : bp.o1LiqUsd,
+            homeSignedLine,
+            marketId: sp.marketHash,
+            homeIsOutcomeOne: oneIsHome,
+          });
+        }
       }
     }
 
