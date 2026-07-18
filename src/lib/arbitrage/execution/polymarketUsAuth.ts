@@ -23,15 +23,38 @@ export function hasPmusCreds(override?: PolymarketUsCreds): boolean {
   return pmusCreds(override) != null;
 }
 
-// Build an Ed25519 private KeyObject from the base64 secret. Handles either a raw 32-byte
-// seed (wrapped in the standard PKCS8 header) or an already-DER/PKCS8-encoded key.
-function ed25519Key(secretB64: string): crypto.KeyObject {
-  const raw = Buffer.from(secretB64, "base64");
-  if (raw.length === 32) {
-    const pkcs8 = Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), raw]);
-    return crypto.createPrivateKey({ key: pkcs8, format: "der", type: "pkcs8" });
+// Standard PKCS8 prefix for an Ed25519 private key carrying a 32-byte seed.
+const PKCS8_ED25519_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");
+
+function seedToKey(seed: Buffer): crypto.KeyObject {
+  return crypto.createPrivateKey({ key: Buffer.concat([PKCS8_ED25519_PREFIX, seed]), format: "der", type: "pkcs8" });
+}
+
+// Build an Ed25519 private KeyObject from the portal secret, tolerant of every common
+// encoding a developer portal might hand out:
+//   • PEM ("-----BEGIN PRIVATE KEY-----")
+//   • base64 / base64url of: a raw 32-byte seed, a 48-byte PKCS8 DER, or a 64-byte
+//     libsodium secret key (seed ‖ public key — take the first 32 as the seed)
+//   • hex of the same, as a fallback
+function ed25519Key(secret: string): crypto.KeyObject {
+  const s = secret.trim();
+  if (s.includes("-----BEGIN")) return crypto.createPrivateKey({ key: s, format: "pem" });
+
+  let buf = Buffer.from(s.replace(/-/g, "+").replace(/_/g, "/"), "base64");
+  // Fall back to hex if base64 didn't yield an Ed25519-plausible length.
+  if (![32, 48, 64].includes(buf.length) && /^[0-9a-fA-F]+$/.test(s) && s.length % 2 === 0) {
+    const hex = Buffer.from(s, "hex");
+    if ([32, 48, 64].includes(hex.length)) buf = hex;
   }
-  return crypto.createPrivateKey({ key: raw, format: "der", type: "pkcs8" });
+
+  if (buf.length === 32) return seedToKey(buf); // raw seed
+  if (buf.length === 64) return seedToKey(buf.subarray(0, 32)); // libsodium secretKey (seed ‖ pub)
+  if (buf.length === 48) return crypto.createPrivateKey({ key: buf, format: "der", type: "pkcs8" }); // PKCS8 DER
+  try {
+    return crypto.createPrivateKey({ key: buf, format: "der", type: "pkcs8" });
+  } catch {
+    throw new Error(`unrecognized Ed25519 secret format (decoded ${buf.length} bytes; expected 32 seed / 48 pkcs8 / 64 libsodium)`);
+  }
 }
 
 // Exported for unit testing the signing scheme deterministically.
