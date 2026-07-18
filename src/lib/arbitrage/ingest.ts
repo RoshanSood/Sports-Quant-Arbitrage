@@ -11,11 +11,19 @@ import {
   type VenueTotalLine,
   type VenueTwoWay,
 } from "@/lib/kalshi";
+// International Polymarket (self-custody CLOB) — commented out while trading on
+// Polymarket US (regulated, central order book). Re-enable by swapping these imports +
+// the fetch calls below back to the international provider.
+// import {
+//   fetchPolymarketMoneylineByGame,
+//   fetchPolymarketSpreadByGame,
+//   fetchPolymarketTotalsByGame,
+// } from "@/lib/polymarket";
 import {
-  fetchPolymarketMoneylineByGame,
-  fetchPolymarketSpreadByGame,
-  fetchPolymarketTotalsByGame,
-} from "@/lib/polymarket";
+  fetchPolymarketUsMoneylineByGame,
+  fetchPolymarketUsSpreadByGame,
+  fetchPolymarketUsTotalsByGame,
+} from "@/lib/polymarketUs";
 import { fetchSxBetMLBMarkets, type SxBetMarkets } from "@/lib/sxbet";
 import type { NormalizedMarket, Outcome, Sport, VenueId } from "@/types/arbitrage";
 import { decimalOddsFromCents, impliedProbFromCents } from "./arbMath";
@@ -25,16 +33,16 @@ import { SPORTS, type ArbGame } from "./sports";
 const EMPTY_SX: SxBetMarkets = { moneyline: new Map(), spread: new Map(), totals: new Map() };
 
 // The venue-native side identifier a live order needs for a given outcome:
-//   • Kalshi     → "yes" | "no"
-//   • Polymarket → the ERC-1155 CLOB token id for that outcome
-//   • SX.bet     → "one" | "two" (isTakerBettingOutcomeOne)
+//   • Kalshi        → "yes" | "no"
+//   • Polymarket US → "yes" | "no" (long/Over ⇒ YES, short/Under ⇒ NO); the order's
+//                     marketSlug rides on nativeMarketId
+//   • SX.bet        → "one" | "two" (isTakerBettingOutcomeOne)
 // Undefined when the venue hasn't supplied the id (read-only rows still ingest fine).
 function nativeSideFor(
   venueId: VenueId,
   ids: { kalshiYesNo: "yes" | "no"; polyTokenId?: string; sxIsOne?: boolean }
 ): string | undefined {
-  if (venueId === "kalshi") return ids.kalshiYesNo;
-  if (venueId === "polymarket") return ids.polyTokenId;
+  if (venueId === "kalshi" || venueId === "polymarket") return ids.kalshiYesNo;
   if (venueId === "sxbet") return ids.sxIsOne === undefined ? undefined : ids.sxIsOne ? "one" : "two";
   return undefined;
 }
@@ -159,11 +167,12 @@ export async function ingestTotals(date: string): Promise<IngestResult> {
 
       const [kTot, pTot, kML, pML, kSp, pSp, sx] = await Promise.all([
         fetchKalshiTotalsByGame(games, cfg.kalshi.total).catch(() => new Map<string, VenueTotalLine[]>()),
-        fetchPolymarketTotalsByGame(games, cfg.polyTag).catch(() => new Map<string, VenueTotalLine[]>()),
+        // Polymarket US (regulated). MLB-only; non-MLB leagues return empty gracefully.
+        fetchPolymarketUsTotalsByGame(games).catch(() => new Map<string, VenueTotalLine[]>()),
         fetchKalshiMoneylineByGame(games, cfg.kalshi.game).catch(() => new Map<string, VenueTwoWay>()),
-        fetchPolymarketMoneylineByGame(games, cfg.polyTag).catch(() => new Map<string, VenueTwoWay>()),
+        fetchPolymarketUsMoneylineByGame(games).catch(() => new Map<string, VenueTwoWay>()),
         fetchKalshiSpreadByGame(games, cfg.kalshi.spread, cfg.spreadFixedLine).catch(() => new Map<string, VenueSpread>()),
-        fetchPolymarketSpreadByGame(games, cfg.polyTag).catch(() => new Map<string, VenueSpread>()),
+        fetchPolymarketUsSpreadByGame(games).catch(() => new Map<string, VenueSpread>()),
         fetchSxBetMLBMarkets(games, cfg.sxLeagueId).catch(() => EMPTY_SX),
       ]);
 
