@@ -5,9 +5,54 @@ import { KeyRound, ShieldCheck } from "lucide-react";
 import type { ArbOpportunity, NormalizedMarket, Venue } from "@/types/arbitrage";
 import { Drawer, Toggle, Pill } from "./ui";
 import { formatCents, formatEdgePct, formatOdds, venueStatusColor, venueStatusLabel } from "./arbFormat";
-import { clearVenueCreds, emitCredsChanged, loadVenueCreds, onchainAuthHeaders, saveVenueCreds, type PolyCreds } from "./venueCreds";
+import { allAuthHeaders, clearVenueCreds, CREDS_CHANGED_EVENT, emitCredsChanged, loadVenueCreds, onchainAuthHeaders, saveVenueCreds, type PolyCreds } from "./venueCreds";
 
 type Tab = "status" | "live" | "edges" | "settings" | "credentials";
+
+// Live credential verification for the Status tab — reflects the venue's REAL state
+// (a signed balance read via /api/arbitrage/execution/status) rather than the seeded
+// venue.status. Forwards the browser-stored creds as headers; re-checks when creds change.
+type VenueVerify = { venueId: string; configured: boolean; usdcBalance: number | null; allowance: number | null; status: string; message?: string };
+
+function useVenueVerification(venueId: string): { v: VenueVerify | null; loading: boolean } {
+  const [v, setV] = useState<VenueVerify | null>(null);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => {
+      fetch("/api/arbitrage/execution/status", { headers: allAuthHeaders() })
+        .then((r) => r.json())
+        .then((d: { venues?: VenueVerify[] }) => {
+          if (cancelled) return;
+          setV((d.venues ?? []).find((x) => x?.venueId === venueId) ?? null);
+          setLoading(false);
+        })
+        .catch(() => {
+          if (!cancelled) setLoading(false);
+        });
+    };
+    load();
+    window.addEventListener(CREDS_CHANGED_EVENT, load);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(CREDS_CHANGED_EVENT, load);
+    };
+  }, [venueId]);
+  return { v, loading };
+}
+
+// Map a live verification to a Status-tab display. Returns null when there's nothing
+// verified yet (fall back to the seeded venue.status label).
+function liveStatusDisplay(v: VenueVerify | null): { label: string; color: string } | null {
+  if (!v || !v.configured) return null;
+  switch (v.status) {
+    case "verified": return { label: "Connected", color: "#22c55e" };
+    case "no_balance": return { label: "Connected · no balance", color: "#f59e0b" };
+    case "needs_allowance": return { label: "Needs USDC allowance", color: "#f59e0b" };
+    case "error": return { label: "Error", color: "#ef4444" };
+    default: return null;
+  }
+}
 
 export default function VenueDrawer({
   venue,
@@ -25,6 +70,8 @@ export default function VenueDrawer({
   const [tab, setTab] = useState<Tab>("status");
   const venueMarkets = markets.filter((m) => m.venueId === venue.id);
   const venueEdges = opportunities.filter((o) => o.legs.some((l) => l.venueId === venue.id));
+  const { v: verify } = useVenueVerification(venue.id);
+  const liveStatus = liveStatusDisplay(verify);
 
   return (
     <Drawer
@@ -52,12 +99,22 @@ export default function VenueDrawer({
         {tab === "status" && (
           <div className="space-y-2">
             <KV label="Status">
-              <span className="inline-flex items-center gap-1.5" style={{ color: venueStatusColor(venue.status) }}>
-                <span className="w-2 h-2 rounded-full" style={{ background: venueStatusColor(venue.status) }} />
-                {venueStatusLabel(venue.status)}
-              </span>
+              {liveStatus ? (
+                <span className="inline-flex items-center gap-1.5" style={{ color: liveStatus.color }} title={verify?.message}>
+                  <span className="w-2 h-2 rounded-full" style={{ background: liveStatus.color }} />
+                  {liveStatus.label}
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1.5" style={{ color: venueStatusColor(venue.status) }}>
+                  <span className="w-2 h-2 rounded-full" style={{ background: venueStatusColor(venue.status) }} />
+                  {venueStatusLabel(venue.status)}
+                </span>
+              )}
             </KV>
-            <KV label="Last Update"><span className="text-gray-300">{venue.status === "connected" ? "<1s ago" : "—"}</span></KV>
+            {verify?.configured && verify.usdcBalance != null && (
+              <KV label={venue.id === "kalshi" ? "Balance" : "USDC Balance"}><span className="text-gray-200">${verify.usdcBalance.toFixed(2)}</span></KV>
+            )}
+            <KV label="Last Update"><span className="text-gray-300">{liveStatus || venue.status === "connected" ? "<1s ago" : "—"}</span></KV>
             <KV label="Active Edges"><span className="text-gray-300">{venueEdges.length}</span></KV>
             <KV label="Cached Tickers"><span className="text-gray-300">{venue.cachedTickers ?? 0}</span></KV>
             <KV label="Freshness"><span className="text-emerald-400">{venue.freshness ?? "unknown"}</span></KV>
