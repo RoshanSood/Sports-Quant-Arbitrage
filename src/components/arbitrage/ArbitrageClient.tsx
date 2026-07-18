@@ -42,9 +42,9 @@ export type ExecResponse = {
 // states) — never mock fixtures. Venues start from the seed so the arena has nodes.
 const USE_MOCK = false;
 
-// Auto-scan cadence while Scanning is on. Each scan re-ingests both venues (~11MB
-// Polymarket pull), so keep it modest to avoid hammering the public APIs.
-const SCAN_INTERVAL_MS = 45000;
+// Floor gap between back-to-back scans (each scan re-ingests all venues; the natural
+// pace is however long a scan takes, this just prevents a busy-loop if one returns fast).
+const SCAN_MIN_GAP_MS = 1000;
 
 function todayDateStr(): string {
   const d = new Date();
@@ -75,6 +75,8 @@ export default function ArbitrageClient() {
   const [scanning, setScanning] = useState(true);
   const [soundOn, setSoundOn] = useState(false);
   const [killSwitch, setKillSwitch] = useState(false);
+  // Session admin password for LIVE auto-execution (kept in memory only, never stored).
+  const [livePassword, setLivePassword] = useState("");
   const [agentTrade, setAgentTrade] = useState<AgentTrade | null>(null);
   const tradeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -310,9 +312,6 @@ export default function ArbitrageClient() {
     [refreshPortfolio]
   );
 
-  // Auto-trade (paper) always uses paper mode.
-  const playOpportunity = useCallback((opp: ArbOpportunity) => executeOpportunity(opp, "paper"), [executeOpportunity]);
-
   useEffect(() => () => {
     if (tradeTimer.current) clearTimeout(tradeTimer.current);
   }, []);
@@ -338,9 +337,10 @@ export default function ArbitrageClient() {
       // GET with refresh=1 re-triggers ingestion server-side (no admin password).
       await fetch(`/api/arbitrage/markets?date=${date}&refresh=1`).catch(() => null);
 
-      // Poll until ingestion settles, then pull derived data.
-      for (let i = 0; i < 12; i++) {
-        await new Promise((r) => setTimeout(r, 2000));
+      // Poll until ingestion settles, then pull derived data. Tight granularity so a
+      // finished scan is picked up fast (the loop below re-scans immediately after).
+      for (let i = 0; i < 40; i++) {
+        await new Promise((r) => setTimeout(r, 750));
         const m = await fetch(`/api/arbitrage/markets?date=${date}`).then((r) => r.json()).catch(() => null);
         if (m && !m.running && m.markets?.length) break;
       }
@@ -359,10 +359,13 @@ export default function ArbitrageClient() {
     }
   }, []);
 
-  // Auto-fill: when the agent's auto-trade is on and scanning is live, run the paper
-  // pipeline for each qualifying opportunity once (dedup via a fired-set), sequentially
-  // so the arena animation plays one at a time. Kill switch / Stop halts it.
+  // Auto-execute: when auto-trade is on and scanning is live, fire each qualifying
+  // opportunity once (dedup via a fired-set). Mode is LIVE when the agent's Live toggle is
+  // on AND a session admin password is set — otherwise paper. Live still passes the server
+  // gate (agent.live, kill switch, stake cap, per-venue creds); a downgrade just logs
+  // blockers. Kill switch / Stop halts it.
   const autoFiredRef = useRef<Set<string>>(new Set());
+  const autoLive = agent.autoTrade && agent.live && Boolean(livePassword);
   useEffect(() => {
     if (!agent.autoTrade || !scanning || killSwitch) return;
     const pending = opportunities.filter((o) => !autoFiredRef.current.has(o.id));
@@ -372,29 +375,38 @@ export default function ArbitrageClient() {
       for (const opp of pending) {
         if (cancelled) break;
         autoFiredRef.current.add(opp.id);
-        await playOpportunity(opp);
+        if (autoLive) await executeOpportunity(opp, "live", livePassword);
+        else await executeOpportunity(opp, "paper");
         await new Promise((r) => setTimeout(r, 800));
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [opportunities, agent.autoTrade, scanning, killSwitch, playOpportunity]);
+  }, [opportunities, agent.autoTrade, scanning, killSwitch, autoLive, livePassword, executeOpportunity]);
 
-  // Auto-scan: while Scanning is on, periodically re-ingest fresh quotes and re-run
-  // detection so the board (and auto-fill) stays live without manual Refresh. An
-  // in-flight guard prevents overlapping scans; Stop / kill switch halts the loop.
-  const scanInFlight = useRef(false);
+  // Auto-scan: while Scanning is on, re-ingest fresh quotes back-to-back (a new scan
+  // starts as soon as the previous finishes) so prices — and auto-execution — stay as
+  // fresh as the venues allow, for catching short-lived arbs. A small floor prevents a
+  // busy-loop; Stop / kill switch halts it.
   useEffect(() => {
     if (!scanning || killSwitch) return;
-    const id = setInterval(() => {
-      if (scanInFlight.current) return;
-      scanInFlight.current = true;
-      void Promise.all([refreshScan(), refreshPortfolio()]).finally(() => {
-        scanInFlight.current = false;
-      });
-    }, SCAN_INTERVAL_MS);
-    return () => clearInterval(id);
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const tick = async () => {
+      if (cancelled) return;
+      try {
+        await Promise.all([refreshScan(), refreshPortfolio()]);
+      } catch {
+        // keep looping through transient errors
+      }
+      if (!cancelled) timer = setTimeout(tick, SCAN_MIN_GAP_MS);
+    };
+    tick();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
   }, [scanning, killSwitch, refreshScan, refreshPortfolio]);
 
   const openVenue = venues.find((v) => v.id === openVenueId) ?? null;
@@ -450,7 +462,7 @@ export default function ArbitrageClient() {
           <PortfolioPanel trades={trades} live={portfolioLive} onSettle={settleTrade} onClose={() => setPanel(null)} />
         )}
         {panel === "risk" && (
-          <RiskPanel risk={risk} killSwitch={killSwitch} onToggleKill={toggleKill} onUpdateRisk={updateRisk} onClose={() => setPanel(null)} />
+          <RiskPanel risk={risk} killSwitch={killSwitch} onToggleKill={toggleKill} onUpdateRisk={updateRisk} agentLive={agent.live} autoTrade={agent.autoTrade} livePassword={livePassword} onLivePassword={setLivePassword} onClose={() => setPanel(null)} />
         )}
         {panel === "matchmap" && <MatchMapPanel data={matchMap} live={marketsLive} onClose={() => setPanel(null)} />}
         {panel === "log" && <ArbLogPanel logs={logs} live={portfolioLive} onClose={() => setPanel(null)} />}

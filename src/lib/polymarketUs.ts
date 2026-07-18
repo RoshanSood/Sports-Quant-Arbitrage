@@ -12,6 +12,9 @@
 // the short side (they sum to ~1 + vig). Long = Over / first team ⇒ YES; short ⇒ NO,
 // which maps onto our Kalshi-style yes/no order model. The market `slug` is the native
 // id used to place an order (create-order marketSlug).
+//
+// One fetch pulls all three market types: events are fetched ONCE and each market's BBO
+// ONCE (deduped), so a scan re-poll stays fast enough for a tight arbitrage loop.
 
 import type { VenueSpread, VenueTotalLine, VenueTwoWay } from "./kalshi";
 import type { ArbGame } from "./arbitrage/sports";
@@ -44,6 +47,12 @@ type PmEvent = { id: string; title: string; gameId?: string; startTime?: string;
 
 type Amount = { value?: string; currency?: string };
 type MarketData = { longQuote?: Amount; shortQuote?: Amount; bestAsk?: Amount; bestBid?: Amount; askDepth?: number; bidDepth?: number };
+
+export type PolymarketUsMarkets = {
+  moneyline: Map<string, VenueTwoWay>;
+  spread: Map<string, VenueSpread>;
+  totals: Map<string, VenueTotalLine[]>;
+};
 
 // ── Public gateway fetch (no auth) ─────────────────────────────────────────────
 async function fetchMlbEvents(): Promise<PmEvent[]> {
@@ -103,107 +112,100 @@ function teamIsHome(side: PmMarketSide, game: ArbGame): boolean {
   );
 }
 
-// Build one game's matched event → find its markets, fetch BBO, normalize. Returns the
-// three shapes keyed later by the caller.
-async function eventFor(game: ArbGame, events: PmEvent[]): Promise<PmEvent | null> {
-  return events.find((ev) => eventMatchesGame(ev, game)) ?? null;
-}
+// Fetch + normalize all Polymarket US MLB markets for the given games in ONE pass:
+// events once, each market's BBO once. Mirrors fetchSxBetMLBMarkets' shape.
+export async function fetchPolymarketUsMLBMarkets(games: ArbGame[]): Promise<PolymarketUsMarkets> {
+  const result: PolymarketUsMarkets = { moneyline: new Map(), spread: new Map(), totals: new Map() };
+  if (!games.length) return result;
 
-export async function fetchPolymarketUsMoneylineByGame(games: ArbGame[]): Promise<Map<string, VenueTwoWay>> {
-  const out = new Map<string, VenueTwoWay>();
-  if (!games.length) return out;
   const events = await fetchMlbEvents();
-  await Promise.all(
-    games.map(async (game) => {
-      const ev = await eventFor(game, events);
-      const m = ev?.markets?.find((x) => x.sportsMarketType === T_MONEYLINE && !x.closed);
-      const ls = m ? longShort(m) : null;
-      if (!m || !ls) return;
-      const bbo = await fetchBbo(m.slug);
+
+  // Collect every market we care about across all matched games, then fetch each unique
+  // slug's BBO exactly once.
+  type Job = { game: ArbGame; market: PmMarket };
+  const jobs: Job[] = [];
+  const matched = new Map<string, PmEvent>();
+  for (const game of games) {
+    const ev = events.find((e) => eventMatchesGame(e, game));
+    if (!ev) continue;
+    matched.set(game.id, ev);
+    for (const m of ev.markets ?? []) {
+      if (m.closed) continue;
+      if ([T_MONEYLINE, T_TOTAL, T_SPREAD].includes(m.sportsMarketType ?? "")) jobs.push({ game, market: m });
+    }
+  }
+  const slugs = [...new Set(jobs.map((j) => j.market.slug))];
+  const bboEntries = await Promise.all(slugs.map(async (slug) => [slug, await fetchBbo(slug)] as const));
+  const bboBySlug = new Map<string, MarketData | null>(bboEntries);
+
+  for (const game of games) {
+    if (!matched.has(game.id)) continue;
+    const gameJobs = jobs.filter((j) => j.game.id === game.id);
+
+    // Moneyline
+    const mlJob = gameJobs.find((j) => j.market.sportsMarketType === T_MONEYLINE);
+    if (mlJob) {
+      const ls = longShort(mlJob.market);
+      const bbo = bboBySlug.get(mlJob.market.slug);
       const longAsk = cents(bbo?.longQuote);
       const shortAsk = cents(bbo?.shortQuote);
-      if (longAsk == null || shortAsk == null) return;
-      const longIsHome = teamIsHome(ls.long, game);
-      const longLiq = (bbo?.askDepth ?? 0) * (longAsk / 100);
-      const shortLiq = (bbo?.bidDepth ?? 0) * (shortAsk / 100);
-      out.set(game.id, {
-        homeCents: longIsHome ? longAsk : shortAsk,
-        awayCents: longIsHome ? shortAsk : longAsk,
-        homeLiquidityUsd: longIsHome ? longLiq : shortLiq,
-        awayLiquidityUsd: longIsHome ? shortLiq : longLiq,
-        marketId: m.slug,
-        // Long side = YES. Whichever of home/away is the long side is the venue's YES.
-        yesSide: longIsHome ? "home" : "away",
+      if (ls && longAsk != null && shortAsk != null) {
+        const longIsHome = teamIsHome(ls.long, game);
+        const longLiq = (bbo?.askDepth ?? 0) * (longAsk / 100);
+        const shortLiq = (bbo?.bidDepth ?? 0) * (shortAsk / 100);
+        result.moneyline.set(game.id, {
+          homeCents: longIsHome ? longAsk : shortAsk,
+          awayCents: longIsHome ? shortAsk : longAsk,
+          homeLiquidityUsd: longIsHome ? longLiq : shortLiq,
+          awayLiquidityUsd: longIsHome ? shortLiq : longLiq,
+          marketId: mlJob.market.slug,
+          yesSide: longIsHome ? "home" : "away",
+        });
+      }
+    }
+
+    // Totals (possibly several lines)
+    const totalRows: VenueTotalLine[] = [];
+    for (const j of gameJobs.filter((x) => x.market.sportsMarketType === T_TOTAL && x.market.line != null)) {
+      const ls = longShort(j.market);
+      const bbo = bboBySlug.get(j.market.slug);
+      const overAsk = cents(bbo?.longQuote); // long side = Over
+      const underAsk = cents(bbo?.shortQuote);
+      if (!ls || overAsk == null || underAsk == null) continue;
+      totalRows.push({
+        line: j.market.line as number,
+        overCents: overAsk,
+        underCents: underAsk,
+        overLiquidityUsd: (bbo?.askDepth ?? 0) * (overAsk / 100),
+        underLiquidityUsd: (bbo?.bidDepth ?? 0) * (underAsk / 100),
+        marketId: j.market.slug,
       });
-    })
-  );
-  return out;
-}
+    }
+    if (totalRows.length) result.totals.set(game.id, totalRows);
 
-export async function fetchPolymarketUsTotalsByGame(games: ArbGame[]): Promise<Map<string, VenueTotalLine[]>> {
-  const out = new Map<string, VenueTotalLine[]>();
-  if (!games.length) return out;
-  const events = await fetchMlbEvents();
-  await Promise.all(
-    games.map(async (game) => {
-      const ev = await eventFor(game, events);
-      const totals = (ev?.markets ?? []).filter((x) => x.sportsMarketType === T_TOTAL && !x.closed && x.line != null);
-      if (!totals.length) return;
-      const rows: VenueTotalLine[] = [];
-      await Promise.all(
-        totals.map(async (m) => {
-          const ls = longShort(m);
-          if (!ls) return;
-          const bbo = await fetchBbo(m.slug);
-          // Long side is "Over", short is "Under".
-          const overAsk = cents(bbo?.longQuote);
-          const underAsk = cents(bbo?.shortQuote);
-          if (overAsk == null || underAsk == null) return;
-          rows.push({
-            line: m.line as number,
-            overCents: overAsk,
-            underCents: underAsk,
-            overLiquidityUsd: (bbo?.askDepth ?? 0) * (overAsk / 100),
-            underLiquidityUsd: (bbo?.bidDepth ?? 0) * (underAsk / 100),
-            marketId: m.slug,
-          });
-        })
-      );
-      if (rows.length) out.set(game.id, rows);
-    })
-  );
-  return out;
-}
-
-export async function fetchPolymarketUsSpreadByGame(games: ArbGame[]): Promise<Map<string, VenueSpread>> {
-  const out = new Map<string, VenueSpread>();
-  if (!games.length) return out;
-  const events = await fetchMlbEvents();
-  await Promise.all(
-    games.map(async (game) => {
-      // Prefer the main -1.5 / +1.5 run line.
-      const spreads = (await eventFor(game, events))?.markets?.filter((x) => x.sportsMarketType === T_SPREAD && !x.closed) ?? [];
-      const m = spreads.find((x) => Math.abs(x.line ?? 0) === 1.5) ?? spreads[0];
-      const ls = m ? longShort(m) : null;
-      if (!m || !ls) return;
-      const bbo = await fetchBbo(m.slug);
+    // Spread — prefer the main ±1.5 run line
+    const spreads = gameJobs.filter((x) => x.market.sportsMarketType === T_SPREAD);
+    const spJob = spreads.find((x) => Math.abs(x.market.line ?? 0) === 1.5) ?? spreads[0];
+    if (spJob) {
+      const ls = longShort(spJob.market);
+      const bbo = bboBySlug.get(spJob.market.slug);
       const longAsk = cents(bbo?.longQuote);
       const shortAsk = cents(bbo?.shortQuote);
-      if (longAsk == null || shortAsk == null) return;
-      const longIsHome = teamIsHome(ls.long, game);
-      const lineMag = Math.abs(m.line ?? 1.5);
-      // Signed home line: negative when home is favored (home is the long/-1.5 side).
-      const homeSignedLine = longIsHome ? -lineMag : lineMag;
-      out.set(game.id, {
-        homeCents: longIsHome ? longAsk : shortAsk,
-        awayCents: longIsHome ? shortAsk : longAsk,
-        homeLiquidityUsd: (bbo?.askDepth ?? 0) * (longAsk / 100),
-        awayLiquidityUsd: (bbo?.bidDepth ?? 0) * (shortAsk / 100),
-        homeSignedLine,
-        marketId: m.slug,
-        yesSide: longIsHome ? "home" : "away",
-      });
-    })
-  );
-  return out;
+      if (ls && longAsk != null && shortAsk != null) {
+        const longIsHome = teamIsHome(ls.long, game);
+        const lineMag = Math.abs(spJob.market.line ?? 1.5);
+        result.spread.set(game.id, {
+          homeCents: longIsHome ? longAsk : shortAsk,
+          awayCents: longIsHome ? shortAsk : longAsk,
+          homeLiquidityUsd: (bbo?.askDepth ?? 0) * (longAsk / 100),
+          awayLiquidityUsd: (bbo?.bidDepth ?? 0) * (shortAsk / 100),
+          homeSignedLine: longIsHome ? -lineMag : lineMag,
+          marketId: spJob.market.slug,
+          yesSide: longIsHome ? "home" : "away",
+        });
+      }
+    }
+  }
+
+  return result;
 }

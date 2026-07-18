@@ -19,11 +19,7 @@ import {
 //   fetchPolymarketSpreadByGame,
 //   fetchPolymarketTotalsByGame,
 // } from "@/lib/polymarket";
-import {
-  fetchPolymarketUsMoneylineByGame,
-  fetchPolymarketUsSpreadByGame,
-  fetchPolymarketUsTotalsByGame,
-} from "@/lib/polymarketUs";
+import { fetchPolymarketUsMLBMarkets, type PolymarketUsMarkets } from "@/lib/polymarketUs";
 import { fetchSxBetMLBMarkets, type SxBetMarkets } from "@/lib/sxbet";
 import type { NormalizedMarket, Outcome, Sport, VenueId } from "@/types/arbitrage";
 import { decimalOddsFromCents, impliedProbFromCents } from "./arbMath";
@@ -31,6 +27,7 @@ import { saveMarkets, setRunning } from "./marketStore";
 import { SPORTS, type ArbGame } from "./sports";
 
 const EMPTY_SX: SxBetMarkets = { moneyline: new Map(), spread: new Map(), totals: new Map() };
+const EMPTY_PM: PolymarketUsMarkets = { moneyline: new Map(), spread: new Map(), totals: new Map() };
 
 // The venue-native side identifier a live order needs for a given outcome:
 //   • Kalshi        → "yes" | "no"
@@ -165,16 +162,15 @@ export async function ingestTotals(date: string): Promise<IngestResult> {
       gameCount += games.length;
       if (!games.length) return;
 
-      const [kTot, pTot, kML, pML, kSp, pSp, sx] = await Promise.all([
+      const [kTot, kML, kSp, pm, sx] = await Promise.all([
         fetchKalshiTotalsByGame(games, cfg.kalshi.total).catch(() => new Map<string, VenueTotalLine[]>()),
-        // Polymarket US (regulated). MLB-only; non-MLB leagues return empty gracefully.
-        fetchPolymarketUsTotalsByGame(games).catch(() => new Map<string, VenueTotalLine[]>()),
         fetchKalshiMoneylineByGame(games, cfg.kalshi.game).catch(() => new Map<string, VenueTwoWay>()),
-        fetchPolymarketUsMoneylineByGame(games).catch(() => new Map<string, VenueTwoWay>()),
         fetchKalshiSpreadByGame(games, cfg.kalshi.spread, cfg.spreadFixedLine).catch(() => new Map<string, VenueSpread>()),
-        fetchPolymarketUsSpreadByGame(games).catch(() => new Map<string, VenueSpread>()),
+        // Polymarket US (regulated) — one pass for all 3 market types. MLB-only.
+        fetchPolymarketUsMLBMarkets(games).catch(() => EMPTY_PM),
         fetchSxBetMLBMarkets(games, cfg.sxLeagueId).catch(() => EMPTY_SX),
       ]);
+      const pTot = pm.totals, pML = pm.moneyline, pSp = pm.spread;
 
       for (const game of games) {
         const kRows = [
