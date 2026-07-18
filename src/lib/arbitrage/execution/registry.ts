@@ -8,7 +8,8 @@ import type { ExecMode } from "./config";
 import { DryRunAdapter } from "./dryRunAdapter";
 import { KalshiExecutionAdapter } from "./kalshiAdapter";
 import type { OnchainCreds } from "./onchainCreds";
-import { PolymarketExecutionAdapter, SxBetExecutionAdapter } from "./onchainAdapters";
+import { PolymarketUsExecutionAdapter } from "./polymarketUsAdapter";
+import { SxBetExecutionAdapter } from "./onchainAdapters";
 import type { ExecutionAdapter } from "./types";
 
 // Per-request credentials forwarded from the browser (UI-entered) or falling back to
@@ -18,7 +19,7 @@ export type ExecCreds = { kalshiCreds?: KalshiCreds } & OnchainCreds;
 export function liveAdapter(venueId: string, creds?: ExecCreds): ExecutionAdapter {
   const v = venueId.toLowerCase();
   if (v.includes("kalshi")) return new KalshiExecutionAdapter(creds?.kalshiCreds);
-  if (v.includes("poly")) return new PolymarketExecutionAdapter(creds?.polymarket);
+  if (v.includes("poly")) return new PolymarketUsExecutionAdapter(creds?.polymarket);
   if (v.includes("sx")) return new SxBetExecutionAdapter(creds?.sxbet);
   return new DryRunAdapter(venueId); // unknown venue can never go live
 }

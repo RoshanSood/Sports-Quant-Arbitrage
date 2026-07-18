@@ -4,9 +4,13 @@
 // used transiently to sign, and discarded — never logged, never written to disk, never
 // returned to the client.
 
+import type { PolymarketUsCreds } from "./polymarketUsAuth";
+
 export type PolymarketCreds = { key: string; funder?: string; sigType?: number };
 export type SxbetCreds = { key: string };
-export type OnchainCreds = { polymarket?: PolymarketCreds; sxbet?: SxbetCreds };
+// `polymarket` now carries Polymarket US API creds (Key ID + Ed25519 secret). The
+// international wallet creds type is kept for the commented-out self-custody path.
+export type OnchainCreds = { polymarket?: PolymarketUsCreds; sxbet?: SxbetCreds };
 
 function decodeKey(b64: string | null): string | undefined {
   if (!b64) return undefined;
@@ -18,22 +22,12 @@ function decodeKey(b64: string | null): string | undefined {
   }
 }
 
-function numOrUndef(v: string | null): number | undefined {
-  if (v == null || v === "") return undefined;
-  const n = Number(v);
-  return Number.isFinite(n) ? n : undefined;
-}
-
 export function extractOnchainCredsFromHeaders(headers: Headers): OnchainCreds {
   const out: OnchainCreds = {};
-  const polyKey = decodeKey(headers.get("x-polymarket-key"));
-  if (polyKey) {
-    out.polymarket = {
-      key: polyKey,
-      funder: headers.get("x-polymarket-funder")?.trim() || undefined,
-      sigType: numOrUndef(headers.get("x-polymarket-sig-type")),
-    };
-  }
+  // Polymarket US: Key ID (plain) + Ed25519 secret (base64-encoded in transit).
+  const keyId = headers.get("x-polymarket-key-id")?.trim();
+  const secret = decodeKey(headers.get("x-polymarket-secret"));
+  if (keyId && secret) out.polymarket = { keyId, secret };
   const sxKey = decodeKey(headers.get("x-sxbet-key"));
   if (sxKey) out.sxbet = { key: sxKey };
   return out;

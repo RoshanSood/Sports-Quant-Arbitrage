@@ -4,8 +4,9 @@
 // no signing, no orders.
 
 import { isKalshiConfigured, kalshiGet, type KalshiCreds } from "@/lib/kalshiAuth";
-import { POLYGON_CHAIN_ID, SX_CHAIN_ID, polygonUsdcAddress } from "./chains";
-import type { OnchainCreds, PolymarketCreds, SxbetCreds } from "./onchainCreds";
+import { SX_CHAIN_ID } from "./chains";
+import type { OnchainCreds, SxbetCreds } from "./onchainCreds";
+import { pmusBuyingPower, pmusCreds, type PolymarketUsCreds } from "./polymarketUsAuth";
 import { getSxMetadata } from "./sxMeta";
 import { deriveEoa, hasWalletKey, providerFor, usdcAllowance, usdcBalance } from "./wallet";
 
@@ -42,28 +43,24 @@ export async function verifyKalshi(creds?: KalshiCreds): Promise<VenueVerificati
   }
 }
 
-export async function verifyPolymarket(creds?: PolymarketCreds): Promise<VenueVerification> {
+// Polymarket US verification — a SIGNED account-balances read confirms the Key ID +
+// Ed25519 secret actually work and shows USD buying power. No wallet/on-chain.
+export async function verifyPolymarket(creds?: PolymarketUsCreds): Promise<VenueVerification> {
+  const c = pmusCreds(creds);
   const base: VenueVerification = {
     venueId: "polymarket",
-    configured: hasWalletKey("polymarket", creds?.key),
-    address: null,
-    chainId: POLYGON_CHAIN_ID,
+    configured: c != null,
+    address: c ? c.keyId : null, // Key ID (masked by the status route before leaving the server)
+    chainId: null,
     usdcBalance: null,
     allowance: null,
     spender: null,
     status: "missing",
   };
-  if (!base.configured) return base;
-  const eoa = deriveEoa("polymarket", creds?.key);
-  if (!eoa) return { ...base, status: "error", message: "invalid Polymarket wallet key" };
-  const owner = creds?.funder?.trim() || process.env.POLYMARKET_FUNDER?.trim() || eoa; // proxy wallets fund via a funder addr
-  try {
-    const provider = providerFor("polymarket");
-    const bal = await usdcBalance(provider, polygonUsdcAddress(), owner);
-    return { ...base, address: eoa, usdcBalance: bal, status: bal > 0 ? "verified" : "no_balance" };
-  } catch (e) {
-    return { ...base, address: eoa, status: "error", message: `Polygon RPC/USDC read failed: ${String(e).slice(0, 120)}` };
-  }
+  if (!c) return base;
+  const r = await pmusBuyingPower(c);
+  if (!r.ok) return { ...base, status: "error", message: `Polymarket US auth/balance failed: ${r.error ?? "unknown"}` };
+  return { ...base, usdcBalance: r.buyingPower, status: (r.buyingPower ?? 0) > 0 ? "verified" : "no_balance" };
 }
 
 export async function verifySx(creds?: SxbetCreds): Promise<VenueVerification> {

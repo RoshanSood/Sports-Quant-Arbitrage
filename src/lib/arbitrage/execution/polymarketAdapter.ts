@@ -9,9 +9,11 @@
 
 import { ClobClient, type ApiKeyCreds, Chain, OrderType, Side, SignatureType } from "@polymarket/clob-client";
 import { Wallet } from "ethers";
-import { POLYGON_CHAIN_ID, polymarketClobHost } from "./chains";
+// NOTE: international self-custody Polymarket adapter — currently UNUSED (the registry
+// routes "polymarket" to the regulated Polymarket US adapter). Kept for recoverability.
+import { POLYGON_CHAIN_ID, polymarketClobHost, polygonUsdcAddress } from "./chains";
 import type { PolymarketCreds } from "./onchainCreds";
-import { verifyPolymarket } from "./verify";
+import { deriveEoa, providerFor, usdcBalance } from "./wallet";
 import type { ExecutionAdapter, OrderRequest, OrderResult } from "./types";
 import { clobSignerShim, walletKey } from "./wallet";
 
@@ -83,8 +85,16 @@ export class PolymarketExecutionAdapter implements ExecutionAdapter {
   }
 
   async getBalanceUsd(): Promise<number | null> {
-    if (!this.key()) return null;
-    return (await verifyPolymarket(this.creds)).usdcBalance;
+    const key = this.key();
+    if (!key) return null;
+    const eoa = deriveEoa("polymarket", this.creds?.key);
+    if (!eoa) return null;
+    const owner = this.creds?.funder?.trim() || process.env.POLYMARKET_FUNDER?.trim() || eoa;
+    try {
+      return await usdcBalance(providerFor("polymarket"), polygonUsdcAddress(), owner);
+    } catch {
+      return null;
+    }
   }
 
   async placeOrder(req: OrderRequest): Promise<OrderResult> {
