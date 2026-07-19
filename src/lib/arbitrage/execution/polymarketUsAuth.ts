@@ -13,13 +13,14 @@ export const PMUS_API = "https://api.polymarket.us";
 
 export type PolymarketUsCreds = { keyId: string; secret: string };
 
-export function pmusCreds(override?: PolymarketUsCreds): PolymarketUsCreds | null {
+// Accepts the unified creds shape (keyId/secret optional) or env fallback.
+export function pmusCreds(override?: { keyId?: string; secret?: string }): PolymarketUsCreds | null {
   const keyId = override?.keyId?.trim() || process.env.POLYMARKET_US_KEY_ID?.trim();
   const secret = override?.secret?.trim() || process.env.POLYMARKET_US_SECRET?.trim();
   return keyId && secret ? { keyId, secret } : null;
 }
 
-export function hasPmusCreds(override?: PolymarketUsCreds): boolean {
+export function hasPmusCreds(override?: { keyId?: string; secret?: string }): boolean {
   return pmusCreds(override) != null;
 }
 

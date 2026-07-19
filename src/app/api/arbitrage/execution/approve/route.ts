@@ -6,6 +6,12 @@
 
 import { NextResponse } from "next/server";
 import { isAuthorized } from "@/lib/adminAuth";
+import { polymarketRegion } from "@/lib/polymarketRegion";
+import {
+  POLYMARKET_CTF_EXCHANGE,
+  POLYMARKET_NEG_RISK_EXCHANGE,
+  polygonUsdcAddress,
+} from "@/lib/arbitrage/execution/chains";
 import { getSxMetadata } from "@/lib/arbitrage/execution/sxMeta";
 import { extractOnchainCredsFromHeaders } from "@/lib/arbitrage/execution/onchainCreds";
 import { approveUsdc, hasWalletKey } from "@/lib/arbitrage/execution/wallet";
@@ -24,22 +30,28 @@ export async function POST(req: Request) {
   }
 
   const venue = body.venue;
-  // Polymarket US is a custodial central exchange — no on-chain USDC allowance to set
-  // (funds already sit in the account). Only SX.bet (on-chain) needs an approval.
-  if (venue === "polymarket") {
+  if (venue !== "polymarket" && venue !== "sxbet") {
+    return NextResponse.json({ error: "venue must be 'polymarket' or 'sxbet'" }, { status: 400 });
+  }
+  // Polymarket US is custodial — no on-chain allowance to set (funds sit in the account).
+  if (venue === "polymarket" && polymarketRegion() === "us") {
     return NextResponse.json({ error: "Polymarket US needs no USDC allowance (custodial). Fund the account directly." }, { status: 400 });
   }
-  if (venue !== "sxbet") {
-    return NextResponse.json({ error: "venue must be 'sxbet' (Polymarket US needs no approval)" }, { status: 400 });
-  }
-  // Wallet key from the UI (header) or server env.
+
   const onchain = extractOnchainCredsFromHeaders(req.headers);
-  const keyOverride = onchain.sxbet?.key;
+  const keyOverride = venue === "polymarket" ? onchain.polymarket?.key : onchain.sxbet?.key;
   if (!hasWalletKey(venue, keyOverride)) {
     return NextResponse.json({ error: `${venue} wallet key not provided (enter it in the venue Credentials tab or set it server-side)` }, { status: 400 });
   }
 
   try {
+    if (venue === "polymarket") {
+      // intl: approve both exchanges (regular + neg-risk) so either market type can fill.
+      const usdc = polygonUsdcAddress();
+      const ctf = await approveUsdc("polymarket", usdc, POLYMARKET_CTF_EXCHANGE, body.amountUsd, keyOverride);
+      const negRisk = await approveUsdc("polymarket", usdc, POLYMARKET_NEG_RISK_EXCHANGE, body.amountUsd, keyOverride);
+      return NextResponse.json({ venue, spenders: { ctfExchange: ctf, negRiskExchange: negRisk } });
+    }
     // sxbet: approve the TokenTransferProxy from live metadata.
     const meta = await getSxMetadata();
     const spender = meta?.tokenTransferProxy ?? meta?.executorAddress;

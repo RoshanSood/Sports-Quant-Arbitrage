@@ -8,8 +8,9 @@
 // NOTE: validate against a $1 live order before trusting it — the exact create-order enum
 // values + Ed25519 signing are per the published docs but unverified without a live key.
 
+import type { PolymarketCreds } from "./onchainCreds";
 import type { ExecutionAdapter, FillConfirmation, OrderRequest, OrderResult } from "./types";
-import { hasPmusCreds, pmusBuyingPower, pmusCreds, pmusFetch, type PolymarketUsCreds } from "./polymarketUsAuth";
+import { hasPmusCreds, pmusBuyingPower, pmusCreds, pmusFetch } from "./polymarketUsAuth";
 
 const TICK = 0.005; // orderPriceMinTickSize observed on MLB markets
 
@@ -25,7 +26,7 @@ type CreateOrderResponse = {
 
 export class PolymarketUsExecutionAdapter implements ExecutionAdapter {
   id = "polymarket";
-  constructor(private creds?: PolymarketUsCreds) {}
+  constructor(private creds?: PolymarketCreds) {}
 
   supportsLive(): boolean {
     return hasPmusCreds(this.creds);

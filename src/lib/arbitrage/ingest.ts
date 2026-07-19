@@ -11,15 +11,13 @@ import {
   type VenueTotalLine,
   type VenueTwoWay,
 } from "@/lib/kalshi";
-// International Polymarket (self-custody CLOB) — commented out while trading on
-// Polymarket US (regulated, central order book). Re-enable by swapping these imports +
-// the fetch calls below back to the international provider.
-// import {
-//   fetchPolymarketMoneylineByGame,
-//   fetchPolymarketSpreadByGame,
-//   fetchPolymarketTotalsByGame,
-// } from "@/lib/polymarket";
+import {
+  fetchPolymarketMoneylineByGame,
+  fetchPolymarketSpreadByGame,
+  fetchPolymarketTotalsByGame,
+} from "@/lib/polymarket";
 import { fetchPolymarketUsMLBMarkets, type PolymarketUsMarkets } from "@/lib/polymarketUs";
+import { polymarketRegion } from "@/lib/polymarketRegion";
 import { fetchSxBetMLBMarkets, type SxBetMarkets } from "@/lib/sxbet";
 import type { NormalizedMarket, Outcome, Sport, VenueId } from "@/types/arbitrage";
 import { decimalOddsFromCents, impliedProbFromCents } from "./arbMath";
@@ -30,16 +28,17 @@ const EMPTY_SX: SxBetMarkets = { moneyline: new Map(), spread: new Map(), totals
 const EMPTY_PM: PolymarketUsMarkets = { moneyline: new Map(), spread: new Map(), totals: new Map() };
 
 // The venue-native side identifier a live order needs for a given outcome:
-//   • Kalshi        → "yes" | "no"
-//   • Polymarket US → "yes" | "no" (long/Over ⇒ YES, short/Under ⇒ NO); the order's
-//                     marketSlug rides on nativeMarketId
-//   • SX.bet        → "one" | "two" (isTakerBettingOutcomeOne)
+//   • Kalshi         → "yes" | "no"
+//   • Polymarket intl→ the ERC-1155 CLOB token id for that outcome
+//   • Polymarket US  → "yes" | "no" (long/Over ⇒ YES, short/Under ⇒ NO); marketSlug on nativeMarketId
+//   • SX.bet         → "one" | "two" (isTakerBettingOutcomeOne)
 // Undefined when the venue hasn't supplied the id (read-only rows still ingest fine).
 function nativeSideFor(
   venueId: VenueId,
   ids: { kalshiYesNo: "yes" | "no"; polyTokenId?: string; sxIsOne?: boolean }
 ): string | undefined {
-  if (venueId === "kalshi" || venueId === "polymarket") return ids.kalshiYesNo;
+  if (venueId === "kalshi") return ids.kalshiYesNo;
+  if (venueId === "polymarket") return polymarketRegion() === "us" ? ids.kalshiYesNo : ids.polyTokenId;
   if (venueId === "sxbet") return ids.sxIsOne === undefined ? undefined : ids.sxIsOne ? "one" : "two";
   return undefined;
 }
@@ -162,12 +161,23 @@ export async function ingestTotals(date: string): Promise<IngestResult> {
       gameCount += games.length;
       if (!games.length) return;
 
+      // Polymarket source depends on region: US (regulated, one consolidated pass) vs
+      // international (self-custody CLOB, three fetches). Both normalize to {totals,
+      // moneyline, spread}.
+      const polyPromise: Promise<PolymarketUsMarkets> =
+        polymarketRegion() === "us"
+          ? fetchPolymarketUsMLBMarkets(games).catch(() => EMPTY_PM)
+          : Promise.all([
+              fetchPolymarketTotalsByGame(games, cfg.polyTag).catch(() => new Map<string, VenueTotalLine[]>()),
+              fetchPolymarketMoneylineByGame(games, cfg.polyTag).catch(() => new Map<string, VenueTwoWay>()),
+              fetchPolymarketSpreadByGame(games, cfg.polyTag).catch(() => new Map<string, VenueSpread>()),
+            ]).then(([totals, moneyline, spread]) => ({ totals, moneyline, spread }));
+
       const [kTot, kML, kSp, pm, sx] = await Promise.all([
         fetchKalshiTotalsByGame(games, cfg.kalshi.total).catch(() => new Map<string, VenueTotalLine[]>()),
         fetchKalshiMoneylineByGame(games, cfg.kalshi.game).catch(() => new Map<string, VenueTwoWay>()),
         fetchKalshiSpreadByGame(games, cfg.kalshi.spread, cfg.spreadFixedLine).catch(() => new Map<string, VenueSpread>()),
-        // Polymarket US (regulated) — one pass for all 3 market types. MLB-only.
-        fetchPolymarketUsMLBMarkets(games).catch(() => EMPTY_PM),
+        polyPromise,
         fetchSxBetMLBMarkets(games, cfg.sxLeagueId).catch(() => EMPTY_SX),
       ]);
       const pTot = pm.totals, pML = pm.moneyline, pSp = pm.spread;

@@ -5,11 +5,13 @@
 // server or logged.
 
 export const KALSHI_CREDS_KEY = "kalshi_api_creds";
-export const POLY_CREDS_KEY = "polymarket_us_creds";
+export const POLY_CREDS_KEY = "polymarket_creds";
 export const SX_CREDS_KEY = "sxbet_wallet_creds";
 
-// Polymarket US: developer-portal Key ID + base64 Ed25519 secret.
-export type PolyCreds = { keyId: string; secret: string };
+// Polymarket creds carry either region's shape:
+//   • intl: wallet private key (+ optional funder/sigType)
+//   • us:   developer-portal Key ID + base64 Ed25519 secret
+export type PolyCreds = { key?: string; funder?: string; sigType?: number; keyId?: string; secret?: string };
 export type SxCreds = { key: string };
 
 function read<T>(key: string): T | null {
@@ -51,7 +53,7 @@ export function hasVenueCreds(venueId: string): boolean {
   }
   if (venueId === "polymarket") {
     const c = read<PolyCreds>(POLY_CREDS_KEY);
-    return Boolean(c?.keyId && c?.secret);
+    return Boolean(c?.key || (c?.keyId && c?.secret)); // intl wallet key OR us keyId+secret
   }
   return Boolean(read<SxCreds>(SX_CREDS_KEY)?.key);
 }
@@ -63,11 +65,17 @@ export function emitCredsChanged(): void {
   if (typeof window !== "undefined") window.dispatchEvent(new Event(CREDS_CHANGED_EVENT));
 }
 
-// Headers carrying venue creds. Polymarket US: Key ID (plain) + base64 Ed25519 secret.
-// SX.bet: base64 wallet key. Empty when none stored.
+// Headers carrying venue creds. Polymarket intl: base64 wallet key (+ funder/sigType);
+// Polymarket US: Key ID (plain) + base64 Ed25519 secret. SX.bet: base64 wallet key.
+// Whatever is stored is sent; the server uses the set that matches its region.
 export function onchainAuthHeaders(): Record<string, string> {
   const h: Record<string, string> = {};
   const p = read<PolyCreds>(POLY_CREDS_KEY);
+  if (p?.key) {
+    h["x-polymarket-key"] = btoa(p.key);
+    if (p.funder) h["x-polymarket-funder"] = p.funder;
+    if (p.sigType != null) h["x-polymarket-sig-type"] = String(p.sigType);
+  }
   if (p?.keyId && p?.secret) {
     h["x-polymarket-key-id"] = p.keyId;
     h["x-polymarket-secret"] = btoa(p.secret);

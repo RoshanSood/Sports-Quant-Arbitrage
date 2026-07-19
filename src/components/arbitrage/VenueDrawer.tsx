@@ -305,7 +305,18 @@ const STATUS_STYLE: Record<string, { color: string; label: string }> = {
   error: { color: "#ef4444", label: "Error" },
 };
 
-type ExecGate = { agentLive?: boolean; killSwitch?: boolean; maxLiveStakeUsd?: number };
+type ExecGate = { agentLive?: boolean; killSwitch?: boolean; maxLiveStakeUsd?: number; polymarketRegion?: "intl" | "us" };
+
+function SaveRow({ onSave, disabled, hasKey, onCancel }: { onSave: () => void; disabled: boolean; hasKey: boolean; onCancel: () => void }) {
+  return (
+    <div className="flex gap-2 pt-0.5">
+      <button onClick={onSave} disabled={disabled} className="rounded px-2 py-1 text-[11px] font-semibold text-white disabled:opacity-40" style={{ background: "#2563eb" }}>
+        Save
+      </button>
+      {hasKey && <button onClick={onCancel} className="rounded px-2 py-1 text-[11px] text-gray-400 hover:text-white">Cancel</button>}
+    </div>
+  );
+}
 
 function OnchainStatus({ venueId }: { venueId: string }) {
   const name = venueId === "polymarket" ? "Polymarket" : venueId === "sxbet" ? "SX.bet" : venueId;
@@ -317,17 +328,21 @@ function OnchainStatus({ venueId }: { venueId: string }) {
   const [approving, setApproving] = useState(false);
   const [approveMsg, setApproveMsg] = useState<string | null>(null);
 
-  // Credential entry (write-only). Polymarket US uses Key ID + Ed25519 secret; SX.bet uses
-  // a wallet key. We track only whether creds are stored — never re-read or display them.
+  // Credential entry (write-only). Polymarket intl = wallet key (+ funder/sigType);
+  // Polymarket US = Key ID + Ed25519 secret; SX.bet = wallet key. We track only whether
+  // creds are stored — never re-read or display them.
   const isPoly = venueId === "polymarket";
+  const polyUs = isPoly && gate?.polymarketRegion === "us"; // defaults to intl until gate loads
   const storedHas = () => {
     if (typeof window === "undefined") return false;
-    const c = loadVenueCreds(venueId);
-    return isPoly ? Boolean((c as PolyCreds | null)?.keyId && (c as PolyCreds | null)?.secret) : Boolean((c as { key?: string } | null)?.key);
+    const c = loadVenueCreds(venueId) as PolyCreds | null;
+    return isPoly ? Boolean(c?.key || (c?.keyId && c?.secret)) : Boolean((c as { key?: string } | null)?.key);
   };
   const [hasKey, setHasKey] = useState(storedHas);
-  const [f1, setF1] = useState(""); // Key ID (poly) | wallet key (sx)
-  const [f2, setF2] = useState(""); // Ed25519 secret (poly only)
+  const [f1, setF1] = useState(""); // wallet key (intl poly / sx) | Key ID (us poly)
+  const [f2, setF2] = useState(""); // Ed25519 secret (us poly only)
+  const [funder, setFunder] = useState("");
+  const [sigType, setSigType] = useState(0);
   const [editing, setEditing] = useState(() => !storedHas());
 
   const load = useCallback(() => {
@@ -352,9 +367,12 @@ function OnchainStatus({ venueId }: { venueId: string }) {
   useEffect(() => load(), [load]);
 
   function saveKey() {
-    if (isPoly) {
+    if (polyUs) {
       if (!f1.trim() || !f2.trim()) return;
       saveVenueCreds(venueId, { keyId: f1.trim(), secret: f2.trim() });
+    } else if (isPoly) {
+      if (!f1.trim()) return;
+      saveVenueCreds(venueId, { key: f1.trim(), funder: funder.trim() || undefined, sigType });
     } else {
       if (!f1.trim()) return;
       saveVenueCreds(venueId, { key: f1.trim() });
@@ -400,18 +418,20 @@ function OnchainStatus({ venueId }: { venueId: string }) {
   return (
     <div className="space-y-3">
       <div className="rounded-lg border px-3 py-2 text-[11px]" style={{ borderColor: "#3f2d10", background: "#1a160e", color: "#fbbf24" }}>
-        <div className="font-semibold">{isPoly ? "Polymarket US API credentials" : "SX.bet wallet key"}</div>
+        <div className="font-semibold">
+          {polyUs ? "Polymarket US API credentials" : isPoly ? "Polymarket wallet key" : "SX.bet wallet key"}
+        </div>
         <p className="text-gray-400 mt-0.5">
-          {isPoly ? (
+          {polyUs ? (
             <>
               Your <strong>Key ID</strong> + <strong>Ed25519 secret</strong> from the Polymarket US developer portal.
-              Kept only in <strong>this browser</strong>, sent to sign requests, never stored on the server or shown
-              again.
+              Kept only in <strong>this browser</strong>, sent to sign requests, never stored on the server or shown again.
             </>
           ) : (
             <>
               A wallet private key controls <strong>all</strong> funds in that wallet. Kept only in{" "}
               <strong>this browser</strong>; use a dedicated wallet funded with just your trading USDC.
+              {isPoly && " Export it from your Polygon wallet (MetaMask) or from Polymarket → Cash/Settings → Export Private Key."}
             </>
           )}{" "}
           A live order only fires when the agent&apos;s <strong>Live</strong> toggle (Settings) is on, the kill switch is
@@ -431,57 +451,31 @@ function OnchainStatus({ venueId }: { venueId: string }) {
               <button onClick={clearKey} className="text-red-400 hover:text-red-300">Clear</button>
             </div>
           </div>
+        ) : polyUs ? (
+          <div className="space-y-1.5">
+            <label className="text-[10px] uppercase tracking-wide text-gray-500">Key ID</label>
+            <input value={f1} onChange={(e) => setF1(e.target.value)} placeholder="xxxxxxxx-xxxx-xxxx-xxxx" autoComplete="off" className="w-full rounded bg-[#0b0d11] border px-2 py-1 text-[11px] text-gray-200 font-mono" style={{ borderColor: "#2a2f3e" }} />
+            <label className="text-[10px] uppercase tracking-wide text-gray-500">Ed25519 secret (base64)</label>
+            <input type="password" value={f2} onChange={(e) => setF2(e.target.value)} placeholder="base64 secret" autoComplete="off" className="w-full rounded bg-[#0b0d11] border px-2 py-1 text-[11px] text-gray-200 font-mono" style={{ borderColor: "#2a2f3e" }} />
+            <SaveRow onSave={saveKey} disabled={!f1.trim() || !f2.trim()} hasKey={hasKey} onCancel={() => setEditing(false)} />
+          </div>
         ) : (
           <div className="space-y-1.5">
-            {isPoly ? (
+            <label className="text-[10px] uppercase tracking-wide text-gray-500">{name} wallet private key ({chainName})</label>
+            <input type="password" value={f1} onChange={(e) => setF1(e.target.value)} placeholder="0x… (64-hex private key)" autoComplete="off" className="w-full rounded bg-[#0b0d11] border px-2 py-1 text-[11px] text-gray-200 font-mono" style={{ borderColor: "#2a2f3e" }} />
+            {isPoly && (
               <>
-                <label className="text-[10px] uppercase tracking-wide text-gray-500">Key ID</label>
-                <input
-                  value={f1}
-                  onChange={(e) => setF1(e.target.value)}
-                  placeholder="xxxxxxxx-xxxx-xxxx-xxxx"
-                  autoComplete="off"
-                  className="w-full rounded bg-[#0b0d11] border px-2 py-1 text-[11px] text-gray-200 font-mono"
-                  style={{ borderColor: "#2a2f3e" }}
-                />
-                <label className="text-[10px] uppercase tracking-wide text-gray-500">Ed25519 secret (base64)</label>
-                <input
-                  type="password"
-                  value={f2}
-                  onChange={(e) => setF2(e.target.value)}
-                  placeholder="base64 secret"
-                  autoComplete="off"
-                  className="w-full rounded bg-[#0b0d11] border px-2 py-1 text-[11px] text-gray-200 font-mono"
-                  style={{ borderColor: "#2a2f3e" }}
-                />
-              </>
-            ) : (
-              <>
-                <label className="text-[10px] uppercase tracking-wide text-gray-500">{name} wallet private key ({chainName})</label>
-                <input
-                  type="password"
-                  value={f1}
-                  onChange={(e) => setF1(e.target.value)}
-                  placeholder="0x… (64-hex private key)"
-                  autoComplete="off"
-                  className="w-full rounded bg-[#0b0d11] border px-2 py-1 text-[11px] text-gray-200 font-mono"
-                  style={{ borderColor: "#2a2f3e" }}
-                />
+                <label className="text-[10px] uppercase tracking-wide text-gray-500">Funder address (optional — proxy/Magic wallets)</label>
+                <input value={funder} onChange={(e) => setFunder(e.target.value)} placeholder="0x… blank for a direct EOA wallet" className="w-full rounded bg-[#0b0d11] border px-2 py-1 text-[11px] text-gray-200 font-mono" style={{ borderColor: "#2a2f3e" }} />
+                <label className="text-[10px] uppercase tracking-wide text-gray-500">Signature type</label>
+                <select value={sigType} onChange={(e) => setSigType(Number(e.target.value))} className="w-full rounded bg-[#0b0d11] border px-2 py-1 text-[11px] text-gray-200" style={{ borderColor: "#2a2f3e" }}>
+                  <option value={0}>EOA — direct wallet (default)</option>
+                  <option value={1}>Polymarket proxy (email/Magic)</option>
+                  <option value={2}>Gnosis Safe</option>
+                </select>
               </>
             )}
-            <div className="flex gap-2 pt-0.5">
-              <button
-                onClick={saveKey}
-                disabled={isPoly ? !f1.trim() || !f2.trim() : !f1.trim()}
-                className="rounded px-2 py-1 text-[11px] font-semibold text-white disabled:opacity-40"
-                style={{ background: "#2563eb" }}
-              >
-                Save
-              </button>
-              {hasKey && (
-                <button onClick={() => setEditing(false)} className="rounded px-2 py-1 text-[11px] text-gray-400 hover:text-white">Cancel</button>
-              )}
-            </div>
+            <SaveRow onSave={saveKey} disabled={!f1.trim()} hasKey={hasKey} onCancel={() => setEditing(false)} />
           </div>
         )}
       </div>
@@ -514,18 +508,18 @@ function OnchainStatus({ venueId }: { venueId: string }) {
                 {s?.label}
               </span>
             </KV>
-            <KV label={isPoly ? "Key ID" : "Wallet"}><span className="text-gray-300 font-mono">{status.address ?? "—"}</span></KV>
-            {!isPoly && <KV label="Chain"><span className="text-gray-300">{chainName} ({status.chainId})</span></KV>}
-            <KV label={isPoly ? "Buying power" : "USDC Balance"}><span className="text-gray-200">{status.usdcBalance != null ? `$${status.usdcBalance.toFixed(2)}` : "—"}</span></KV>
+            <KV label={polyUs ? "Key ID" : "Wallet"}><span className="text-gray-300 font-mono">{status.address ?? "—"}</span></KV>
+            {!polyUs && <KV label="Chain"><span className="text-gray-300">{chainName} ({status.chainId})</span></KV>}
+            <KV label={polyUs ? "Buying power" : "USDC Balance"}><span className="text-gray-200">{status.usdcBalance != null ? `$${status.usdcBalance.toFixed(2)}` : "—"}</span></KV>
             {venueId === "sxbet" && (
               <KV label="USDC Allowance"><span className="text-gray-200">{status.allowance != null ? `$${status.allowance.toFixed(2)}` : "—"}</span></KV>
             )}
             {status.message && <p className="text-[10px] text-red-400 pt-1">{status.message}</p>}
 
-            {venueId === "sxbet" && (
+            {(venueId === "sxbet" || (isPoly && !polyUs)) && (
               <div className="pt-2 mt-1 border-t space-y-1.5" style={{ borderColor: "#1e2130" }}>
                 <p className="text-[10px] text-gray-500">
-                  One-time: approve the SX.bet exchange to spend USDC (required before any fill). Signed with your key; admin password gates the action.
+                  One-time: approve the {name} exchange to spend USDC (required before any fill). Signed with your key; admin password gates the action.
                 </p>
                 <div className="flex gap-1.5">
                   <input

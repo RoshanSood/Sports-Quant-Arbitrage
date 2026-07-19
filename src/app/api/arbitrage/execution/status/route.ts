@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { verifyAllVenues } from "@/lib/arbitrage/execution/verify";
 import { extractOnchainCredsFromHeaders } from "@/lib/arbitrage/execution/onchainCreds";
 import { extractCredsFromHeaders } from "@/lib/kalshiAuth";
+import { polymarketRegion } from "@/lib/polymarketRegion";
 import { getAgent } from "@/lib/arbitrage/agentStore";
 import { getRiskSettings } from "@/lib/arbitrage/riskStore";
 import { DEFAULT_AGENT } from "@/lib/arbitrage/seed";
@@ -32,6 +33,7 @@ export async function GET(request: Request) {
         agentLive: agent.live && !agent.paper,
         killSwitch: risk.killSwitch,
         maxLiveStakeUsd: risk.maxLiveStakeUsd,
+        polymarketRegion: polymarketRegion(), // drives the Polymarket credential form
       },
     });
   } catch (error) {

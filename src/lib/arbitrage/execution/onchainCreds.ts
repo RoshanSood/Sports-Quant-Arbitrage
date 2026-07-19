@@ -4,13 +4,12 @@
 // used transiently to sign, and discarded — never logged, never written to disk, never
 // returned to the client.
 
-import type { PolymarketUsCreds } from "./polymarketUsAuth";
-
-export type PolymarketCreds = { key: string; funder?: string; sigType?: number };
+// Unified Polymarket creds carrying BOTH region shapes (only one set is used per region):
+//   • intl (self-custody CLOB): wallet private key + optional funder/sigType
+//   • us   (regulated):         Ed25519 Key ID + secret
+export type PolymarketCreds = { key?: string; funder?: string; sigType?: number; keyId?: string; secret?: string };
 export type SxbetCreds = { key: string };
-// `polymarket` now carries Polymarket US API creds (Key ID + Ed25519 secret). The
-// international wallet creds type is kept for the commented-out self-custody path.
-export type OnchainCreds = { polymarket?: PolymarketUsCreds; sxbet?: SxbetCreds };
+export type OnchainCreds = { polymarket?: PolymarketCreds; sxbet?: SxbetCreds };
 
 function decodeKey(b64: string | null): string | undefined {
   if (!b64) return undefined;
@@ -22,12 +21,30 @@ function decodeKey(b64: string | null): string | undefined {
   }
 }
 
+function numOrUndef(v: string | null): number | undefined {
+  if (v == null || v === "") return undefined;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : undefined;
+}
+
 export function extractOnchainCredsFromHeaders(headers: Headers): OnchainCreds {
   const out: OnchainCreds = {};
-  // Polymarket US: Key ID (plain) + Ed25519 secret (base64-encoded in transit).
+  const poly: PolymarketCreds = {};
+  // intl (self-custody): base64 wallet key + optional funder/sigType.
+  const walletKey = decodeKey(headers.get("x-polymarket-key"));
+  if (walletKey) {
+    poly.key = walletKey;
+    poly.funder = headers.get("x-polymarket-funder")?.trim() || undefined;
+    poly.sigType = numOrUndef(headers.get("x-polymarket-sig-type"));
+  }
+  // us (regulated): Key ID (plain) + base64 Ed25519 secret.
   const keyId = headers.get("x-polymarket-key-id")?.trim();
   const secret = decodeKey(headers.get("x-polymarket-secret"));
-  if (keyId && secret) out.polymarket = { keyId, secret };
+  if (keyId && secret) {
+    poly.keyId = keyId;
+    poly.secret = secret;
+  }
+  if (poly.key || poly.keyId) out.polymarket = poly;
   const sxKey = decodeKey(headers.get("x-sxbet-key"));
   if (sxKey) out.sxbet = { key: sxKey };
   return out;
