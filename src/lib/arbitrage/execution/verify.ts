@@ -8,8 +8,9 @@ import { polymarketRegion } from "@/lib/polymarketRegion";
 import { POLYGON_CHAIN_ID, SX_CHAIN_ID, polygonUsdcAddress } from "./chains";
 import type { OnchainCreds, PolymarketCreds, SxbetCreds } from "./onchainCreds";
 import { pmusBuyingPower, pmusCreds } from "./polymarketUsAuth";
+import { polymarketBalanceAllowance } from "./polymarketAdapter";
 import { getSxMetadata } from "./sxMeta";
-import { deriveEoa, hasWalletKey, providerFor, usdcAllowance, usdcBalance } from "./wallet";
+import { deriveEoa, hasWalletKey, providerFor, usdcAllowance, usdcBalance, walletKey } from "./wallet";
 
 export type VenueVerification = {
   venueId: "kalshi" | "polymarket" | "sxbet";
@@ -85,6 +86,19 @@ async function verifyPolymarketIntl(creds?: PolymarketCreds): Promise<VenueVerif
   const eoa = deriveEoa("polymarket", creds?.key);
   if (!eoa) return { ...base, status: "error", message: "invalid Polymarket wallet key" };
   const owner = creds?.funder?.trim() || process.env.POLYMARKET_FUNDER?.trim() || eoa; // proxy wallets fund via a funder addr
+  const key = walletKey("polymarket", creds?.key);
+  if (key) {
+    try {
+      const ba = await polymarketBalanceAllowance(key, creds?.funder, creds?.sigType);
+      if (!Number.isFinite(ba.balance)) throw new Error("invalid Polymarket balance response");
+      let status: VenueVerification["status"] = "verified";
+      if (ba.balance <= 0) status = "no_balance";
+      else if (Number.isFinite(ba.allowance) && ba.allowance <= 0) status = "needs_allowance";
+      return { ...base, address: eoa, usdcBalance: ba.balance, allowance: Number.isFinite(ba.allowance) ? ba.allowance : null, status };
+    } catch {
+      // Fall back to a direct on-chain read below for older EOA/proxy flows.
+    }
+  }
   try {
     const bal = await usdcBalance(providerFor("polymarket"), polygonUsdcAddress(), owner);
     return { ...base, address: eoa, usdcBalance: bal, status: bal > 0 ? "verified" : "no_balance" };

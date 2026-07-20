@@ -7,7 +7,15 @@
 // actually fires is decided by the execution gate (agent Live toggle + kill switch +
 // UI stake cap + admin auth) — validate with a $1 trade before raising the cap.
 
-import { ClobClient, type ApiKeyCreds, Chain, OrderType, Side, SignatureType } from "@polymarket/clob-client";
+import {
+  AssetType,
+  ClobClient,
+  type ApiKeyCreds,
+  Chain,
+  OrderType,
+  Side,
+  SignatureTypeV2,
+} from "@polymarket/clob-client-v2";
 import { Wallet } from "ethers";
 // NOTE: international self-custody Polymarket adapter — currently UNUSED (the registry
 // routes "polymarket" to the regulated Polymarket US adapter). Kept for recoverability.
@@ -19,11 +27,14 @@ import { clobSignerShim, walletKey } from "./wallet";
 
 // Which signature scheme the funded wallet uses. Default EOA (direct wallet). Users
 // whose USDC lives in a Polymarket proxy/safe pass funder + sigType (UI or env).
-function signatureType(sig?: number): SignatureType {
+export const POLYMARKET_DEPOSIT_WALLET_SIG_TYPE = 3;
+
+function signatureType(sig?: number): SignatureTypeV2 {
   const v = sig ?? Number(process.env.POLYMARKET_SIG_TYPE);
-  if (v === 1) return SignatureType.POLY_PROXY;
-  if (v === 2) return SignatureType.POLY_GNOSIS_SAFE;
-  return SignatureType.EOA;
+  if (v === POLYMARKET_DEPOSIT_WALLET_SIG_TYPE) return SignatureTypeV2.POLY_1271;
+  if (v === 1) return SignatureTypeV2.POLY_PROXY;
+  if (v === 2) return SignatureTypeV2.POLY_GNOSIS_SAFE;
+  return SignatureTypeV2.EOA;
 }
 
 // Cache authenticated (L2) clients per wallet key — deriving API creds signs + hits the
@@ -31,23 +42,65 @@ function signatureType(sig?: number): SignatureType {
 const clientCache = new Map<string, ClobClient>();
 
 async function buildClient(key: string, funderOverride?: string, sigType?: number): Promise<ClobClient> {
-  const cached = clientCache.get(key);
-  if (cached) return cached;
-
   const wallet = new Wallet(key);
   const signer = clobSignerShim(wallet);
   const host = polymarketClobHost();
   const chainId = POLYGON_CHAIN_ID as Chain;
   const st = signatureType(sigType);
   const funder = funderOverride?.trim() || process.env.POLYMARKET_FUNDER?.trim() || (await wallet.getAddress());
+  const cacheKey = `${key}:${funder.toLowerCase()}:${st}`;
+  const cached = clientCache.get(cacheKey);
+  if (cached) return cached;
 
   // L1: sign to create-or-derive the L2 API credentials, then build the L2 client.
-  const l1 = new ClobClient(host, chainId, signer, undefined, st, funder);
+  const l1 = new ClobClient({ host, chain: chainId, signer, signatureType: st, funderAddress: funder });
   const creds: ApiKeyCreds = await l1.createOrDeriveApiKey();
-  const client = new ClobClient(host, chainId, signer, creds, st, funder);
+  const client = new ClobClient({ host, chain: chainId, signer, creds, signatureType: st, funderAddress: funder });
 
-  clientCache.set(key, client);
+  clientCache.set(cacheKey, client);
   return client;
+}
+
+export type PolymarketBalanceAllowance = { balance: number; allowance: number };
+
+function parseCollateralAmount(value: unknown): number {
+  if (typeof value === "number") return Number.isFinite(value) ? value : NaN;
+  if (typeof value === "bigint") return Number(value) / 1_000_000;
+  if (typeof value !== "string") return NaN;
+  const cleaned = value.replace(/[$,\s]/g, "");
+  if (!cleaned) return NaN;
+  const n = Number(cleaned);
+  if (!Number.isFinite(n)) return NaN;
+  return Number.isInteger(n) && Math.abs(n) >= 1_000_000 ? n / 1_000_000 : n;
+}
+
+function maxCollateralAmount(value: unknown): number {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const amounts = Object.values(value)
+      .map(parseCollateralAmount)
+      .filter(Number.isFinite);
+    return amounts.length ? Math.max(...amounts) : NaN;
+  }
+  return parseCollateralAmount(value);
+}
+
+export async function polymarketBalanceAllowance(
+  key: string,
+  funderOverride?: string,
+  sigType?: number
+): Promise<PolymarketBalanceAllowance> {
+  const client = await buildClient(key, funderOverride, sigType);
+  const r = await client.getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
+  const raw = r as unknown as { balance?: unknown; allowance?: unknown; allowances?: unknown };
+  return {
+    balance: parseCollateralAmount(raw.balance),
+    allowance: maxCollateralAmount(raw.allowance ?? raw.allowances),
+  };
+}
+
+export async function updatePolymarketBalanceAllowance(key: string, funderOverride?: string, sigType?: number): Promise<void> {
+  const client = await buildClient(key, funderOverride, sigType);
+  await client.updateBalanceAllowance({ asset_type: AssetType.COLLATERAL });
 }
 
 type PostOrderResponse = {

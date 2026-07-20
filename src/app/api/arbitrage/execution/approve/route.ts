@@ -15,6 +15,7 @@ import {
 import { getSxMetadata } from "@/lib/arbitrage/execution/sxMeta";
 import { extractOnchainCredsFromHeaders } from "@/lib/arbitrage/execution/onchainCreds";
 import { approveUsdc, hasWalletKey } from "@/lib/arbitrage/execution/wallet";
+import { POLYMARKET_DEPOSIT_WALLET_SIG_TYPE, updatePolymarketBalanceAllowance } from "@/lib/arbitrage/execution/polymarketAdapter";
 
 type Body = { venue?: "polymarket" | "sxbet"; password?: string; amountUsd?: number };
 
@@ -46,6 +47,10 @@ export async function POST(req: Request) {
 
   try {
     if (venue === "polymarket") {
+      if (onchain.polymarket?.sigType === POLYMARKET_DEPOSIT_WALLET_SIG_TYPE) {
+        await updatePolymarketBalanceAllowance(keyOverride!, onchain.polymarket.funder, onchain.polymarket.sigType);
+        return NextResponse.json({ venue, updated: "polymarket-balance-allowance" });
+      }
       // intl: approve both exchanges (regular + neg-risk) so either market type can fill.
       const usdc = polygonUsdcAddress();
       const ctf = await approveUsdc("polymarket", usdc, POLYMARKET_CTF_EXCHANGE, body.amountUsd, keyOverride);

@@ -18,7 +18,7 @@ export type VenueStatus =
 export type Sport = "baseball" | "basketball" | "football" | "hockey" | "other";
 export type MarketType = "moneyline" | "spread" | "total";
 export type Outcome = "yes" | "no" | "over" | "under" | "home" | "away";
-export type Currency = "USD" | "USDC";
+export type Currency = "USD" | "USDC" | "USDT";
 
 export type TradeMode = "paper" | "live";
 
