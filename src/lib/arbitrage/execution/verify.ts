@@ -3,17 +3,19 @@
 // confirm your funded wallets connect before order code is ever enabled. All reads;
 // no signing, no orders.
 
+import { Wallet } from "ethers";
 import { isKalshiConfigured, kalshiGet, type KalshiCreds } from "@/lib/kalshiAuth";
 import { polymarketRegion } from "@/lib/polymarketRegion";
-import { POLYGON_CHAIN_ID, SX_CHAIN_ID, polygonUsdcAddress } from "./chains";
+import { BNB_CHAIN_ID, POLYGON_CHAIN_ID, SX_CHAIN_ID, polygonUsdcAddress } from "./chains";
 import type { OnchainCreds, PolymarketCreds, SxbetCreds } from "./onchainCreds";
 import { pmusBuyingPower, pmusCreds } from "./polymarketUsAuth";
+import { pfApiKey, pfUsdtBalance, pfWalletKey } from "./predictFunAdapter";
 import { polymarketBalanceAllowance } from "./polymarketAdapter";
 import { getSxMetadata } from "./sxMeta";
 import { deriveEoa, hasWalletKey, providerFor, usdcAllowance, usdcBalance, walletKey } from "./wallet";
 
 export type VenueVerification = {
-  venueId: "kalshi" | "polymarket" | "sxbet";
+  venueId: "kalshi" | "polymarket" | "sxbet" | "predictfun";
   configured: boolean; // credential/key present server-side
   address: string | null; // EOA (wallet venues) — masked identity
   chainId: number | null;
@@ -137,6 +139,31 @@ export async function verifySx(creds?: SxbetCreds): Promise<VenueVerification> {
   }
 }
 
+// predict.fun (BNB CLOB): confirm the API key + wallet key are present and read USDT
+// buying power on BNB. Balance-only (no on-chain allowance shown — the SDK's setApprovals
+// handles the ERC-1155/ERC-20 approvals separately).
+export async function verifyPredictFun(): Promise<VenueVerification> {
+  const base: VenueVerification = {
+    venueId: "predictfun",
+    configured: Boolean(pfApiKey() && pfWalletKey()),
+    address: null,
+    chainId: BNB_CHAIN_ID,
+    usdcBalance: null,
+    allowance: null,
+    spender: null,
+    status: "missing",
+  };
+  const key = pfWalletKey();
+  if (!base.configured || !key) return base;
+  try {
+    const addr = new Wallet(key).address;
+    const bal = await pfUsdtBalance(addr);
+    return { ...base, address: addr, usdcBalance: bal, status: (bal ?? 0) > 0 ? "verified" : "no_balance" };
+  } catch (e) {
+    return { ...base, status: "error", message: `predict.fun balance read failed: ${String(e).slice(0, 120)}` };
+  }
+}
+
 export async function verifyAllVenues(
   creds?: { kalshiCreds?: KalshiCreds } & OnchainCreds
 ): Promise<VenueVerification[]> {
@@ -144,5 +171,6 @@ export async function verifyAllVenues(
     verifyKalshi(creds?.kalshiCreds),
     verifyPolymarket(creds?.polymarket),
     verifySx(creds?.sxbet),
+    verifyPredictFun(),
   ]);
 }

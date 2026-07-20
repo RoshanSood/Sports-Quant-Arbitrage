@@ -40,6 +40,13 @@ export function polymarketExchangeAddress(negRisk: boolean): string {
 
 export const USDC_DECIMALS = 6;
 
+// BNB Smart Chain (predict.fun). USDT on BNB is 18 decimals (unlike Ethereum's 6).
+export const BNB_CHAIN_ID = 56;
+export const BNB_USDT_DECIMALS = 18;
+export function bnbRpcUrl(): string {
+  return process.env.BNB_RPC_URL || "https://bsc-dataseed.binance.org";
+}
+
 // Minimal ERC-20 ABI for balance/allowance reads + the approve tx (allowance helper).
 export const ERC20_ABI = [
   "function balanceOf(address owner) view returns (uint256)",
