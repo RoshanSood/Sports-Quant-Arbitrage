@@ -9,12 +9,14 @@ export const SX_CHAIN_ID = 4162;
 const DEFAULT_POLYGON_USDC = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
 
 export function polygonRpcUrl(): string {
-  return process.env.POLYGON_RPC_URL || "https://polygon-rpc.com";
+  // Default overridable via POLYGON_RPC_URL. (polygon-rpc.com is now gated → 401.)
+  return process.env.POLYGON_RPC_URL || "https://polygon-bor-rpc.publicnode.com";
 }
 
 export function sxRpcUrl(): string {
-  // SX Network (chain 4162). Override with SX_RPC_URL if the default is wrong.
-  return process.env.SX_RPC_URL || "https://rpc.sx-rollup.gelato.digital";
+  // SX Network (chain 4162). Override with SX_RPC_URL. (The old gelato endpoint's DNS is
+  // dead; SX's own node serves reads.)
+  return process.env.SX_RPC_URL || "https://rpc-rollup.sx.technology";
 }
 
 export function polygonUsdcAddress(): string {
