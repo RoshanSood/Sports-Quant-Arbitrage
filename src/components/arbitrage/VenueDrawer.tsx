@@ -342,7 +342,11 @@ function OnchainStatus({ venueId }: { venueId: string }) {
   const [f1, setF1] = useState(""); // wallet key (intl poly / sx) | Key ID (us poly)
   const [f2, setF2] = useState(""); // Ed25519 secret (us poly only)
   const [funder, setFunder] = useState("");
-  const [sigType, setSigType] = useState(0);
+  const [sigType, setSigType] = useState(() => {
+    if (!isPoly) return 0;
+    const c = loadVenueCreds(venueId) as PolyCreds | null;
+    return typeof c?.sigType === "number" ? c.sigType : 3;
+  });
   const [editing, setEditing] = useState(() => !storedHas());
 
   const load = useCallback(() => {
@@ -402,11 +406,27 @@ function OnchainStatus({ venueId }: { venueId: string }) {
         headers: { "Content-Type": "application/json", ...onchainAuthHeaders() },
         body: JSON.stringify({ venue: venueId, password: pw }),
       });
-      const d = await res.json();
-      setApproveMsg(res.ok ? "Approval tx sent — allowance will update shortly." : d.error || "Approval failed");
-      if (res.ok) setTimeout(load, 4000);
+      const d = (await res.json()) as {
+        error?: string;
+        result?: { ok?: boolean; txHash?: string; error?: string };
+        spenders?: Record<string, { ok?: boolean; txHash?: string; error?: string }>;
+      };
+      if (!res.ok) {
+        setApproveMsg(d.error || "Approval failed");
+        return;
+      }
+      // Inspect the ACTUAL on-chain approve result (not just that the request went through).
+      const results = d.result ? [d.result] : d.spenders ? Object.values(d.spenders) : [];
+      const failed = results.find((r) => r?.ok === false);
+      if (failed) {
+        const gasHint = /gas|insufficient funds/i.test(failed.error || "") ? " — the wallet needs a little native gas token (SX) to send the tx." : "";
+        setApproveMsg(`Approval FAILED: ${failed.error || "unknown"}${gasHint}`);
+      } else {
+        setApproveMsg(`Approved ✓ ${results[0]?.txHash ? `(tx ${results[0].txHash.slice(0, 10)}…)` : ""} — allowance updating.`);
+        setTimeout(load, 4000);
+      }
     } catch (e) {
-      setApproveMsg(String(e).slice(0, 120));
+      setApproveMsg(String(e).slice(0, 160));
     } finally {
       setApproving(false);
     }
@@ -465,17 +485,18 @@ function OnchainStatus({ venueId }: { venueId: string }) {
             <input type="password" value={f1} onChange={(e) => setF1(e.target.value)} placeholder="0x… (64-hex private key)" autoComplete="off" className="w-full rounded bg-[#0b0d11] border px-2 py-1 text-[11px] text-gray-200 font-mono" style={{ borderColor: "#2a2f3e" }} />
             {isPoly && (
               <>
-                <label className="text-[10px] uppercase tracking-wide text-gray-500">Funder address (optional — proxy/Magic wallets)</label>
-                <input value={funder} onChange={(e) => setFunder(e.target.value)} placeholder="0x… blank for a direct EOA wallet" className="w-full rounded bg-[#0b0d11] border px-2 py-1 text-[11px] text-gray-200 font-mono" style={{ borderColor: "#2a2f3e" }} />
+                <label className="text-[10px] uppercase tracking-wide text-gray-500">Funder address {sigType === 0 ? "(optional)" : "(required)"}</label>
+                <input value={funder} onChange={(e) => setFunder(e.target.value)} placeholder={sigType === 3 ? "0x... Polymarket deposit address" : "0x... blank only for a direct EOA wallet"} className="w-full rounded bg-[#0b0d11] border px-2 py-1 text-[11px] text-gray-200 font-mono" style={{ borderColor: "#2a2f3e" }} />
                 <label className="text-[10px] uppercase tracking-wide text-gray-500">Signature type</label>
                 <select value={sigType} onChange={(e) => setSigType(Number(e.target.value))} className="w-full rounded bg-[#0b0d11] border px-2 py-1 text-[11px] text-gray-200" style={{ borderColor: "#2a2f3e" }}>
                   <option value={0}>EOA — direct wallet (default)</option>
                   <option value={1}>Polymarket proxy (email/Magic)</option>
                   <option value={2}>Gnosis Safe</option>
+                  <option value={3}>Polymarket deposit wallet</option>
                 </select>
               </>
             )}
-            <SaveRow onSave={saveKey} disabled={!f1.trim()} hasKey={hasKey} onCancel={() => setEditing(false)} />
+            <SaveRow onSave={saveKey} disabled={!f1.trim() || (isPoly && sigType !== 0 && !funder.trim())} hasKey={hasKey} onCancel={() => setEditing(false)} />
           </div>
         )}
       </div>
@@ -509,7 +530,7 @@ function OnchainStatus({ venueId }: { venueId: string }) {
               </span>
             </KV>
             <KV label={polyUs ? "Key ID" : "Wallet"}><span className="text-gray-300 font-mono">{status.address ?? "—"}</span></KV>
-            {!polyUs && <KV label="Chain"><span className="text-gray-300">{chainName} ({status.chainId})</span></KV>}
+            {!polyUs && <KV label={isPoly ? "Trading chain" : "Chain"}><span className="text-gray-300">{chainName} ({status.chainId})</span></KV>}
             <KV label={polyUs ? "Buying power" : "USDC Balance"}><span className="text-gray-200">{status.usdcBalance != null ? `$${status.usdcBalance.toFixed(2)}` : "—"}</span></KV>
             {venueId === "sxbet" && (
               <KV label="USDC Allowance"><span className="text-gray-200">{status.allowance != null ? `$${status.allowance.toFixed(2)}` : "—"}</span></KV>
@@ -519,7 +540,9 @@ function OnchainStatus({ venueId }: { venueId: string }) {
             {(venueId === "sxbet" || (isPoly && !polyUs)) && (
               <div className="pt-2 mt-1 border-t space-y-1.5" style={{ borderColor: "#1e2130" }}>
                 <p className="text-[10px] text-gray-500">
-                  One-time: approve the {name} exchange to spend USDC (required before any fill). Signed with your key; admin password gates the action.
+                  {isPoly && sigType === 3
+                    ? "Refresh Polymarket CLOB balance/allowance for the deposit wallet. Signed with your key; admin password gates the action."
+                    : `One-time: approve the ${name} exchange to spend USDC (required before any fill). Signed with your key; admin password gates the action.`}
                 </p>
                 <div className="flex gap-1.5">
                   <input
@@ -536,7 +559,7 @@ function OnchainStatus({ venueId }: { venueId: string }) {
                     className="rounded px-2 py-1 text-[11px] font-medium disabled:opacity-40"
                     style={{ background: "#1e2a1e", color: "#86efac", border: "1px solid #2f4a2f" }}
                   >
-                    {approving ? "Approving…" : "Approve USDC"}
+                    {approving ? "Approving..." : isPoly && sigType === 3 ? "Refresh" : "Approve USDC"}
                   </button>
                 </div>
                 {approveMsg && <p className="text-[10px] text-gray-400">{approveMsg}</p>}
