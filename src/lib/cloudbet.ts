@@ -42,6 +42,29 @@ async function fetchCompetitionEvents(competition: string, marketKey: string): P
   }
 }
 
+// Enumerate a sport's competition keys (with events) whose key matches — for sports whose
+// competitions are per-tournament (WTA: tennis-wta-*).
+type CbCompetition = { key?: string; name?: string; eventCount?: number };
+async function fetchCompetitionKeys(sport: string, match: RegExp): Promise<string[]> {
+  const key = apiKey();
+  if (!key) return [];
+  try {
+    const r = await fetch(`${API}/sports/${sport}`, { cache: "no-store", headers: { "X-API-Key": key, Accept: "application/json" } });
+    if (!r.ok) return [];
+    const j = (await r.json()) as { categories?: { competitions?: CbCompetition[] }[] };
+    const out: string[] = [];
+    for (const cat of j.categories ?? []) {
+      for (const c of cat.competitions ?? []) {
+        if (c.key && (c.eventCount ?? 0) > 0 && match.test(c.key)) out.push(c.key);
+      }
+    }
+    return out;
+  } catch (e) {
+    console.error(`[cloudbet] /sports/${sport} fetch failed:`, e);
+    return [];
+  }
+}
+
 // First submarket carrying enabled selections; returns the enabled selection per outcome.
 function moneylineSelections(ev: CbEvent, marketKey: string): { home?: CbSelection; away?: CbSelection; draw?: CbSelection } {
   const subs = ev.markets?.[marketKey]?.submarkets;
@@ -68,7 +91,19 @@ const cents = (price?: number): number | null =>
 export async function fetchCloudbetMoneylineByGame(games: ArbGame[], cfg: CloudbetSportCfg): Promise<Map<string, VenueTwoWay>> {
   const out = new Map<string, VenueTwoWay>();
   if (!games.length) return out;
-  const events = await fetchCompetitionEvents(cfg.competition, cfg.moneyline);
+
+  // Resolve the competition key(s): a fixed one (MLS/UCL) or a live enumeration (WTA).
+  const competitions = cfg.competition
+    ? [cfg.competition]
+    : cfg.sport && cfg.competitionMatch
+      ? await fetchCompetitionKeys(cfg.sport, cfg.competitionMatch)
+      : [];
+  if (!competitions.length) return out;
+
+  const events: CbEvent[] = [];
+  for (const comp of competitions.slice(0, 24)) {
+    events.push(...(await fetchCompetitionEvents(comp, cfg.moneyline)));
+  }
   if (!events.length) return out;
 
   for (const game of games) {

@@ -22,9 +22,17 @@ export type ArbGame = {
   homeTeam: { name: string; shortName: string; abbreviation: string };
 };
 
-// Cloudbet feed identifiers for a sport: the competition key + the moneyline market key.
-// `threeWay` marks a 1X2 (home/draw/away) market so the reader emits the draw leg.
-export type CloudbetSportCfg = { competition: string; moneyline: string; threeWay?: boolean };
+// Cloudbet feed identifiers for a sport: the moneyline/1X2 market key, plus EITHER a fixed
+// competition key (MLS, UCL) OR a live enumeration (sport + key regex) for sports whose
+// competitions are per-tournament (WTA). `threeWay` marks a 1X2 (home/draw/away) market so
+// the reader emits the draw leg.
+export type CloudbetSportCfg = {
+  moneyline: string;
+  threeWay?: boolean;
+  competition?: string;
+  sport?: string; // e.g. "tennis" — enumerate /sports/{sport} competitions matching competitionMatch
+  competitionMatch?: RegExp;
+};
 
 export type SportConfig = {
   sport: Sport; // NormalizedMarket.sport
@@ -79,7 +87,7 @@ export const SPORTS: SportConfig[] = [
     markets: { moneyline: true },
     polyTag: "mls",
     sxDynamic: { sportId: 5, leagueMatch: /major league soccer/i, threeWay: true }, // SX league 1115
-    cloudbet: { competition: "soccer-usa-mls", moneyline: "soccer.match_odds", threeWay: true },
+    cloudbet: { competition: "soccer-usa-major-league-soccer", moneyline: "soccer.match_odds", threeWay: true },
   },
   {
     sport: "soccer",
@@ -88,7 +96,7 @@ export const SPORTS: SportConfig[] = [
     markets: { moneyline: true },
     polyTag: "champions-league",
     sxDynamic: { sportId: 5, leagueMatch: /champions league/i, threeWay: true }, // SX league 30
-    cloudbet: { competition: "soccer-international-uefa-champions-league", moneyline: "soccer.match_odds", threeWay: true },
+    cloudbet: { competition: "soccer-international-clubs-uefa-champions-league", moneyline: "soccer.match_odds", threeWay: true },
   },
   // ── Tennis (2-way moneyline) ─────────────────────────────────────────────────
   {
@@ -98,6 +106,7 @@ export const SPORTS: SportConfig[] = [
     markets: { moneyline: true },
     polyTag: "tennis",
     sxDynamic: { sportId: 6, leagueMatch: /wta/i }, // all active WTA tournament leagues (2-way)
-    cloudbet: { competition: "tennis-wta", moneyline: "tennis.moneyline" },
+    // Cloudbet WTA is per-tournament (tennis-wta-*); enumerate + read the 2-way winner.
+    cloudbet: { sport: "tennis", competitionMatch: /tennis-wta-/i, moneyline: "tennis.winner" },
   },
 ];
