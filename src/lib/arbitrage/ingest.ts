@@ -20,7 +20,7 @@ import { fetchPolymarketUsMLBMarkets, type PolymarketUsMarkets } from "@/lib/pol
 import { polymarketRegion } from "@/lib/polymarketRegion";
 import { fetchPredictFunMoneylineByGame } from "@/lib/predictFun";
 import { fetchCloudbetMoneylineByGame } from "@/lib/cloudbet";
-import { fetchSxBetMLBMarkets, type SxBetMarkets } from "@/lib/sxbet";
+import { fetchSxBetMLBMarkets, fetchSxBetMoneylineByGame, type SxBetMarkets } from "@/lib/sxbet";
 import type { NormalizedMarket, Outcome, Sport, VenueId } from "@/types/arbitrage";
 import { decimalOddsFromCents, impliedProbFromCents } from "./arbMath";
 import { saveMarkets, setRunning } from "./marketStore";
@@ -200,8 +200,10 @@ export async function ingestTotals(date: string): Promise<IngestResult> {
         }
       }
 
-      // SX.bet (MLB-shaped totals/ml/spread by league id) — MLB/WNBA only for now.
+      // SX.bet — MLB/WNBA use the fixed-league totals/ml/spread reader; soccer/tennis use
+      // the dynamic moneyline reader (enumerated leagues; soccer 1X2, tennis 2-way).
       const sx = cfg.sxLeagueId != null ? await fetchSxBetMLBMarkets(games, cfg.sxLeagueId).catch(() => EMPTY_SX) : EMPTY_SX;
+      const sxDynML = cfg.sxDynamic ? await fetchSxBetMoneylineByGame(games, cfg.sxDynamic).catch(emptyTwo) : emptyTwo();
       // predict.fun (MLB moneyline) + Cloudbet (moneyline; 2-way, or 3-way soccer 1X2).
       const pfML = cfg.predictfun ? await fetchPredictFunMoneylineByGame(games).catch(emptyTwo) : emptyTwo();
       const cbML = cfg.cloudbet ? await fetchCloudbetMoneylineByGame(games, cfg.cloudbet).catch(emptyTwo) : emptyTwo();
@@ -217,9 +219,10 @@ export async function ingestTotals(date: string): Promise<IngestResult> {
           ...normalizeVenueTwoWay("polymarket", game, pML.get(game.id), "moneyline", cfg.sport, cfg.league, now),
           ...normalizeVenueTwoWay("polymarket", game, pSp.get(game.id), "spread", cfg.sport, cfg.league, now),
         ];
+        const sxMoneyline = cfg.sxDynamic ? sxDynML.get(game.id) : sx.moneyline.get(game.id);
         const sRows = [
           ...normalizeVenueTotals("sxbet", game, sx.totals.get(game.id), cfg.sport, cfg.league, now),
-          ...normalizeVenueTwoWay("sxbet", game, sx.moneyline.get(game.id), "moneyline", cfg.sport, cfg.league, now),
+          ...normalizeVenueTwoWay("sxbet", game, sxMoneyline, "moneyline", cfg.sport, cfg.league, now),
           ...normalizeVenueTwoWay("sxbet", game, sx.spread.get(game.id), "spread", cfg.sport, cfg.league, now),
         ];
         // predict.fun + Cloudbet: moneyline only.

@@ -13,9 +13,11 @@ import type { VenueSpread, VenueTotalLine, VenueTwoWay } from "./kalshi";
 import type { ArbGame } from "./arbitrage/sports";
 
 const SX_API = "https://api.sx.bet";
-const TYPE_MONEYLINE = 226;
+const TYPE_MONEYLINE = 226; // baseball/basketball 2-way moneyline
 const TYPE_TOTAL = 28;
 const TYPE_SPREAD = 342;
+const TYPE_TEAM_YESNO = 1; // "X vs Not X" — soccer 1X2 is three of these (home / away / Tie)
+const TYPE_TWO_WAY = 52; // 2-way "team1 vs team2" (soccer draw-no-bet; used for tennis winner)
 const USDC_DECIMALS = 1e6; // SX.bet collateral is USDC (6 decimals)
 
 type SxMarket = {
@@ -71,9 +73,9 @@ function bestPrices(orders: SxOrder[] | undefined): BookPrices | null {
   };
 }
 
-async function fetchActiveMarkets(leagueId: number): Promise<SxMarket[]> {
+async function fetchActiveMarkets(leagueId: number, onlyMainLine = true): Promise<SxMarket[]> {
   try {
-    const res = await fetch(`${SX_API}/markets/active?leagueId=${leagueId}&onlyMainLine=true`, {
+    const res = await fetch(`${SX_API}/markets/active?leagueId=${leagueId}${onlyMainLine ? "&onlyMainLine=true" : ""}`, {
       cache: "no-store",
       headers: { Accept: "application/json" },
     });
@@ -82,6 +84,19 @@ async function fetchActiveMarkets(leagueId: number): Promise<SxMarket[]> {
     return (data?.data?.markets ?? []) as SxMarket[];
   } catch (e) {
     console.error("[sxbet] markets fetch failed:", e);
+    return [];
+  }
+}
+
+type SxLeague = { leagueId: number; label: string; sportId: number; active: boolean };
+
+async function fetchLeagues(): Promise<SxLeague[]> {
+  try {
+    const res = await fetch(`${SX_API}/leagues`, { cache: "no-store", headers: { Accept: "application/json" } });
+    if (!res.ok) return [];
+    return ((await res.json())?.data ?? []) as SxLeague[];
+  } catch (e) {
+    console.error("[sxbet] leagues fetch failed:", e);
     return [];
   }
 }
@@ -200,4 +215,80 @@ export async function fetchSxBetMLBMarkets(games: ArbGame[], leagueId: number = 
   }
 
   return result;
+}
+
+// SX.bet has NO native 3-selection market, so soccer 1X2 is three "type 1" (X vs Not X)
+// markets — backing outcome ONE of the home-team, away-team, and "Tie" markets yields the
+// home/away/draw prices (validated live: home+away+tie ≈ 102¢ overround). Tennis is a
+// plain 2-way winner (type 226/52). Leagues are enumerated live by sportId + label because
+// SX uses ephemeral per-tournament league ids (a new WTA league per event).
+export async function fetchSxBetMoneylineByGame(
+  games: ArbGame[],
+  opts: { sportId: number; leagueMatch: RegExp; threeWay?: boolean }
+): Promise<Map<string, VenueTwoWay>> {
+  const out = new Map<string, VenueTwoWay>();
+  if (!games.length) return out;
+
+  const leagues = await fetchLeagues();
+  const leagueIds = leagues
+    .filter((l) => l.active && l.sportId === opts.sportId && opts.leagueMatch.test(l.label))
+    .map((l) => l.leagueId);
+  if (!leagueIds.length) return out;
+
+  // Fetch across the matched leagues (cap to bound the request count).
+  const markets: SxMarket[] = [];
+  for (const id of leagueIds.slice(0, 16)) markets.push(...(await fetchActiveMarkets(id, false)));
+  if (!markets.length) return out;
+
+  const books = await fetchOrders([...new Set(markets.map((m) => m.marketHash))]);
+
+  for (const game of games) {
+    const gm = markets.filter((m) => marketMatchesGame(m, game));
+    if (!gm.length) continue;
+
+    if (opts.threeWay) {
+      // Three "type 1" markets for this game: outcomeOne = home team / away team / Tie.
+      const t1 = gm.filter((m) => m.type === TYPE_TEAM_YESNO && !/^not\b/i.test(m.outcomeOneName));
+      const homeMkt = t1.find((m) => teamHit(m.outcomeOneName, game.homeTeam));
+      const awayMkt = t1.find((m) => teamHit(m.outcomeOneName, game.awayTeam));
+      const tieMkt = t1.find((m) => /^(tie|draw)\b/i.test(m.outcomeOneName));
+      const hp = homeMkt && bestPrices(books.get(homeMkt.marketHash));
+      const ap = awayMkt && bestPrices(books.get(awayMkt.marketHash));
+      const tp = tieMkt && bestPrices(books.get(tieMkt.marketHash));
+      if (homeMkt && awayMkt && tieMkt && hp && ap && tp) {
+        out.set(game.id, {
+          // Back outcome ONE of each market = buy that result.
+          homeCents: hp.o1Cents,
+          awayCents: ap.o1Cents,
+          drawCents: tp.o1Cents,
+          homeLiquidityUsd: hp.o1LiqUsd,
+          awayLiquidityUsd: ap.o1LiqUsd,
+          drawLiquidityUsd: tp.o1LiqUsd,
+          marketId: homeMkt.marketHash,
+          homeTokenId: homeMkt.marketHash,
+          awayTokenId: awayMkt.marketHash,
+          drawTokenId: tieMkt.marketHash,
+        });
+      }
+      continue;
+    }
+
+    // Tennis: a plain 2-way winner market whose two outcomes are the two players.
+    const mw =
+      gm.find((m) => (m.type === TYPE_MONEYLINE || m.type === TYPE_TWO_WAY) && teamHit(m.teamOneName, game.awayTeam) && teamHit(m.teamTwoName, game.homeTeam)) ??
+      gm.find((m) => (m.type === TYPE_MONEYLINE || m.type === TYPE_TWO_WAY) && teamHit(m.teamOneName, game.homeTeam) && teamHit(m.teamTwoName, game.awayTeam));
+    if (!mw) continue;
+    const bp = bestPrices(books.get(mw.marketHash));
+    if (!bp) continue;
+    const oneIsAway = teamHit(mw.teamOneName, game.awayTeam);
+    out.set(game.id, {
+      awayCents: oneIsAway ? bp.o1Cents : bp.o2Cents,
+      homeCents: oneIsAway ? bp.o2Cents : bp.o1Cents,
+      awayLiquidityUsd: oneIsAway ? bp.o1LiqUsd : bp.o2LiqUsd,
+      homeLiquidityUsd: oneIsAway ? bp.o2LiqUsd : bp.o1LiqUsd,
+      marketId: mw.marketHash,
+      homeIsOutcomeOne: !oneIsAway,
+    });
+  }
+  return out;
 }

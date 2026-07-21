@@ -35,7 +35,10 @@ export type SportConfig = {
   // Per-venue league identifiers — omit a venue that doesn't carry the sport.
   kalshi?: { game: string; total: string; spread: string };
   polyTag?: string;
-  sxLeagueId?: number;
+  sxLeagueId?: number; // fixed SX league (MLB/WNBA totals+ml+spread)
+  // SX moneyline for sports whose leagues are ephemeral/per-tournament (soccer, tennis):
+  // enumerate active leagues live by sportId + label. threeWay = soccer 1X2.
+  sxDynamic?: { sportId: number; leagueMatch: RegExp; threeWay?: boolean };
   cloudbet?: CloudbetSportCfg;
   predictfun?: boolean; // predict.fun currently lists MLB moneyline only
   // Fixed run-line for the spread market (MLB = 1.5). Undefined = variable point spread.
@@ -75,6 +78,7 @@ export const SPORTS: SportConfig[] = [
     fetchGames: espnTeamGamesFetcher("soccer/usa.1"),
     markets: { moneyline: true },
     polyTag: "mls",
+    sxDynamic: { sportId: 5, leagueMatch: /major league soccer/i, threeWay: true }, // SX league 1115
     cloudbet: { competition: "soccer-usa-mls", moneyline: "soccer.match_odds", threeWay: true },
   },
   {
@@ -83,6 +87,7 @@ export const SPORTS: SportConfig[] = [
     fetchGames: espnTeamGamesFetcher("soccer/uefa.champions"),
     markets: { moneyline: true },
     polyTag: "champions-league",
+    sxDynamic: { sportId: 5, leagueMatch: /champions league/i, threeWay: true }, // SX league 30
     cloudbet: { competition: "soccer-international-uefa-champions-league", moneyline: "soccer.match_odds", threeWay: true },
   },
   // ── Tennis (2-way moneyline) ─────────────────────────────────────────────────
@@ -92,6 +97,7 @@ export const SPORTS: SportConfig[] = [
     fetchGames: espnTennisGamesFetcher("tennis/wta"),
     markets: { moneyline: true },
     polyTag: "tennis",
+    sxDynamic: { sportId: 6, leagueMatch: /wta/i }, // all active WTA tournament leagues (2-way)
     cloudbet: { competition: "tennis-wta", moneyline: "tennis.moneyline" },
   },
 ];
