@@ -79,6 +79,24 @@ export const DEFAULT_VENUES: Venue[] = [
     freshness: "unknown",
   },
   {
+    id: "cloudbet",
+    name: "Cloudbet",
+    abbr: "CB",
+    type: "sportsbook",
+    role: "sharp", // sharp crypto book — used as an executable venue, not just reference
+    currency: "USDT",
+    status: "credential_needed", // read + orders need CLOUDBET_API_KEY (JWT)
+    enabled: true,
+    viewOnly: false,
+    supportsCancel: false, // matched book bets can't be cancelled
+    supportsPartialFill: false, // stake is all-or-nothing
+    isIrreversible: true, // a placed bet is final (treat like a CLOB fill)
+    color: "#16a34a",
+    activeEdges: 0,
+    cachedTickers: 0,
+    freshness: "unknown",
+  },
+  {
     id: "sportmarket",
     name: "Sportmarket",
     abbr: "SM",

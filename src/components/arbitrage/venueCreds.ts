@@ -8,9 +8,12 @@ export const KALSHI_CREDS_KEY = "kalshi_api_creds";
 export const POLY_CREDS_KEY = "polymarket_creds";
 export const SX_CREDS_KEY = "sxbet_wallet_creds";
 export const PF_CREDS_KEY = "predictfun_creds";
+export const CB_CREDS_KEY = "cloudbet_creds";
 
 // predict.fun: x-api-key + wallet private key + (optional) ZeroDev smart-account address.
 export type PfCreds = { apiKey?: string; walletKey?: string; account?: string };
+// Cloudbet: X-API-Key (JWT) + optional settlement currency code (default USDT).
+export type CbCreds = { apiKey?: string; currency?: string };
 
 // Polymarket creds carry either region's shape:
 //   • intl: wallet private key (+ optional funder/sigType)
@@ -30,17 +33,19 @@ function read<T>(key: string): T | null {
 function keyForVenue(venueId: string): string {
   if (venueId === "polymarket") return POLY_CREDS_KEY;
   if (venueId === "predictfun") return PF_CREDS_KEY;
+  if (venueId === "cloudbet") return CB_CREDS_KEY;
   return SX_CREDS_KEY;
 }
 
-export function loadVenueCreds(venueId: string): PolyCreds | SxCreds | PfCreds | null {
+export function loadVenueCreds(venueId: string): PolyCreds | SxCreds | PfCreds | CbCreds | null {
   if (venueId === "polymarket") return read<PolyCreds>(POLY_CREDS_KEY);
   if (venueId === "predictfun") return read<PfCreds>(PF_CREDS_KEY);
+  if (venueId === "cloudbet") return read<CbCreds>(CB_CREDS_KEY);
   if (venueId === "sxbet") return read<SxCreds>(SX_CREDS_KEY);
   return null;
 }
 
-export function saveVenueCreds(venueId: string, creds: PolyCreds | SxCreds | PfCreds): void {
+export function saveVenueCreds(venueId: string, creds: PolyCreds | SxCreds | PfCreds | CbCreds): void {
   if (typeof window === "undefined") return;
   localStorage.setItem(keyForVenue(venueId), JSON.stringify(creds));
   emitCredsChanged();
@@ -67,6 +72,9 @@ export function hasVenueCreds(venueId: string): boolean {
   if (venueId === "predictfun") {
     const c = read<PfCreds>(PF_CREDS_KEY);
     return Boolean(c?.apiKey && c?.walletKey);
+  }
+  if (venueId === "cloudbet") {
+    return Boolean(read<CbCreds>(CB_CREDS_KEY)?.apiKey);
   }
   return Boolean(read<SxCreds>(SX_CREDS_KEY)?.key);
 }
@@ -100,6 +108,10 @@ export function onchainAuthHeaders(): Record<string, string> {
   if (pf?.apiKey) h["x-predictfun-api-key"] = pf.apiKey;
   if (pf?.walletKey) h["x-predictfun-wallet-key"] = btoa(pf.walletKey);
   if (pf?.account) h["x-predictfun-account"] = pf.account;
+  // Cloudbet: api key (plain JWT) + optional currency code. No wallet key to encode.
+  const cb = read<CbCreds>(CB_CREDS_KEY);
+  if (cb?.apiKey) h["x-cloudbet-api-key"] = cb.apiKey;
+  if (cb?.currency) h["x-cloudbet-currency"] = cb.currency;
   return h;
 }
 

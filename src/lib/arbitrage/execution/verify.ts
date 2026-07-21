@@ -10,13 +10,14 @@ import { BNB_CHAIN_ID, POLYGON_CHAIN_ID, SX_CHAIN_ID, polygonUsdcAddress } from 
 import type { OnchainCreds, PolymarketCreds, SxbetCreds } from "./onchainCreds";
 import { pmusBuyingPower, pmusCreds } from "./polymarketUsAuth";
 import { pfAccount, pfApiKey, pfUsdtBalance, pfWalletKey } from "./predictFunAdapter";
-import type { PredictFunCreds } from "./onchainCreds";
+import { cbApiKey, cbBalance, cbCurrency } from "./cloudbetAdapter";
+import type { CloudbetCreds, PredictFunCreds } from "./onchainCreds";
 import { polymarketBalanceAllowance } from "./polymarketAdapter";
 import { getSxMetadata } from "./sxMeta";
 import { deriveEoa, hasWalletKey, providerFor, usdcAllowance, usdcBalance, walletKey } from "./wallet";
 
 export type VenueVerification = {
-  venueId: "kalshi" | "polymarket" | "sxbet" | "predictfun";
+  venueId: "kalshi" | "polymarket" | "sxbet" | "predictfun" | "cloudbet";
   configured: boolean; // credential/key present server-side
   address: string | null; // EOA (wallet venues) — masked identity
   chainId: number | null;
@@ -166,6 +167,33 @@ export async function verifyPredictFun(creds?: PredictFunCreds): Promise<VenueVe
   }
 }
 
+// Cloudbet (crypto sportsbook): confirm the API key is present and read the settlement
+// currency's account balance. Balance-only — a bet has no on-chain allowance, and books
+// don't expose an order book. `address` carries the currency label (short strings pass the
+// status route's masker unchanged) so the UI can show what the balance is denominated in.
+export async function verifyCloudbet(creds?: CloudbetCreds): Promise<VenueVerification> {
+  const key = cbApiKey(creds);
+  const currency = cbCurrency(creds);
+  const base: VenueVerification = {
+    venueId: "cloudbet",
+    configured: Boolean(key),
+    address: currency,
+    chainId: null,
+    usdcBalance: null,
+    allowance: null,
+    spender: null,
+    status: "missing",
+  };
+  if (!key) return base;
+  try {
+    const bal = await cbBalance(key, currency);
+    if (bal == null) return { ...base, status: "error", message: `Cloudbet balance read failed (currency ${currency}?)` };
+    return { ...base, usdcBalance: bal, status: bal > 0 ? "verified" : "no_balance" };
+  } catch (e) {
+    return { ...base, status: "error", message: `Cloudbet balance read failed: ${String(e).slice(0, 120)}` };
+  }
+}
+
 export async function verifyAllVenues(
   creds?: { kalshiCreds?: KalshiCreds } & OnchainCreds
 ): Promise<VenueVerification[]> {
@@ -174,5 +202,6 @@ export async function verifyAllVenues(
     verifyPolymarket(creds?.polymarket),
     verifySx(creds?.sxbet),
     verifyPredictFun(creds?.predictfun),
+    verifyCloudbet(creds?.cloudbet),
   ]);
 }

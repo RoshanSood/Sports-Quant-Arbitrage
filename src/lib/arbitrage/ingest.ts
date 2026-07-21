@@ -19,6 +19,7 @@ import {
 import { fetchPolymarketUsMLBMarkets, type PolymarketUsMarkets } from "@/lib/polymarketUs";
 import { polymarketRegion } from "@/lib/polymarketRegion";
 import { fetchPredictFunMoneylineByGame } from "@/lib/predictFun";
+import { fetchCloudbetMoneylineByGame } from "@/lib/cloudbet";
 import { fetchSxBetMLBMarkets, type SxBetMarkets } from "@/lib/sxbet";
 import type { NormalizedMarket, Outcome, Sport, VenueId } from "@/types/arbitrage";
 import { decimalOddsFromCents, impliedProbFromCents } from "./arbMath";
@@ -41,6 +42,7 @@ function nativeSideFor(
   if (venueId === "kalshi") return ids.kalshiYesNo;
   if (venueId === "polymarket") return polymarketRegion() === "us" ? ids.kalshiYesNo : ids.polyTokenId;
   if (venueId === "predictfun") return ids.polyTokenId; // on-chain outcome token id
+  if (venueId === "cloudbet") return ids.polyTokenId; // Cloudbet market URL (marketKey/outcome)
   if (venueId === "sxbet") return ids.sxIsOne === undefined ? undefined : ids.sxIsOne ? "one" : "two";
   return undefined;
 }
@@ -151,7 +153,7 @@ export type IngestResult = {
 export async function ingestTotals(date: string): Promise<IngestResult> {
   const now = new Date().toISOString();
   const markets: NormalizedMarket[] = [];
-  const venueCounts: Record<VenueId, number> = { kalshi: 0, polymarket: 0, sxbet: 0, predictfun: 0 };
+  const venueCounts: Record<VenueId, number> = { kalshi: 0, polymarket: 0, sxbet: 0, predictfun: 0, cloudbet: 0 };
   let gameCount = 0;
 
   await Promise.all(
@@ -175,7 +177,7 @@ export async function ingestTotals(date: string): Promise<IngestResult> {
               fetchPolymarketSpreadByGame(games, cfg.polyTag).catch(() => new Map<string, VenueSpread>()),
             ]).then(([totals, moneyline, spread]) => ({ totals, moneyline, spread }));
 
-      const [kTot, kML, kSp, pm, sx, pfML] = await Promise.all([
+      const [kTot, kML, kSp, pm, sx, pfML, cbML] = await Promise.all([
         fetchKalshiTotalsByGame(games, cfg.kalshi.total).catch(() => new Map<string, VenueTotalLine[]>()),
         fetchKalshiMoneylineByGame(games, cfg.kalshi.game).catch(() => new Map<string, VenueTwoWay>()),
         fetchKalshiSpreadByGame(games, cfg.kalshi.spread, cfg.spreadFixedLine).catch(() => new Map<string, VenueSpread>()),
@@ -183,6 +185,8 @@ export async function ingestTotals(date: string): Promise<IngestResult> {
         fetchSxBetMLBMarkets(games, cfg.sxLeagueId).catch(() => EMPTY_SX),
         // predict.fun (BNB CLOB) — MLB moneyline only. MLB-only; other leagues return empty.
         fetchPredictFunMoneylineByGame(games).catch(() => new Map<string, VenueTwoWay>()),
+        // Cloudbet (crypto sportsbook) — MLB moneyline only; other leagues return empty.
+        fetchCloudbetMoneylineByGame(games).catch(() => new Map<string, VenueTwoWay>()),
       ]);
       const pTot = pm.totals, pML = pm.moneyline, pSp = pm.spread;
 
@@ -202,13 +206,15 @@ export async function ingestTotals(date: string): Promise<IngestResult> {
           ...normalizeVenueTwoWay("sxbet", game, sx.moneyline.get(game.id), "moneyline", cfg.sport, cfg.league, now),
           ...normalizeVenueTwoWay("sxbet", game, sx.spread.get(game.id), "spread", cfg.sport, cfg.league, now),
         ];
-        // predict.fun: moneyline only.
+        // predict.fun + Cloudbet: moneyline only.
         const pfRows = normalizeVenueTwoWay("predictfun", game, pfML.get(game.id), "moneyline", cfg.sport, cfg.league, now);
+        const cbRows = normalizeVenueTwoWay("cloudbet", game, cbML.get(game.id), "moneyline", cfg.sport, cfg.league, now);
         venueCounts.kalshi += kRows.length;
         venueCounts.polymarket += pRows.length;
         venueCounts.sxbet += sRows.length;
         venueCounts.predictfun += pfRows.length;
-        markets.push(...kRows, ...pRows, ...sRows, ...pfRows);
+        venueCounts.cloudbet += cbRows.length;
+        markets.push(...kRows, ...pRows, ...sRows, ...pfRows, ...cbRows);
       }
     })
   );
@@ -224,7 +230,7 @@ export async function runIngestion(date: string): Promise<void> {
     const r = await ingestTotals(date);
     console.log(
       `[arbitrage/ingest] ${date}: ${r.gameCount} games, ` +
-        `${r.venueCounts.kalshi} Kalshi + ${r.venueCounts.polymarket} Polymarket + ${r.venueCounts.sxbet} SX.bet + ${r.venueCounts.predictfun} predict.fun quotes`
+        `${r.venueCounts.kalshi} Kalshi + ${r.venueCounts.polymarket} Polymarket + ${r.venueCounts.sxbet} SX.bet + ${r.venueCounts.predictfun} predict.fun + ${r.venueCounts.cloudbet} Cloudbet quotes`
     );
   } catch (e) {
     console.error(`[arbitrage/ingest] ${date} failed:`, e);

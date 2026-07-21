@@ -11,7 +11,10 @@ export type PolymarketCreds = { key?: string; funder?: string; sigType?: number;
 export type SxbetCreds = { key: string };
 // predict.fun: x-api-key + wallet private key + optional ZeroDev smart-account address.
 export type PredictFunCreds = { apiKey?: string; walletKey?: string; account?: string };
-export type OnchainCreds = { polymarket?: PolymarketCreds; sxbet?: SxbetCreds; predictfun?: PredictFunCreds };
+// Cloudbet: X-API-Key (JWT) + optional settlement currency code (default USDT). Not an
+// on-chain wallet — it rides in the same per-request container for consistency.
+export type CloudbetCreds = { apiKey?: string; currency?: string };
+export type OnchainCreds = { polymarket?: PolymarketCreds; sxbet?: SxbetCreds; predictfun?: PredictFunCreds; cloudbet?: CloudbetCreds };
 
 function decodeKey(b64: string | null): string | undefined {
   if (!b64) return undefined;
@@ -54,6 +57,11 @@ export function extractOnchainCredsFromHeaders(headers: Headers): OnchainCreds {
   const pfWalletKey = decodeKey(headers.get("x-predictfun-wallet-key"));
   if (pfApiKey || pfWalletKey) {
     out.predictfun = { apiKey: pfApiKey || undefined, walletKey: pfWalletKey, account: headers.get("x-predictfun-account")?.trim() || undefined };
+  }
+  // Cloudbet: api key (plain JWT) + optional currency code.
+  const cbApiKey = headers.get("x-cloudbet-api-key")?.trim();
+  if (cbApiKey) {
+    out.cloudbet = { apiKey: cbApiKey, currency: headers.get("x-cloudbet-currency")?.trim() || undefined };
   }
   return out;
 }

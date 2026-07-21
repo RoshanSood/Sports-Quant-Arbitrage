@@ -11,6 +11,7 @@ import { KalshiExecutionAdapter } from "./kalshiAdapter";
 import type { OnchainCreds } from "./onchainCreds";
 import { PolymarketUsExecutionAdapter } from "./polymarketUsAdapter";
 import { PredictFunExecutionAdapter } from "./predictFunAdapter";
+import { CloudbetExecutionAdapter } from "./cloudbetAdapter";
 import { PolymarketExecutionAdapter, SxBetExecutionAdapter } from "./onchainAdapters";
 import type { ExecutionAdapter } from "./types";
 
@@ -28,6 +29,7 @@ export function liveAdapter(venueId: string, creds?: ExecCreds): ExecutionAdapte
   }
   if (v.includes("sx")) return new SxBetExecutionAdapter(creds?.sxbet);
   if (v.includes("predict")) return new PredictFunExecutionAdapter(creds?.predictfun);
+  if (v.includes("cloudbet")) return new CloudbetExecutionAdapter(creds?.cloudbet);
   return new DryRunAdapter(venueId); // unknown venue can never go live
 }
 
