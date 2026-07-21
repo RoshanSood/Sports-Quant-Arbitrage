@@ -15,6 +15,7 @@ import {
   fetchPolymarketMoneylineByGame,
   fetchPolymarketSpreadByGame,
   fetchPolymarketTotalsByGame,
+  fetchPolymarketWinnerByGame,
 } from "@/lib/polymarket";
 import { fetchPolymarketUsMLBMarkets, type PolymarketUsMarkets } from "@/lib/polymarketUs";
 import { polymarketRegion } from "@/lib/polymarketRegion";
@@ -192,10 +193,19 @@ export async function ingestTotals(date: string): Promise<IngestResult> {
           const pm = await fetchPolymarketUsMLBMarkets(games).catch(() => EMPTY_PM);
           pTot = pm.totals; pML = pm.moneyline; pSp = pm.spread;
         } else {
+          const tag = cfg.polyTag;
+          // Soccer/tennis on Polymarket are per-outcome Yes/No "winner" markets (1X2 for
+          // soccer), not a single 2-outcome moneyline — use the winner parser for those.
+          const winnerSport = cfg.sport === "soccer" || cfg.sport === "tennis";
           [pTot, pML, pSp] = await Promise.all([
-            cfg.markets.totals ? fetchPolymarketTotalsByGame(games, cfg.polyTag).catch(emptyTot) : Promise.resolve(emptyTot()),
-            cfg.markets.moneyline ? fetchPolymarketMoneylineByGame(games, cfg.polyTag).catch(emptyTwo) : Promise.resolve(emptyTwo()),
-            cfg.markets.spread ? fetchPolymarketSpreadByGame(games, cfg.polyTag).catch(emptySpr) : Promise.resolve(emptySpr()),
+            cfg.markets.totals ? fetchPolymarketTotalsByGame(games, tag).catch(emptyTot) : Promise.resolve(emptyTot()),
+            cfg.markets.moneyline
+              ? (winnerSport
+                  ? fetchPolymarketWinnerByGame(games, tag, cfg.sport === "soccer")
+                  : fetchPolymarketMoneylineByGame(games, tag)
+                ).catch(emptyTwo)
+              : Promise.resolve(emptyTwo()),
+            cfg.markets.spread ? fetchPolymarketSpreadByGame(games, tag).catch(emptySpr) : Promise.resolve(emptySpr()),
           ]);
         }
       }

@@ -530,6 +530,67 @@ export async function fetchPolymarketMoneylineByGame(
   return result;
 }
 
+// Polymarket soccer 1X2 / tennis winner. Polymarket's CLOB markets are binary, so a
+// soccer match is THREE Yes/No markets in one event ("Will {home} win", "…end in a draw",
+// "Will {away} win") and tennis is TWO ("Will {player} win"). Backing an outcome = buying
+// YES of its market, so the cost is that market's YES ask (bestAsk, which Gamma quotes for
+// the first outcome = "Yes"). `threeWay` adds the draw leg (dropped if the draw market is
+// missing). Validated live: MLS games priced ~100-102¢ across the three markets.
+export async function fetchPolymarketWinnerByGame(
+  games: ArbGame[],
+  tag: string,
+  threeWay = false
+): Promise<Map<string, VenueTwoWay>> {
+  const result = new Map<string, VenueTwoWay>();
+  if (!games.length) return result;
+  const events = await fetchMLBEvents(tag);
+
+  // YES ask for a binary market: prefer the live bestAsk, else the first outcome price.
+  const yesAsk = (m: PolymarketMarket): number | null => {
+    if (typeof m.bestAsk === "number" && m.bestAsk > 0 && m.bestAsk < 1) return m.bestAsk;
+    const { prices } = parseOutcomes(m);
+    const p = prices[0];
+    return p != null && p > 0 && p < 1 ? p : null;
+  };
+  const yesToken = (m: PolymarketMarket): string | undefined => parseOutcomes(m).tokenIds[0] ?? undefined;
+  const liqOf = (m: PolymarketMarket): number => (typeof m.liquidityNum === "number" ? m.liquidityNum : 0);
+  const namesTeam = (q: string, t: { name: string; shortName: string; abbreviation: string }) =>
+    teamMatchesTitle(t.name, t.shortName, t.abbreviation, q);
+
+  for (const game of games) {
+    const markets = events.filter((ev) => gameMatchesEvent(game, ev)).flatMap((ev) => ev.markets ?? []);
+    if (!markets.length) continue;
+
+    // The per-outcome "win" markets name exactly one team; the draw market says draw/tie.
+    const homeM = markets.find((m) => /\bwin\b/i.test(m.question) && namesTeam(m.question, game.homeTeam) && !namesTeam(m.question, game.awayTeam));
+    const awayM = markets.find((m) => /\bwin\b/i.test(m.question) && namesTeam(m.question, game.awayTeam) && !namesTeam(m.question, game.homeTeam));
+    if (!homeM || !awayM) continue;
+    const homeAsk = yesAsk(homeM);
+    const awayAsk = yesAsk(awayM);
+    if (homeAsk == null || awayAsk == null) continue;
+
+    let drawFields: Partial<VenueTwoWay> = {};
+    if (threeWay) {
+      const drawM = markets.find((m) => /\b(draw|tie)\b/i.test(m.question));
+      const drawAsk = drawM ? yesAsk(drawM) : null;
+      if (drawM == null || drawAsk == null) continue; // incomplete 1X2 → skip
+      drawFields = { drawCents: Math.round(drawAsk * 100), drawLiquidityUsd: liqOf(drawM), drawTokenId: yesToken(drawM) };
+    }
+
+    result.set(game.id, {
+      homeCents: Math.round(homeAsk * 100),
+      awayCents: Math.round(awayAsk * 100),
+      homeLiquidityUsd: liqOf(homeM),
+      awayLiquidityUsd: liqOf(awayM),
+      marketId: homeM.id,
+      homeTokenId: yesToken(homeM),
+      awayTokenId: yesToken(awayM),
+      ...drawFields,
+    });
+  }
+  return result;
+}
+
 // Polymarket MLB runline (spread). Question names one team with a sign, e.g.
 // "Spread: Toronto Blue Jays (-1.5)". Maps to home/away cover + signed home line.
 export async function fetchPolymarketSpreadByGame(
