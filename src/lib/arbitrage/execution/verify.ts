@@ -10,7 +10,7 @@ import { BNB_CHAIN_ID, POLYGON_CHAIN_ID, SX_CHAIN_ID, polygonUsdcAddress } from 
 import type { OnchainCreds, PolymarketCreds, SxbetCreds } from "./onchainCreds";
 import { pmusBuyingPower, pmusCreds } from "./polymarketUsAuth";
 import { pfAccount, pfApiKey, pfUsdtBalance, pfWalletKey } from "./predictFunAdapter";
-import { cbApiKey, cbBalance, cbCurrency } from "./cloudbetAdapter";
+import { cbApiKey, cbBalanceResult, cbCurrency } from "./cloudbetAdapter";
 import type { CloudbetCreds, PredictFunCreds } from "./onchainCreds";
 import { polymarketBalanceAllowance } from "./polymarketAdapter";
 import { getSxMetadata } from "./sxMeta";
@@ -185,13 +185,9 @@ export async function verifyCloudbet(creds?: CloudbetCreds): Promise<VenueVerifi
     status: "missing",
   };
   if (!key) return base;
-  try {
-    const bal = await cbBalance(key, currency);
-    if (bal == null) return { ...base, status: "error", message: `Cloudbet balance read failed (currency ${currency}?)` };
-    return { ...base, usdcBalance: bal, status: bal > 0 ? "verified" : "no_balance" };
-  } catch (e) {
-    return { ...base, status: "error", message: `Cloudbet balance read failed: ${String(e).slice(0, 120)}` };
-  }
+  const r = await cbBalanceResult(key, currency);
+  if (!r.ok) return { ...base, status: "error", message: `Cloudbet balance read failed: ${r.detail}` };
+  return { ...base, usdcBalance: r.amount, status: r.amount > 0 ? "verified" : "no_balance" };
 }
 
 export async function verifyAllVenues(

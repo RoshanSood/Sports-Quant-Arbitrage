@@ -23,23 +23,43 @@ export function cbApiKey(c?: CloudbetCreds): string | undefined {
   return c?.apiKey?.trim() || process.env.CLOUDBET_API_KEY?.trim() || undefined;
 }
 export function cbCurrency(c?: CloudbetCreds): string {
-  return c?.currency?.trim() || process.env.CLOUDBET_CURRENCY?.trim() || "USDT";
+  // Default to USDC (most Cloudbet crypto balances); override per-request or via
+  // CLOUDBET_CURRENCY for USDT/BTC/ETH/etc.
+  return c?.currency?.trim() || process.env.CLOUDBET_CURRENCY?.trim() || "USDC";
 }
 
-// Account balance for a settlement currency (units of that currency; USDT ≈ USD).
-export async function cbBalance(apiKey: string, currency: string): Promise<number | null> {
+// Account balance for a settlement currency (units of that currency; USDC/USDT ≈ USD).
+// Returns a discriminated result so callers can tell a rejected key from an unknown
+// currency instead of a bare null.
+export async function cbBalanceResult(
+  apiKey: string,
+  currency: string
+): Promise<{ ok: true; amount: number } | { ok: false; detail: string }> {
   try {
     const r = await fetch(`${API}/pub/v1/account/currencies/${encodeURIComponent(currency)}/balance`, {
       headers: { "X-API-Key": apiKey, Accept: "application/json" },
       cache: "no-store",
     });
-    if (!r.ok) return null;
-    const j = (await r.json()) as { amount?: string | number };
-    const n = Number(j.amount);
-    return Number.isFinite(n) ? n : null;
-  } catch {
-    return null;
+    const text = await r.text();
+    if (!r.ok) {
+      const hint =
+        r.status === 401 || r.status === 403
+          ? "API key rejected"
+          : r.status === 404
+            ? `currency ${currency} not held/recognized`
+            : `HTTP ${r.status}`;
+      return { ok: false, detail: `${hint}${text ? ` — ${text.slice(0, 80)}` : ""}` };
+    }
+    const n = Number((text ? JSON.parse(text) : {})?.amount);
+    return Number.isFinite(n) ? { ok: true, amount: n } : { ok: false, detail: "no amount in response" };
+  } catch (e) {
+    return { ok: false, detail: String(e).slice(0, 80) };
   }
+}
+
+export async function cbBalance(apiKey: string, currency: string): Promise<number | null> {
+  const r = await cbBalanceResult(apiKey, currency);
+  return r.ok ? r.amount : null;
 }
 
 type CbBetResponse = { status?: string; price?: string; stake?: string; returnAmount?: string; error?: string; referenceId?: string };

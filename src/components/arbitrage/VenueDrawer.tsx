@@ -461,7 +461,7 @@ function OnchainStatus({ venueId }: { venueId: string }) {
             <>
               Your <strong>API key</strong> (a long JWT) from the Cloudbet dashboard → My Account → API. It authorizes both
               odds reads and bet placement. Optionally set the <strong>settlement currency</strong> your balance is held in
-              (default <strong>USDT</strong>). Kept only in <strong>this browser</strong>, used transiently to sign requests,
+              (default <strong>USDC</strong>). Kept only in <strong>this browser</strong>, used transiently to sign requests,
               never stored on the server or shown again. Note: Cloudbet is a sportsbook — a placed bet is final and cannot
               be cancelled.
             </>
@@ -506,7 +506,7 @@ function OnchainStatus({ venueId }: { venueId: string }) {
             <label className="text-[10px] uppercase tracking-wide text-gray-500">API key (JWT)</label>
             <input type="password" value={f1} onChange={(e) => setF1(e.target.value)} placeholder="eyJ… (Cloudbet API key)" autoComplete="off" className="w-full rounded bg-[#0b0d11] border px-2 py-1 text-[11px] text-gray-200 font-mono" style={{ borderColor: "#2a2f3e" }} />
             <label className="text-[10px] uppercase tracking-wide text-gray-500">Settlement currency (optional)</label>
-            <input value={funder} onChange={(e) => setFunder(e.target.value)} placeholder="USDT (default)" autoComplete="off" className="w-full rounded bg-[#0b0d11] border px-2 py-1 text-[11px] text-gray-200 font-mono" style={{ borderColor: "#2a2f3e" }} />
+            <input value={funder} onChange={(e) => setFunder(e.target.value)} placeholder="USDC (default)" autoComplete="off" className="w-full rounded bg-[#0b0d11] border px-2 py-1 text-[11px] text-gray-200 font-mono" style={{ borderColor: "#2a2f3e" }} />
             <SaveRow onSave={saveKey} disabled={!f1.trim()} hasKey={hasKey} onCancel={() => setEditing(false)} />
           </div>
         ) : isPf ? (

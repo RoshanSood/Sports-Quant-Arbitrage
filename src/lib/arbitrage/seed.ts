@@ -84,7 +84,7 @@ export const DEFAULT_VENUES: Venue[] = [
     abbr: "CB",
     type: "sportsbook",
     role: "sharp", // sharp crypto book — used as an executable venue, not just reference
-    currency: "USDT",
+    currency: "USDC",
     status: "credential_needed", // read + orders need CLOUDBET_API_KEY (JWT)
     enabled: true,
     viewOnly: false,
