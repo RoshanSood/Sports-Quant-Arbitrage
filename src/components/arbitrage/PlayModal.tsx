@@ -9,6 +9,7 @@ type ExecResponse = {
   result?: string;
   reason?: string;
   mode?: "dry_run" | "live";
+  blocked?: boolean;
   blockers?: string[];
   error?: string;
 } | null;
@@ -37,14 +38,16 @@ export default function PlayModal({
         return;
       }
       // Live (or a paper failure): keep the modal open and show what actually happened —
-      // especially the gate blockers when a live request was downgraded to dry-run.
+      // especially the gate blockers when a live request was blocked (FAILED, not papered).
       setOutcome(res ?? { error: "no response" });
     } finally {
       setSubmitting(false);
     }
   }
 
-  const downgraded = mode === "live" && outcome != null && !outcome.error && outcome.mode !== "live";
+  // Any non-success result is a failure we surface loudly (a live request is never
+  // silently downgraded to paper). `blocked` = the live gate refused it.
+  const failed = outcome != null && (Boolean(outcome.error) || outcome.result === "halted" || outcome.result === "failed" || outcome.result === "naked");
 
   return (
     <div className="absolute inset-0 z-40 flex items-center justify-center p-4" onClick={onClose}>
@@ -104,9 +107,10 @@ export default function PlayModal({
               <div className="flex items-start gap-1.5 text-[10px] text-red-300">
                 <TriangleAlert className="w-3.5 h-3.5 mt-px shrink-0" />
                 <span>
-                  Real money. This still passes through the execution gate — it runs live only if the agent&apos;s
+                  Real money. This passes through the execution gate — it runs live only if the agent&apos;s
                   Live toggle is on, the kill switch is off, the stake is under the Risk cap, and each venue has
-                  credentials. Otherwise it safely downgrades to dry-run.
+                  credentials. If any check fails the trade is reported <strong>FAILED with the reason</strong> — it
+                  will <strong>not</strong> run as a paper trade.
                 </span>
               </div>
               <input
@@ -127,16 +131,18 @@ export default function PlayModal({
             >
               <div className="flex items-center justify-between">
                 <span className="text-gray-400">Result</span>
-                <span className="font-semibold" style={{ color: outcome.error ? "#f87171" : downgraded ? "#fbbf24" : "#4ade80" }}>
-                  {outcome.error ? "Error" : `${outcome.result ?? "?"} · ${outcome.mode ?? "?"}`}
+                <span className="font-semibold" style={{ color: failed ? "#f87171" : "#4ade80" }}>
+                  {outcome.error ? "FAILED" : failed ? `FAILED · ${outcome.result}` : `${outcome.result ?? "?"} · ${outcome.mode ?? "?"}`}
                 </span>
               </div>
-              {outcome.reason && <p className="text-gray-500">{outcome.reason}</p>}
+              {outcome.reason && <p className={failed ? "text-red-300" : "text-gray-500"}>{outcome.reason}</p>}
               {outcome.error && <p className="text-red-400">{outcome.error}</p>}
-              {downgraded && outcome.blockers?.length ? (
+              {failed && outcome.blockers?.length ? (
                 <div className="pt-1">
-                  <p className="text-[10px] text-amber-400">Downgraded to dry-run — blockers:</p>
-                  <ul className="list-disc list-inside text-[10px] text-gray-500">
+                  <p className="text-[10px] text-red-400">
+                    {outcome.blocked ? "Live execution blocked — reasons:" : "Reasons:"}
+                  </p>
+                  <ul className="list-disc list-inside text-[10px] text-gray-400">
                     {outcome.blockers.map((b, i) => <li key={i}>{b}</li>)}
                   </ul>
                 </div>

@@ -21,7 +21,7 @@ export async function runExecution(
   if (prep.kind === "halt") return { ...prep.outcome, mode: "dry_run", blockers: [] };
   const ctx = prep.ctx;
 
-  // ── Resolve effective mode through the hard gate ────────────────────────────
+  // ── Resolve the execution decision through the hard gate ────────────────────
   const gate = resolveExecutionMode({
     requestedMode,
     agentPaper: ctx.agent.paper,
@@ -32,6 +32,25 @@ export async function runExecution(
     maxLiveStakeUsd: ctx.risk.maxLiveStakeUsd,
     venuesSupportLive: venueSupportsLive(ctx.venues, creds),
   });
+
+  // A LIVE request that can't fire FAILS loudly with its reasons — it is NOT downgraded to
+  // a paper trade. (Paper trades only happen when the caller explicitly chose paper mode.)
+  if (gate.blocked) {
+    const reason = `Live execution blocked — ${gate.blockers.join("; ")}`;
+    await writeLog(
+      ctx.agent,
+      ctx.opportunityMatchup,
+      ctx.venues,
+      ctx.netAfter,
+      "halted",
+      "live_blocked",
+      reason,
+      { effectiveMode: "blocked", gateBlockers: gate.blockers, totalCost: ctx.totalStake, expectedProfit: ctx.expectedProfit },
+      date,
+      "live"
+    );
+    return { result: "halted", reasonCode: "live_blocked", reason, trade: null, mode: "live", blockers: gate.blockers };
+  }
   const mode = gate.mode;
 
   // ── Place ALL legs concurrently ─────────────────────────────────────────────

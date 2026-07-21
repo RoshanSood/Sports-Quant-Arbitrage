@@ -63,6 +63,7 @@ export type ReasonCode =
   | "venue_view_only"
   | "exposure_exceeded"
   | "final_refresh_failed"
+  | "live_blocked"
   | "naked_position";
 
 export type ArbResult = "executed" | "halted" | "failed" | "partial" | "naked";

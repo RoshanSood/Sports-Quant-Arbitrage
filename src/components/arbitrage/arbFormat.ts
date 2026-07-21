@@ -60,6 +60,7 @@ const REASON_LABELS: Record<ReasonCode, string> = {
   venue_view_only: "Venue view-only",
   exposure_exceeded: "Exposure cap",
   final_refresh_failed: "Final refresh failed",
+  live_blocked: "Live blocked",
   naked_position: "Naked position",
 };
 

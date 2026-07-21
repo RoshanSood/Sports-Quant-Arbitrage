@@ -28,12 +28,14 @@ import { allAuthHeaders } from "./venueCreds";
 
 export type PanelKey = "arbs" | "portfolio" | "risk" | "log" | "matchmap" | "analytics";
 
-// Server response from POST /api/arbitrage/trades. `mode` is the EFFECTIVE mode actually
-// run (dry_run unless every gate switch passed); `blockers` says why live was downgraded.
+// Server response from POST /api/arbitrage/trades. `mode` is the effective mode: "live" if
+// it fired live, "dry_run" if it was an explicit paper request. A blocked live request
+// (`blocked:true`) is reported FAILED with `blockers` — it is never downgraded to paper.
 export type ExecResponse = {
   result?: string;
   reason?: string;
   mode?: "dry_run" | "live";
+  blocked?: boolean;
   blockers?: string[];
   error?: string;
 } | null;
@@ -361,9 +363,9 @@ export default function ArbitrageClient() {
 
   // Auto-execute: when auto-trade is on and scanning is live, fire each qualifying
   // opportunity once (dedup via a fired-set). Mode is LIVE when the agent's Live toggle is
-  // on AND a session admin password is set — otherwise paper. Live still passes the server
-  // gate (agent.live, kill switch, stake cap, per-venue creds); a downgrade just logs
-  // blockers. Kill switch / Stop halts it.
+  // on AND a session admin password is set — otherwise paper. A live fire still passes the
+  // server gate (agent.live, kill switch, stake cap, per-venue creds); if it can't fire it
+  // is reported FAILED with the blocking reasons — never run as paper. Kill switch / Stop halts it.
   const autoFiredRef = useRef<Set<string>>(new Set());
   const autoLive = agent.autoTrade && agent.live && Boolean(livePassword);
   useEffect(() => {

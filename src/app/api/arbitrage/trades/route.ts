@@ -24,10 +24,11 @@ export async function GET(request: NextRequest) {
   }
 }
 
-// Execute an opportunity through the full pipeline. Paper requests run dry-run; a
-// "live" request additionally requires admin auth AND passes through the execution
-// gate (env flags, venue allowlist, stake cap, kill switch, adapter credentials) —
-// if any gate fails it silently falls back to dry-run and reports the blockers.
+// Execute an opportunity through the full pipeline. Paper requests run dry-run (simulated).
+// A "live" request requires admin auth AND passes through the execution gate (agent Live
+// toggle, kill switch, stake cap, adapter credentials) — if any switch fails the trade is
+// reported FAILED with the blocking reasons and NO order is placed. A live request is never
+// silently downgraded to a paper trade.
 export async function POST(request: NextRequest) {
   try {
     const body = (await request.json()) as { opportunityId?: string; date?: string; mode?: TradeMode; password?: string };
@@ -50,8 +51,11 @@ export async function POST(request: NextRequest) {
       reasonCode: outcome.reasonCode,
       reason: outcome.reason,
       trade: outcome.trade,
-      mode: outcome.mode, // effective mode actually used (dry_run unless the gate passed)
-      blockers: outcome.blockers, // why live was downgraded, if it was
+      mode: outcome.mode, // effective mode: "live" if it fired live, "dry_run" if paper
+      // A live request that couldn't fire: reasonCode "live_blocked" + the reasons here.
+      // No paper fallback — the trade FAILED.
+      blocked: outcome.reasonCode === "live_blocked",
+      blockers: outcome.blockers,
     });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });

@@ -9,8 +9,9 @@
 //   5. total stake ≤ the risk panel's max live stake        (Risk panel, UI-configured)
 //   6. the venue adapter reports supportsLive() (credentials/signer entered in the UI)
 //
-// If any switch is off, execution falls back to DRY-RUN (simulated) — never a real
-// order — and reports the blockers for transparency.
+// A LIVE request that fails any switch is BLOCKED (blocked:true) — the executor reports
+// FAILED with the reasons and places NO order. It does NOT silently fall back to paper.
+// Paper (dry-run/simulated) only happens when the caller explicitly requests paper mode.
 
 export type ExecMode = "dry_run" | "live";
 
@@ -30,19 +31,26 @@ export type GateInput = {
   venuesSupportLive: Record<string, boolean>;
 };
 
-export type GateDecision = { mode: ExecMode; blockers: string[] };
+// `blocked` = a LIVE request that can't fire. When true the executor FAILS the trade with
+// `blockers` and places nothing (no paper fallback). `mode` is the intent: "dry_run" for an
+// explicit paper request (always runs simulated), "live" for a live request (runs only when
+// blocked === false).
+export type GateDecision = { mode: ExecMode; blocked: boolean; blockers: string[] };
 
-// Resolve the EFFECTIVE execution mode. Returns "live" only when all switches pass;
-// otherwise "dry_run" with the list of blockers (for logging/UI transparency).
+// Resolve the execution decision.
+//   • Paper request (requestedMode !== "live") → simulate. Never blocked.
+//   • Live request → live ONLY when every switch passes; otherwise blocked (FAIL, no paper).
 export function resolveExecutionMode(g: GateInput): GateDecision {
+  // An explicit paper request always simulates — the live switches don't apply.
+  if (g.requestedMode !== "live") return { mode: "dry_run", blocked: false, blockers: [] };
+
   const blockers: string[] = [];
-  if (g.requestedMode !== "live") blockers.push("caller did not request live");
-  if (g.agentPaper) blockers.push("agent is in paper mode");
+  if (g.agentPaper) blockers.push("agent is in paper mode (turn on Live in agent settings)");
   if (!g.agentLive) blockers.push("agent live execution switch is off");
   if (g.killSwitch) blockers.push("risk kill switch is on");
   if (g.stakeUsd > g.maxLiveStakeUsd) blockers.push(`stake $${g.stakeUsd} exceeds live cap $${g.maxLiveStakeUsd}`);
   for (const v of g.venues) {
     if (!g.venuesSupportLive[v]) blockers.push(`venue ${v} has no live credentials/signer`);
   }
-  return { mode: blockers.length === 0 ? "live" : "dry_run", blockers };
+  return { mode: "live", blocked: blockers.length > 0, blockers };
 }

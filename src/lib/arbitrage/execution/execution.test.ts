@@ -19,22 +19,39 @@ describe("execution safety gate (UI-driven)", () => {
   it("goes live only when EVERY switch passes", () => {
     const d = resolveExecutionMode(base);
     expect(d.mode).toBe("live");
+    expect(d.blocked).toBe(false);
     expect(d.blockers).toEqual([]);
   });
 
-  it("stays dry_run if the caller only requested dry_run", () => {
-    expect(resolveExecutionMode({ ...base, requestedMode: "dry_run" }).mode).toBe("dry_run");
+  it("stays dry_run (never blocked) when the caller requested paper", () => {
+    const d = resolveExecutionMode({ ...base, requestedMode: "dry_run" });
+    expect(d.mode).toBe("dry_run");
+    expect(d.blocked).toBe(false);
   });
 
-  it("blocks live for paper agent, disabled live switch, or kill switch", () => {
-    expect(resolveExecutionMode({ ...base, agentPaper: true }).mode).toBe("dry_run");
-    expect(resolveExecutionMode({ ...base, agentLive: false }).mode).toBe("dry_run");
-    expect(resolveExecutionMode({ ...base, killSwitch: true }).mode).toBe("dry_run");
+  it("a paper request ignores the live switches — always simulates, never blocked", () => {
+    const d = resolveExecutionMode({
+      ...base,
+      requestedMode: "dry_run",
+      agentPaper: true,
+      agentLive: false,
+      killSwitch: true,
+      stakeUsd: 999,
+    });
+    expect(d.mode).toBe("dry_run");
+    expect(d.blocked).toBe(false);
+    expect(d.blockers).toEqual([]);
+  });
+
+  it("BLOCKS live (no paper fallback) for paper agent, disabled live switch, or kill switch", () => {
+    expect(resolveExecutionMode({ ...base, agentPaper: true }).blocked).toBe(true);
+    expect(resolveExecutionMode({ ...base, agentLive: false }).blocked).toBe(true);
+    expect(resolveExecutionMode({ ...base, killSwitch: true }).blocked).toBe(true);
   });
 
   it("blocks live when stake exceeds the risk-panel cap", () => {
     const d = resolveExecutionMode({ ...base, stakeUsd: 50, maxLiveStakeUsd: 5 });
-    expect(d.mode).toBe("dry_run");
+    expect(d.blocked).toBe(true);
     expect(d.blockers.some((b) => b.includes("exceeds live cap"))).toBe(true);
   });
 
@@ -44,13 +61,19 @@ describe("execution safety gate (UI-driven)", () => {
       venues: ["kalshi", "polymarket"],
       venuesSupportLive: { kalshi: true, polymarket: false },
     });
-    expect(d.mode).toBe("dry_run");
+    expect(d.blocked).toBe(true);
     expect(d.blockers.some((b) => b.includes("polymarket"))).toBe(true);
+  });
+
+  it("a blocked live request keeps mode 'live' (intent) — the executor FAILS it, not paper", () => {
+    const d = resolveExecutionMode({ ...base, killSwitch: true });
+    expect(d.mode).toBe("live");
+    expect(d.blocked).toBe(true);
   });
 
   it("reports ALL failing switches at once", () => {
     const d = resolveExecutionMode({ ...base, agentLive: false, killSwitch: true, stakeUsd: 999 });
-    expect(d.mode).toBe("dry_run");
+    expect(d.blocked).toBe(true);
     expect(d.blockers.length).toBeGreaterThanOrEqual(3);
   });
 });
