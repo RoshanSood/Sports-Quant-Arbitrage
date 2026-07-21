@@ -13,7 +13,9 @@ import type {
   MainLineWatch,
   MatchedEvent,
   MatchedLeg,
+  Outcome,
   ReasonCode,
+  VenueId,
 } from "@/types/arbitrage";
 import {
   decimalOddsFromCents,
@@ -81,22 +83,46 @@ function pickMainLines(matched: MatchedEvent[]): MatchedEvent[] {
   return main;
 }
 
-// Choose the cheapest cross-venue pairing of the two complementary outcomes
-// (over/under for totals, home/away for moneyline). Outcome-agnostic.
-function bestCrossVenuePair(legs: MatchedLeg[]): { a: MatchedLeg; b: MatchedLeg } | null {
-  const outcomes = [...new Set(legs.map((l) => l.outcome))];
-  if (outcomes.length !== 2) return null;
-  const sideA = legs.filter((l) => l.outcome === outcomes[0]);
-  const sideB = legs.filter((l) => l.outcome === outcomes[1]);
-  let best: { a: MatchedLeg; b: MatchedLeg; cost: number } | null = null;
-  for (const a of sideA) {
-    for (const b of sideB) {
-      if (a.venueId === b.venueId) continue; // no intra-venue self edge
-      const cost = a.priceCents + b.priceCents;
-      if (!best || cost < best.cost) best = { a, b, cost };
+// The full set of complementary outcomes a market must cover for a guaranteed arb.
+// Soccer moneyline is 3-way (1X2) — a home/away-only "arb" on a soccer match is NOT an
+// arb, because the draw would lose both legs. Everything else is 2-way.
+function requiredOutcomes(ev: MatchedEvent): Outcome[] {
+  if (ev.marketType === "total") return ["over", "under"];
+  if (ev.marketType === "spread") return ["home", "away"];
+  return ev.sport === "soccer" ? ["home", "draw", "away"] : ["home", "away"];
+}
+
+// Pick one leg per required outcome, each on a DISTINCT venue, minimizing total cost.
+// Distinct venues keep the per-venue stake plan unambiguous and enforce the cross-venue
+// rule (a 3-way arb therefore needs its 3 outcomes spread across 3 venues). Returns null
+// if any outcome is missing or no distinct-venue assignment exists.
+function bestCrossVenueSelection(legs: MatchedLeg[], outcomes: Outcome[]): MatchedLeg[] | null {
+  const byOutcome = outcomes.map((o) =>
+    legs.filter((l) => l.outcome === o).sort((a, b) => a.priceCents - b.priceCents)
+  );
+  if (byOutcome.some((g) => g.length === 0)) return null;
+
+  let bestLegs: MatchedLeg[] | null = null;
+  let bestCost = Infinity;
+  const used = new Set<VenueId>();
+  const pick = (i: number, acc: MatchedLeg[], cost: number) => {
+    if (cost >= bestCost) return; // prune: can't beat the incumbent
+    if (i === byOutcome.length) {
+      bestLegs = [...acc];
+      bestCost = cost;
+      return;
     }
-  }
-  return best ? { a: best.a, b: best.b } : null;
+    for (const leg of byOutcome[i]) {
+      if (used.has(leg.venueId)) continue; // one venue per leg
+      used.add(leg.venueId);
+      acc.push(leg);
+      pick(i + 1, acc, cost + leg.priceCents);
+      acc.pop();
+      used.delete(leg.venueId);
+    }
+  };
+  pick(0, [], 0);
+  return bestLegs;
 }
 
 function buildLeg(m: MatchedLeg, size: number): ArbLeg {
@@ -133,22 +159,23 @@ export function detectArbs(
 
   for (const ev of candidates) {
     const isTotal = ev.marketType === "total";
-    const pair = bestCrossVenuePair(ev.legs);
-    if (!pair) continue;
+    const required = requiredOutcomes(ev);
+    const selection = bestCrossVenueSelection(ev.legs, required);
+    if (!selection) continue;
 
     // Cross-venue divergence on the first outcome group (stale-quote signal).
-    const outcomes = [...new Set(ev.legs.map((l) => l.outcome))];
     const sideAByVenue = new Map<string, number>();
-    for (const l of ev.legs) if (l.outcome === outcomes[0]) sideAByVenue.set(l.venueId, l.priceCents);
+    for (const l of ev.legs) if (l.outcome === required[0]) sideAByVenue.set(l.venueId, l.priceCents);
     const sideAPrices = [...sideAByVenue.values()];
     const divergence = sideAPrices.length >= 2 ? Math.max(...sideAPrices) - Math.min(...sideAPrices) : 0;
-    const pairLiquidity = Math.min(pair.a.liquidityUsd, pair.b.liquidityUsd);
+    const pairLiquidity = Math.min(...selection.map((s) => s.liquidityUsd));
 
-    // Equal-profit sizing capped by agent max stake AND executable depth.
+    // Equal-profit sizing capped by agent max stake AND executable depth. Buys the same
+    // contract count on every outcome so the payout is identical whichever result hits.
     const effectiveMaxStake = Math.max(1, Math.min(agent.maxStake, pairLiquidity));
-    const provisional = [pair.a, pair.b].map((m) => buildLeg(m, 0));
+    const provisional = selection.map((m) => buildLeg(m, 0));
     const plan = equalProfitSizing(provisional, effectiveMaxStake);
-    const legs = [pair.a, pair.b].map((m) => {
+    const legs = selection.map((m) => {
       const dollars = plan.legSizes[m.venueId] ?? 0;
       const contracts = m.priceCents > 0 ? Math.round(dollars / (m.priceCents / 100)) : 0;
       return buildLeg(m, contracts);
@@ -156,7 +183,7 @@ export function detectArbs(
     const fees = computeFees(legs);
     legs.forEach((leg, i) => (leg.feeCents = fees[i].feeCents));
 
-    const totalCost = totalCostCents([pair.a.priceCents, pair.b.priceCents]);
+    const totalCost = totalCostCents(selection.map((s) => s.priceCents));
     const gross = grossEdge(totalCost);
     const feeFrac = feeFractionOfStake(fees, plan.legSizes);
     const net = round(gross - feeFrac - SLIPPAGE_RESERVE, 6);

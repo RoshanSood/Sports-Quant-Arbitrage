@@ -15,9 +15,10 @@ export type VenueStatus =
   | "credential_needed"
   | "disabled";
 
-export type Sport = "baseball" | "basketball" | "football" | "hockey" | "other";
+export type Sport = "baseball" | "basketball" | "football" | "hockey" | "soccer" | "tennis" | "other";
 export type MarketType = "moneyline" | "spread" | "total";
-export type Outcome = "yes" | "no" | "over" | "under" | "home" | "away";
+// "draw" is the third soccer (1X2) moneyline outcome; all other markets are 2-way.
+export type Outcome = "yes" | "no" | "over" | "under" | "home" | "away" | "draw";
 export type Currency = "USD" | "USDC" | "USDT";
 
 export type TradeMode = "paper" | "live";

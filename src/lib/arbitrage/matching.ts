@@ -88,10 +88,13 @@ function venuePairKey(venues: VenueId[]): string {
   return [...new Set(venues)].sort().join("+");
 }
 
-// Human-readable side label: "over 6.5" (totals), team name (moneyline),
-// "Cardinals +1.5" (spread — the team with its signed run-line).
+// Human-readable side label: "over 6.5" (totals), team name (moneyline; "Draw" for the
+// soccer 1X2 middle outcome), "Cardinals +1.5" (spread — the team with its signed run-line).
 function legLabel(m: NormalizedMarket): string {
-  if (m.marketType === "moneyline") return m.outcome === "home" ? m.teams[1] : m.teams[0];
+  if (m.marketType === "moneyline") {
+    if (m.outcome === "draw") return "Draw";
+    return m.outcome === "home" ? m.teams[1] : m.teams[0];
+  }
   if (m.marketType === "spread") {
     const team = m.outcome === "home" ? m.teams[1] : m.teams[0];
     const homeLine = m.line ?? 0;
