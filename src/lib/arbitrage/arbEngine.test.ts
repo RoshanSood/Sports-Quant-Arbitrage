@@ -143,13 +143,24 @@ describe("arbEngine — 3-way soccer (1X2)", () => {
     expect(opportunities).toHaveLength(0);
   });
 
-  it("requires the 3 outcomes on 3 DISTINCT venues", () => {
+  it("allows a 3-way arb across only TWO venues (home+draw on one book, away on another)", () => {
     const { opportunities } = detectML([
       ml("cloudbet", "home", 40),
-      ml("cloudbet", "draw", 27), // draw only on the same venue as home
+      ml("cloudbet", "draw", 27), // home+draw on the same book, away elsewhere → still an arb
       ml("sxbet", "away", 28),
     ]);
-    expect(opportunities).toHaveLength(0);
+    expect(opportunities).toHaveLength(1);
+    expect(opportunities[0].legs).toHaveLength(3);
+    expect(opportunities[0].totalCostCents).toBe(95);
+  });
+
+  it("rejects a single-venue soccer 'arb' (all three outcomes on one book)", () => {
+    const { opportunities } = detectML([
+      ml("cloudbet", "home", 40),
+      ml("cloudbet", "draw", 27),
+      ml("cloudbet", "away", 28),
+    ]);
+    expect(opportunities).toHaveLength(0); // needs ≥2 venues
   });
 });
 

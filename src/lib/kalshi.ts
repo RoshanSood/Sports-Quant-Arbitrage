@@ -414,6 +414,11 @@ export type VenueTwoWay = {
   awayTokenId?: string;
   // SX.bet: whether the HOME outcome is the market's outcome one.
   homeIsOutcomeOne?: boolean;
+  // Soccer 1X2 ONLY — the draw outcome. Absent for every 2-way market (a venue that
+  // sets these turns the moneyline into a 3-way market the arb engine treats as such).
+  drawCents?: number;
+  drawLiquidityUsd?: number;
+  drawTokenId?: string; // native side id for the draw (Cloudbet market URL / SX outcome id)
 };
 
 // Kalshi MLB moneyline per game (home/away buy costs at the ask). Reuses the same

@@ -94,7 +94,8 @@ export function equalProfitSizing(
   let totalStake = 0;
   for (const leg of legs) {
     const cost = round(targetPayout * centsToDollars(leg.priceCents), 2);
-    legSizes[leg.venueId] = cost;
+    // Accumulate so a venue carrying two legs (e.g. a 1X2 arb's home+draw) sums correctly.
+    legSizes[leg.venueId] = round((legSizes[leg.venueId] ?? 0) + cost, 2);
     totalStake += cost;
   }
   totalStake = round(totalStake, 2);

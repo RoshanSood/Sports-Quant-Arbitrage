@@ -106,12 +106,17 @@ function normalizeVenueTwoWay(
   const line = marketType === "spread" ? q.homeSignedLine ?? null : null;
   const lineKey = marketType === "spread" ? String(q.homeSignedLine ?? 0) : "0";
   const rows: NormalizedMarket[] = [];
-  for (const [outcome, priceCents, liqUsd, tokenId, sxIsOne] of [
-    ["home", q.homeCents, q.homeLiquidityUsd, q.homeTokenId, q.homeIsOutcomeOne] as const,
-    ["away", q.awayCents, q.awayLiquidityUsd, q.awayTokenId, q.homeIsOutcomeOne === undefined ? undefined : !q.homeIsOutcomeOne] as const,
-  ]) {
-    if (priceCents <= 0 || priceCents >= 100) continue;
-    const liquidityUsd = Number.isFinite(liqUsd) ? Math.round(liqUsd) : 0;
+  const sides: Array<readonly [Outcome, number | undefined, number | undefined, string | undefined, boolean | undefined]> = [
+    ["home", q.homeCents, q.homeLiquidityUsd, q.homeTokenId, q.homeIsOutcomeOne],
+    ["away", q.awayCents, q.awayLiquidityUsd, q.awayTokenId, q.homeIsOutcomeOne === undefined ? undefined : !q.homeIsOutcomeOne],
+  ];
+  // Soccer 1X2: a third leg when the venue supplied a draw price (moneyline only).
+  if (marketType === "moneyline" && typeof q.drawCents === "number") {
+    sides.push(["draw", q.drawCents, q.drawLiquidityUsd, q.drawTokenId, undefined]);
+  }
+  for (const [outcome, priceCents, liqUsd, tokenId, sxIsOne] of sides) {
+    if (priceCents == null || priceCents <= 0 || priceCents >= 100) continue;
+    const liquidityUsd = typeof liqUsd === "number" && Number.isFinite(liqUsd) ? Math.round(liqUsd) : 0;
     rows.push({
       venueId,
       marketId: `${venueId}:${game.id}:${marketType}:${lineKey}:${outcome}`,
@@ -165,30 +170,41 @@ export async function ingestTotals(date: string): Promise<IngestResult> {
       gameCount += games.length;
       if (!games.length) return;
 
-      // Polymarket source depends on region: US (regulated, one consolidated pass) vs
-      // international (self-custody CLOB, three fetches). Both normalize to {totals,
-      // moneyline, spread}.
-      const polyPromise: Promise<PolymarketUsMarkets> =
-        polymarketRegion() === "us"
-          ? fetchPolymarketUsMLBMarkets(games).catch(() => EMPTY_PM)
-          : Promise.all([
-              fetchPolymarketTotalsByGame(games, cfg.polyTag).catch(() => new Map<string, VenueTotalLine[]>()),
-              fetchPolymarketMoneylineByGame(games, cfg.polyTag).catch(() => new Map<string, VenueTwoWay>()),
-              fetchPolymarketSpreadByGame(games, cfg.polyTag).catch(() => new Map<string, VenueSpread>()),
-            ]).then(([totals, moneyline, spread]) => ({ totals, moneyline, spread }));
+      // Fetch each venue that CARRIES this sport (config-gated) and only the market types
+      // it declares — soccer/tennis are moneyline-only and skip Kalshi/predict.fun/SX.
+      const emptyTot = () => new Map<string, VenueTotalLine[]>();
+      const emptyTwo = () => new Map<string, VenueTwoWay>();
+      const emptySpr = () => new Map<string, VenueSpread>();
 
-      const [kTot, kML, kSp, pm, sx, pfML, cbML] = await Promise.all([
-        fetchKalshiTotalsByGame(games, cfg.kalshi.total).catch(() => new Map<string, VenueTotalLine[]>()),
-        fetchKalshiMoneylineByGame(games, cfg.kalshi.game).catch(() => new Map<string, VenueTwoWay>()),
-        fetchKalshiSpreadByGame(games, cfg.kalshi.spread, cfg.spreadFixedLine).catch(() => new Map<string, VenueSpread>()),
-        polyPromise,
-        fetchSxBetMLBMarkets(games, cfg.sxLeagueId).catch(() => EMPTY_SX),
-        // predict.fun (BNB CLOB) — MLB moneyline only. MLB-only; other leagues return empty.
-        fetchPredictFunMoneylineByGame(games).catch(() => new Map<string, VenueTwoWay>()),
-        // Cloudbet (crypto sportsbook) — MLB moneyline only; other leagues return empty.
-        fetchCloudbetMoneylineByGame(games).catch(() => new Map<string, VenueTwoWay>()),
-      ]);
-      const pTot = pm.totals, pML = pm.moneyline, pSp = pm.spread;
+      // Kalshi (US series) — sports with a Kalshi series only (MLB/WNBA).
+      const [kTot, kML, kSp] = cfg.kalshi
+        ? await Promise.all([
+            cfg.markets.totals ? fetchKalshiTotalsByGame(games, cfg.kalshi.total).catch(emptyTot) : Promise.resolve(emptyTot()),
+            cfg.markets.moneyline ? fetchKalshiMoneylineByGame(games, cfg.kalshi.game).catch(emptyTwo) : Promise.resolve(emptyTwo()),
+            cfg.markets.spread ? fetchKalshiSpreadByGame(games, cfg.kalshi.spread, cfg.spreadFixedLine).catch(emptySpr) : Promise.resolve(emptySpr()),
+          ])
+        : [emptyTot(), emptyTwo(), emptySpr()];
+
+      // Polymarket — US consolidated pass (MLB) or intl per-market by tag.
+      let pTot = emptyTot(), pML = emptyTwo(), pSp = emptySpr();
+      if (cfg.polyTag) {
+        if ((cfg.markets.totals || cfg.markets.spread) && polymarketRegion() === "us") {
+          const pm = await fetchPolymarketUsMLBMarkets(games).catch(() => EMPTY_PM);
+          pTot = pm.totals; pML = pm.moneyline; pSp = pm.spread;
+        } else {
+          [pTot, pML, pSp] = await Promise.all([
+            cfg.markets.totals ? fetchPolymarketTotalsByGame(games, cfg.polyTag).catch(emptyTot) : Promise.resolve(emptyTot()),
+            cfg.markets.moneyline ? fetchPolymarketMoneylineByGame(games, cfg.polyTag).catch(emptyTwo) : Promise.resolve(emptyTwo()),
+            cfg.markets.spread ? fetchPolymarketSpreadByGame(games, cfg.polyTag).catch(emptySpr) : Promise.resolve(emptySpr()),
+          ]);
+        }
+      }
+
+      // SX.bet (MLB-shaped totals/ml/spread by league id) — MLB/WNBA only for now.
+      const sx = cfg.sxLeagueId != null ? await fetchSxBetMLBMarkets(games, cfg.sxLeagueId).catch(() => EMPTY_SX) : EMPTY_SX;
+      // predict.fun (MLB moneyline) + Cloudbet (moneyline; 2-way, or 3-way soccer 1X2).
+      const pfML = cfg.predictfun ? await fetchPredictFunMoneylineByGame(games).catch(emptyTwo) : emptyTwo();
+      const cbML = cfg.cloudbet ? await fetchCloudbetMoneylineByGame(games, cfg.cloudbet).catch(emptyTwo) : emptyTwo();
 
       for (const game of games) {
         const kRows = [

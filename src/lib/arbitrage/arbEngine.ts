@@ -15,7 +15,6 @@ import type {
   MatchedLeg,
   Outcome,
   ReasonCode,
-  VenueId,
 } from "@/types/arbitrage";
 import {
   decimalOddsFromCents,
@@ -92,10 +91,11 @@ function requiredOutcomes(ev: MatchedEvent): Outcome[] {
   return ev.sport === "soccer" ? ["home", "draw", "away"] : ["home", "away"];
 }
 
-// Pick one leg per required outcome, each on a DISTINCT venue, minimizing total cost.
-// Distinct venues keep the per-venue stake plan unambiguous and enforce the cross-venue
-// rule (a 3-way arb therefore needs its 3 outcomes spread across 3 venues). Returns null
-// if any outcome is missing or no distinct-venue assignment exists.
+// Pick one leg per required outcome, minimizing total cost, subject to the arb spanning
+// at least TWO venues (never a single-venue "self edge"). Two legs MAY share a venue —
+// e.g. a soccer 1X2 arb buying home+draw on one book and away on another — which is what
+// makes 3-way arbs viable across only two venues. Returns null if any outcome is missing
+// or no ≥2-venue combination exists.
 function bestCrossVenueSelection(legs: MatchedLeg[], outcomes: Outcome[]): MatchedLeg[] | null {
   const byOutcome = outcomes.map((o) =>
     legs.filter((l) => l.outcome === o).sort((a, b) => a.priceCents - b.priceCents)
@@ -104,21 +104,19 @@ function bestCrossVenueSelection(legs: MatchedLeg[], outcomes: Outcome[]): Match
 
   let bestLegs: MatchedLeg[] | null = null;
   let bestCost = Infinity;
-  const used = new Set<VenueId>();
   const pick = (i: number, acc: MatchedLeg[], cost: number) => {
     if (cost >= bestCost) return; // prune: can't beat the incumbent
     if (i === byOutcome.length) {
-      bestLegs = [...acc];
-      bestCost = cost;
+      if (new Set(acc.map((l) => l.venueId)).size >= 2) {
+        bestLegs = [...acc];
+        bestCost = cost;
+      }
       return;
     }
     for (const leg of byOutcome[i]) {
-      if (used.has(leg.venueId)) continue; // one venue per leg
-      used.add(leg.venueId);
       acc.push(leg);
       pick(i + 1, acc, cost + leg.priceCents);
       acc.pop();
-      used.delete(leg.venueId);
     }
   };
   pick(0, [], 0);
@@ -175,11 +173,10 @@ export function detectArbs(
     const effectiveMaxStake = Math.max(1, Math.min(agent.maxStake, pairLiquidity));
     const provisional = selection.map((m) => buildLeg(m, 0));
     const plan = equalProfitSizing(provisional, effectiveMaxStake);
-    const legs = selection.map((m) => {
-      const dollars = plan.legSizes[m.venueId] ?? 0;
-      const contracts = m.priceCents > 0 ? Math.round(dollars / (m.priceCents / 100)) : 0;
-      return buildLeg(m, contracts);
-    });
+    // Equal-profit sizing buys the SAME contract count on every outcome, so payout is
+    // identical whichever result hits (works whether or not two legs share a venue).
+    const contractsPerLeg = Math.round(plan.guaranteedPayout);
+    const legs = selection.map((m) => buildLeg(m, contractsPerLeg));
     const fees = computeFees(legs);
     legs.forEach((leg, i) => (leg.feeCents = fees[i].feeCents));
 
