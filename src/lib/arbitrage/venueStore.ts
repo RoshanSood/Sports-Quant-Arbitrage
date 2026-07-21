@@ -7,13 +7,23 @@ const DATA_DIR = path.join(process.cwd(), "data", "arbitrage");
 const FILE = path.join(DATA_DIR, "venues.json");
 
 async function read(): Promise<Venue[]> {
+  let stored: Venue[];
   try {
-    return JSON.parse(await fs.readFile(FILE, "utf-8")) as Venue[];
+    stored = JSON.parse(await fs.readFile(FILE, "utf-8")) as Venue[];
   } catch {
     // Seed on first miss (write-through) so the file exists for subsequent updates.
     await write(DEFAULT_VENUES);
     return DEFAULT_VENUES;
   }
+  // Merge in any seed venues added since this file was written (e.g. a newly-added
+  // venue like predict.fun), keeping the user's stored edits to existing venues.
+  const have = new Set(stored.map((v) => v.id));
+  const missing = DEFAULT_VENUES.filter((v) => !have.has(v.id));
+  if (missing.length) {
+    stored = [...stored, ...missing];
+    await write(stored);
+  }
+  return stored;
 }
 
 async function write(venues: Venue[]): Promise<void> {

@@ -7,6 +7,10 @@
 export const KALSHI_CREDS_KEY = "kalshi_api_creds";
 export const POLY_CREDS_KEY = "polymarket_creds";
 export const SX_CREDS_KEY = "sxbet_wallet_creds";
+export const PF_CREDS_KEY = "predictfun_creds";
+
+// predict.fun: x-api-key + wallet private key + (optional) ZeroDev smart-account address.
+export type PfCreds = { apiKey?: string; walletKey?: string; account?: string };
 
 // Polymarket creds carry either region's shape:
 //   • intl: wallet private key (+ optional funder/sigType)
@@ -23,23 +27,28 @@ function read<T>(key: string): T | null {
   }
 }
 
-export function loadVenueCreds(venueId: string): PolyCreds | SxCreds | null {
+function keyForVenue(venueId: string): string {
+  if (venueId === "polymarket") return POLY_CREDS_KEY;
+  if (venueId === "predictfun") return PF_CREDS_KEY;
+  return SX_CREDS_KEY;
+}
+
+export function loadVenueCreds(venueId: string): PolyCreds | SxCreds | PfCreds | null {
   if (venueId === "polymarket") return read<PolyCreds>(POLY_CREDS_KEY);
+  if (venueId === "predictfun") return read<PfCreds>(PF_CREDS_KEY);
   if (venueId === "sxbet") return read<SxCreds>(SX_CREDS_KEY);
   return null;
 }
 
-export function saveVenueCreds(venueId: string, creds: PolyCreds | SxCreds): void {
+export function saveVenueCreds(venueId: string, creds: PolyCreds | SxCreds | PfCreds): void {
   if (typeof window === "undefined") return;
-  const key = venueId === "polymarket" ? POLY_CREDS_KEY : SX_CREDS_KEY;
-  localStorage.setItem(key, JSON.stringify(creds));
+  localStorage.setItem(keyForVenue(venueId), JSON.stringify(creds));
   emitCredsChanged();
 }
 
 export function clearVenueCreds(venueId: string): void {
   if (typeof window === "undefined") return;
-  const key = venueId === "polymarket" ? POLY_CREDS_KEY : SX_CREDS_KEY;
-  localStorage.removeItem(key);
+  localStorage.removeItem(keyForVenue(venueId));
   emitCredsChanged();
 }
 
@@ -54,6 +63,10 @@ export function hasVenueCreds(venueId: string): boolean {
   if (venueId === "polymarket") {
     const c = read<PolyCreds>(POLY_CREDS_KEY);
     return Boolean(c?.key || (c?.keyId && c?.secret)); // intl wallet key OR us keyId+secret
+  }
+  if (venueId === "predictfun") {
+    const c = read<PfCreds>(PF_CREDS_KEY);
+    return Boolean(c?.apiKey && c?.walletKey);
   }
   return Boolean(read<SxCreds>(SX_CREDS_KEY)?.key);
 }
@@ -82,6 +95,11 @@ export function onchainAuthHeaders(): Record<string, string> {
   }
   const s = read<SxCreds>(SX_CREDS_KEY);
   if (s?.key) h["x-sxbet-key"] = btoa(s.key);
+  // predict.fun: api key (plain) + base64 wallet key + optional smart-account address.
+  const pf = read<PfCreds>(PF_CREDS_KEY);
+  if (pf?.apiKey) h["x-predictfun-api-key"] = pf.apiKey;
+  if (pf?.walletKey) h["x-predictfun-wallet-key"] = btoa(pf.walletKey);
+  if (pf?.account) h["x-predictfun-account"] = pf.account;
   return h;
 }
 

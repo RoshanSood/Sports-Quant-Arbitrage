@@ -27,7 +27,7 @@ export function liveAdapter(venueId: string, creds?: ExecCreds): ExecutionAdapte
       : new PolymarketExecutionAdapter(creds?.polymarket);
   }
   if (v.includes("sx")) return new SxBetExecutionAdapter(creds?.sxbet);
-  if (v.includes("predict")) return new PredictFunExecutionAdapter();
+  if (v.includes("predict")) return new PredictFunExecutionAdapter(creds?.predictfun);
   return new DryRunAdapter(venueId); // unknown venue can never go live
 }
 

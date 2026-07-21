@@ -9,7 +9,9 @@
 //   • us   (regulated):         Ed25519 Key ID + secret
 export type PolymarketCreds = { key?: string; funder?: string; sigType?: number; keyId?: string; secret?: string };
 export type SxbetCreds = { key: string };
-export type OnchainCreds = { polymarket?: PolymarketCreds; sxbet?: SxbetCreds };
+// predict.fun: x-api-key + wallet private key + optional ZeroDev smart-account address.
+export type PredictFunCreds = { apiKey?: string; walletKey?: string; account?: string };
+export type OnchainCreds = { polymarket?: PolymarketCreds; sxbet?: SxbetCreds; predictfun?: PredictFunCreds };
 
 function decodeKey(b64: string | null): string | undefined {
   if (!b64) return undefined;
@@ -47,5 +49,11 @@ export function extractOnchainCredsFromHeaders(headers: Headers): OnchainCreds {
   if (poly.key || poly.keyId) out.polymarket = poly;
   const sxKey = decodeKey(headers.get("x-sxbet-key"));
   if (sxKey) out.sxbet = { key: sxKey };
+  // predict.fun: api key (plain) + base64 wallet key + optional smart-account address.
+  const pfApiKey = headers.get("x-predictfun-api-key")?.trim();
+  const pfWalletKey = decodeKey(headers.get("x-predictfun-wallet-key"));
+  if (pfApiKey || pfWalletKey) {
+    out.predictfun = { apiKey: pfApiKey || undefined, walletKey: pfWalletKey, account: headers.get("x-predictfun-account")?.trim() || undefined };
+  }
   return out;
 }

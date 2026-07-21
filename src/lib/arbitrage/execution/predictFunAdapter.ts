@@ -12,15 +12,23 @@
 import { AddressesByChainId, ChainId, OrderBuilder, Side } from "@predictdotfun/sdk";
 import { Contract, JsonRpcProvider, Wallet, formatUnits, parseUnits } from "ethers";
 import { BNB_CHAIN_ID, BNB_USDT_DECIMALS, ERC20_ABI, bnbRpcUrl } from "./chains";
+import type { PredictFunCreds } from "./onchainCreds";
 import type { ExecutionAdapter, OrderRequest, OrderResult } from "./types";
 
 const API = "https://api.predict.fun";
 
-export function pfApiKey(): string | undefined {
-  return process.env.PREDICTFUN_API_KEY?.trim() || undefined;
+// Creds come from the browser (per-request) or server env. The wallet key is used only
+// to sign, never persisted/logged.
+export function pfApiKey(c?: PredictFunCreds): string | undefined {
+  return c?.apiKey?.trim() || process.env.PREDICTFUN_API_KEY?.trim() || undefined;
 }
-export function pfWalletKey(): string | undefined {
-  return process.env.PREDICTFUN_WALLET_KEY?.trim() || undefined;
+export function pfWalletKey(c?: PredictFunCreds): string | undefined {
+  return c?.walletKey?.trim() || process.env.PREDICTFUN_WALLET_KEY?.trim() || undefined;
+}
+// The ZeroDev smart account (deposit address) that actually holds the USDT + trades.
+// Falls back to the signer's own address when not provided.
+export function pfAccount(c?: PredictFunCreds): string | undefined {
+  return c?.account?.trim() || process.env.PREDICTFUN_ACCOUNT?.trim() || undefined;
 }
 
 type PfMarketFlags = { feeRateBps: number; isNegRisk: boolean; isYieldBearing: boolean };
@@ -53,24 +61,27 @@ export async function pfUsdtBalance(address: string): Promise<number | null> {
 
 export class PredictFunExecutionAdapter implements ExecutionAdapter {
   id = "predictfun";
+  constructor(private creds?: PredictFunCreds) {}
 
   supportsLive(): boolean {
-    return Boolean(pfApiKey() && pfWalletKey());
+    return Boolean(pfApiKey(this.creds) && pfWalletKey(this.creds));
   }
 
   async getBalanceUsd(): Promise<number | null> {
-    const key = pfWalletKey();
+    const key = pfWalletKey(this.creds);
     if (!key) return null;
     try {
-      return await pfUsdtBalance(new Wallet(key).address);
+      // Prefer the ZeroDev smart account (where the USDT lives); fall back to the signer.
+      const owner = pfAccount(this.creds) ?? new Wallet(key).address;
+      return await pfUsdtBalance(owner);
     } catch {
       return null;
     }
   }
 
   async placeOrder(req: OrderRequest): Promise<OrderResult> {
-    const apiKey = pfApiKey();
-    const walletKey = pfWalletKey();
+    const apiKey = pfApiKey(this.creds);
+    const walletKey = pfWalletKey(this.creds);
     if (!apiKey || !walletKey) return reject(req, "predict.fun API key / wallet key not configured");
 
     const marketId = req.nativeMarketId;
@@ -81,7 +92,9 @@ export class PredictFunExecutionAdapter implements ExecutionAdapter {
     try {
       const flags = await marketFlags(marketId, apiKey);
       const signer = new Wallet(walletKey, new JsonRpcProvider(bnbRpcUrl()));
-      const builder = await OrderBuilder.make(ChainId.BnbMainnet, signer);
+      const account = pfAccount(this.creds);
+      // Pass the smart account as the order maker when trading a ZeroDev/proxy account.
+      const builder = await OrderBuilder.make(ChainId.BnbMainnet, signer, account ? { predictAccount: account } : undefined);
 
       // Marketable LIMIT BUY at our max price.
       const amounts = builder.getLimitOrderAmounts({

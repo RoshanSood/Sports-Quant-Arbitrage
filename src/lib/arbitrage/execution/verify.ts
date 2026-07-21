@@ -9,7 +9,8 @@ import { polymarketRegion } from "@/lib/polymarketRegion";
 import { BNB_CHAIN_ID, POLYGON_CHAIN_ID, SX_CHAIN_ID, polygonUsdcAddress } from "./chains";
 import type { OnchainCreds, PolymarketCreds, SxbetCreds } from "./onchainCreds";
 import { pmusBuyingPower, pmusCreds } from "./polymarketUsAuth";
-import { pfApiKey, pfUsdtBalance, pfWalletKey } from "./predictFunAdapter";
+import { pfAccount, pfApiKey, pfUsdtBalance, pfWalletKey } from "./predictFunAdapter";
+import type { PredictFunCreds } from "./onchainCreds";
 import { polymarketBalanceAllowance } from "./polymarketAdapter";
 import { getSxMetadata } from "./sxMeta";
 import { deriveEoa, hasWalletKey, providerFor, usdcAllowance, usdcBalance, walletKey } from "./wallet";
@@ -142,10 +143,10 @@ export async function verifySx(creds?: SxbetCreds): Promise<VenueVerification> {
 // predict.fun (BNB CLOB): confirm the API key + wallet key are present and read USDT
 // buying power on BNB. Balance-only (no on-chain allowance shown — the SDK's setApprovals
 // handles the ERC-1155/ERC-20 approvals separately).
-export async function verifyPredictFun(): Promise<VenueVerification> {
+export async function verifyPredictFun(creds?: PredictFunCreds): Promise<VenueVerification> {
   const base: VenueVerification = {
     venueId: "predictfun",
-    configured: Boolean(pfApiKey() && pfWalletKey()),
+    configured: Boolean(pfApiKey(creds) && pfWalletKey(creds)),
     address: null,
     chainId: BNB_CHAIN_ID,
     usdcBalance: null,
@@ -153,12 +154,13 @@ export async function verifyPredictFun(): Promise<VenueVerification> {
     spender: null,
     status: "missing",
   };
-  const key = pfWalletKey();
+  const key = pfWalletKey(creds);
   if (!base.configured || !key) return base;
   try {
-    const addr = new Wallet(key).address;
-    const bal = await pfUsdtBalance(addr);
-    return { ...base, address: addr, usdcBalance: bal, status: (bal ?? 0) > 0 ? "verified" : "no_balance" };
+    // Show the account that holds funds (smart account if set, else the signer).
+    const owner = pfAccount(creds) ?? new Wallet(key).address;
+    const bal = await pfUsdtBalance(owner);
+    return { ...base, address: owner, usdcBalance: bal, status: (bal ?? 0) > 0 ? "verified" : "no_balance" };
   } catch (e) {
     return { ...base, status: "error", message: `predict.fun balance read failed: ${String(e).slice(0, 120)}` };
   }
@@ -171,6 +173,6 @@ export async function verifyAllVenues(
     verifyKalshi(creds?.kalshiCreds),
     verifyPolymarket(creds?.polymarket),
     verifySx(creds?.sxbet),
-    verifyPredictFun(),
+    verifyPredictFun(creds?.predictfun),
   ]);
 }

@@ -5,7 +5,7 @@ import { KeyRound, ShieldCheck } from "lucide-react";
 import type { ArbOpportunity, NormalizedMarket, Venue } from "@/types/arbitrage";
 import { Drawer, Toggle, Pill } from "./ui";
 import { formatCents, formatEdgePct, formatOdds, venueStatusColor, venueStatusLabel } from "./arbFormat";
-import { allAuthHeaders, clearVenueCreds, CREDS_CHANGED_EVENT, emitCredsChanged, loadVenueCreds, onchainAuthHeaders, saveVenueCreds, type PolyCreds } from "./venueCreds";
+import { allAuthHeaders, clearVenueCreds, CREDS_CHANGED_EVENT, emitCredsChanged, loadVenueCreds, onchainAuthHeaders, saveVenueCreds, type PfCreds, type PolyCreds } from "./venueCreds";
 
 type Tab = "status" | "live" | "edges" | "settings" | "credentials";
 
@@ -319,8 +319,9 @@ function SaveRow({ onSave, disabled, hasKey, onCancel }: { onSave: () => void; d
 }
 
 function OnchainStatus({ venueId }: { venueId: string }) {
-  const name = venueId === "polymarket" ? "Polymarket" : venueId === "sxbet" ? "SX.bet" : venueId;
-  const chainName = venueId === "polymarket" ? "Polygon" : "SX Network";
+  const isPf = venueId === "predictfun";
+  const name = venueId === "polymarket" ? "Polymarket" : venueId === "sxbet" ? "SX.bet" : isPf ? "predict.fun" : venueId;
+  const chainName = venueId === "polymarket" ? "Polygon" : isPf ? "BNB Chain" : "SX Network";
   const [status, setStatus] = useState<ExecStatus | null>(null);
   const [gate, setGate] = useState<ExecGate | null>(null);
   const [loading, setLoading] = useState(true);
@@ -335,13 +336,17 @@ function OnchainStatus({ venueId }: { venueId: string }) {
   const polyUs = isPoly && gate?.polymarketRegion === "us"; // defaults to intl until gate loads
   const storedHas = () => {
     if (typeof window === "undefined") return false;
+    if (isPf) {
+      const c = loadVenueCreds(venueId) as PfCreds | null;
+      return Boolean(c?.apiKey && c?.walletKey);
+    }
     const c = loadVenueCreds(venueId) as PolyCreds | null;
     return isPoly ? Boolean(c?.key || (c?.keyId && c?.secret)) : Boolean((c as { key?: string } | null)?.key);
   };
   const [hasKey, setHasKey] = useState(storedHas);
-  const [f1, setF1] = useState(""); // wallet key (intl poly / sx) | Key ID (us poly)
-  const [f2, setF2] = useState(""); // Ed25519 secret (us poly only)
-  const [funder, setFunder] = useState("");
+  const [f1, setF1] = useState(""); // wallet key (intl poly / sx) | Key ID (us poly) | API key (pf)
+  const [f2, setF2] = useState(""); // Ed25519 secret (us poly) | wallet key (pf)
+  const [funder, setFunder] = useState(""); // poly funder | pf smart-account address
   const [sigType, setSigType] = useState(() => {
     if (!isPoly) return 0;
     const c = loadVenueCreds(venueId) as PolyCreds | null;
@@ -371,7 +376,10 @@ function OnchainStatus({ venueId }: { venueId: string }) {
   useEffect(() => load(), [load]);
 
   function saveKey() {
-    if (polyUs) {
+    if (isPf) {
+      if (!f1.trim() || !f2.trim()) return;
+      saveVenueCreds(venueId, { apiKey: f1.trim(), walletKey: f2.trim(), account: funder.trim() || undefined });
+    } else if (polyUs) {
       if (!f1.trim() || !f2.trim()) return;
       saveVenueCreds(venueId, { keyId: f1.trim(), secret: f2.trim() });
     } else if (isPoly) {
@@ -439,10 +447,17 @@ function OnchainStatus({ venueId }: { venueId: string }) {
     <div className="space-y-3">
       <div className="rounded-lg border px-3 py-2 text-[11px]" style={{ borderColor: "#3f2d10", background: "#1a160e", color: "#fbbf24" }}>
         <div className="font-semibold">
-          {polyUs ? "Polymarket US API credentials" : isPoly ? "Polymarket wallet key" : "SX.bet wallet key"}
+          {isPf ? "predict.fun API key + wallet key" : polyUs ? "Polymarket US API credentials" : isPoly ? "Polymarket wallet key" : "SX.bet wallet key"}
         </div>
         <p className="text-gray-400 mt-0.5">
-          {polyUs ? (
+          {isPf ? (
+            <>
+              Your <strong>API key</strong> (predict.fun developer portal) authorizes order posting; your{" "}
+              <strong>wallet private key</strong> signs each order. The optional <strong>smart-account address</strong> is
+              your ZeroDev deposit wallet that holds the USDT (leave blank to use the signer address). Kept only in{" "}
+              <strong>this browser</strong>, used transiently to sign, never stored on the server or shown again.
+            </>
+          ) : polyUs ? (
             <>
               Your <strong>Key ID</strong> + <strong>Ed25519 secret</strong> from the Polymarket US developer portal.
               Kept only in <strong>this browser</strong>, sent to sign requests, never stored on the server or shown again.
@@ -470,6 +485,16 @@ function OnchainStatus({ venueId }: { venueId: string }) {
               <button onClick={() => setEditing(true)} className="text-gray-400 hover:text-white">Replace</button>
               <button onClick={clearKey} className="text-red-400 hover:text-red-300">Clear</button>
             </div>
+          </div>
+        ) : isPf ? (
+          <div className="space-y-1.5">
+            <label className="text-[10px] uppercase tracking-wide text-gray-500">API key</label>
+            <input value={f1} onChange={(e) => setF1(e.target.value)} placeholder="predict.fun API key" autoComplete="off" className="w-full rounded bg-[#0b0d11] border px-2 py-1 text-[11px] text-gray-200 font-mono" style={{ borderColor: "#2a2f3e" }} />
+            <label className="text-[10px] uppercase tracking-wide text-gray-500">Wallet private key ({chainName})</label>
+            <input type="password" value={f2} onChange={(e) => setF2(e.target.value)} placeholder="0x… (64-hex private key)" autoComplete="off" className="w-full rounded bg-[#0b0d11] border px-2 py-1 text-[11px] text-gray-200 font-mono" style={{ borderColor: "#2a2f3e" }} />
+            <label className="text-[10px] uppercase tracking-wide text-gray-500">Smart-account address (optional)</label>
+            <input value={funder} onChange={(e) => setFunder(e.target.value)} placeholder="0x… ZeroDev deposit wallet (blank = signer)" className="w-full rounded bg-[#0b0d11] border px-2 py-1 text-[11px] text-gray-200 font-mono" style={{ borderColor: "#2a2f3e" }} />
+            <SaveRow onSave={saveKey} disabled={!f1.trim() || !f2.trim()} hasKey={hasKey} onCancel={() => setEditing(false)} />
           </div>
         ) : polyUs ? (
           <div className="space-y-1.5">
@@ -519,7 +544,7 @@ function OnchainStatus({ venueId }: { venueId: string }) {
             <span className="inline-flex items-center gap-1.5">
               <span className="w-2 h-2 rounded-full" style={{ background: "#6b7280" }} /> No credentials
             </span>
-            <p className="mt-1 text-gray-600">Enter your {name} credentials above to verify {isPoly ? "buying power" : "balance + allowance"}.</p>
+            <p className="mt-1 text-gray-600">Enter your {name} credentials above to verify {isPoly || isPf ? "balance" : "balance + allowance"}.</p>
           </div>
         ) : (
           <div className="space-y-1.5 text-[11px]">
@@ -529,9 +554,9 @@ function OnchainStatus({ venueId }: { venueId: string }) {
                 {s?.label}
               </span>
             </KV>
-            <KV label={polyUs ? "Key ID" : "Wallet"}><span className="text-gray-300 font-mono">{status.address ?? "—"}</span></KV>
+            <KV label={isPf ? "Account" : polyUs ? "Key ID" : "Wallet"}><span className="text-gray-300 font-mono">{status.address ?? "—"}</span></KV>
             {!polyUs && <KV label={isPoly ? "Trading chain" : "Chain"}><span className="text-gray-300">{chainName} ({status.chainId})</span></KV>}
-            <KV label={polyUs ? "Buying power" : "USDC Balance"}><span className="text-gray-200">{status.usdcBalance != null ? `$${status.usdcBalance.toFixed(2)}` : "—"}</span></KV>
+            <KV label={isPf ? "USDT Balance" : polyUs ? "Buying power" : "USDC Balance"}><span className="text-gray-200">{status.usdcBalance != null ? `$${status.usdcBalance.toFixed(2)}` : "—"}</span></KV>
             {venueId === "sxbet" && (
               <KV label="USDC Allowance"><span className="text-gray-200">{status.allowance != null ? `$${status.allowance.toFixed(2)}` : "—"}</span></KV>
             )}
