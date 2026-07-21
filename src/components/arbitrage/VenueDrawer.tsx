@@ -300,8 +300,8 @@ type ExecStatus = {
 const STATUS_STYLE: Record<string, { color: string; label: string }> = {
   missing: { color: "#6b7280", label: "Not configured" },
   verified: { color: "#22c55e", label: "Verified" },
-  no_balance: { color: "#f59e0b", label: "No USDC balance" },
-  needs_allowance: { color: "#f59e0b", label: "Needs USDC allowance" },
+  no_balance: { color: "#f59e0b", label: "No balance" },
+  needs_allowance: { color: "#f59e0b", label: "Needs allowance" },
   error: { color: "#ef4444", label: "Error" },
 };
 
