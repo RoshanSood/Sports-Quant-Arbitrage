@@ -12,8 +12,8 @@ const ESPN = "https://site.api.espn.com/apis/site/v2/sports";
 
 type EspnTeam = { displayName?: string; shortDisplayName?: string; name?: string; abbreviation?: string };
 type EspnAthlete = { displayName?: string; shortName?: string; fullName?: string };
-type EspnCompetitor = { homeAway?: string; team?: EspnTeam; athlete?: EspnAthlete };
-type EspnStatus = { type?: { state?: string; completed?: boolean } };
+type EspnCompetitor = { homeAway?: string; team?: EspnTeam; athlete?: EspnAthlete; score?: string | number };
+type EspnStatus = { type?: { state?: string; completed?: boolean; shortDetail?: string } };
 type EspnCompetition = { id?: string | number; competitors?: EspnCompetitor[]; date?: string; status?: EspnStatus };
 type EspnEvent = {
   id?: string | number;
@@ -85,6 +85,57 @@ export function espnTeamGamesFetcher(path: string): (date: string) => Promise<Ar
       return [];
     }
   };
+}
+
+// Live score of a mapped game (team sports). `state`: pre/in/post; `detail` is ESPN's
+// short status string ("Bot 5th", "Final", "7:00 PM").
+export type GameScore = {
+  id: string;
+  sport: string;
+  league: string;
+  away: { name: string; abbr: string; score: number };
+  home: { name: string; abbr: string; score: number };
+  state: "pre" | "in" | "post";
+  detail: string;
+};
+
+function toScore(v: string | number | undefined): number {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+// Live scores for a team-sport scoreboard (`path` e.g. "baseball/mlb", "soccer/usa.1").
+// Keyed by ESPN event id — the same id the fixtures use — so the client can match to the
+// games the engine mapped. Never throws.
+export async function fetchEspnScores(path: string, sport: string, league: string): Promise<GameScore[]> {
+  try {
+    const events = await getScoreboard(path);
+    const out: GameScore[] = [];
+    for (const e of events) {
+      const comp = (e.competitions ?? [])[0];
+      const cs = comp?.competitors ?? [];
+      if (cs.length < 2) continue;
+      const away = cs.find((c) => c.homeAway === "away") ?? cs[1];
+      const home = cs.find((c) => c.homeAway === "home") ?? cs[0];
+      const a = competitorInfo(away);
+      const h = competitorInfo(home);
+      if (!a || !h) continue;
+      const state = (e.status?.type?.state as GameScore["state"]) ?? "pre";
+      out.push({
+        id: String(e.id ?? ""),
+        sport,
+        league,
+        away: { name: a.name, abbr: a.abbreviation, score: toScore(away?.score) },
+        home: { name: h.name, abbr: h.abbreviation, score: toScore(home?.score) },
+        state: state === "in" || state === "post" ? state : "pre",
+        detail: e.status?.type?.shortDetail ?? "",
+      });
+    }
+    return out;
+  } catch (err) {
+    console.error(`[espn:${path}] scores fetch failed:`, err);
+    return [];
+  }
 }
 
 // Tennis scoreboard: flatten the tournament tree (groupings → competitions) into

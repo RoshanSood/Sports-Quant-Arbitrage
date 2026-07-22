@@ -15,6 +15,8 @@ import type {
 import { DEFAULT_AGENT, DEFAULT_RISK, DEFAULT_VENUES } from "@/lib/arbitrage/seed";
 import ClawArbsTopBar from "./ClawArbsTopBar";
 import ArenaCanvas, { type AgentTrade, type BookEdge } from "./ArenaCanvas";
+import type { ScoreEvent } from "./ActivityFeed";
+import type { GameScore } from "@/lib/espnSports";
 import ArbsPanel from "./ArbsPanel";
 import PortfolioPanel from "./PortfolioPanel";
 import RiskPanel from "./RiskPanel";
@@ -80,6 +82,10 @@ export default function ArbitrageClient() {
   const [agentTrade, setAgentTrade] = useState<AgentTrade | null>(null);
   const tradeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Live score updates for the games the engine currently maps (Activity → SCORES tab).
+  const [scoreFeed, setScoreFeed] = useState<ScoreEvent[]>([]);
+  const prevScores = useRef<Map<string, { home: number; away: number }>>(new Map());
+
   const pnl = trades.reduce((s, t) => s + (t.realizedPnl ?? 0), 0);
 
   // One live edge per active venue pair (best net edge), drawn book-to-book in the arena.
@@ -94,6 +100,48 @@ export default function ArbitrageClient() {
     }
     return [...map.values()];
   }, [opportunities]);
+
+  // Game ids the engine currently maps (marketId = "venue:gameId:type:line:outcome").
+  // Kept in a ref so the score poller stays on a stable 20s interval instead of resubscribing
+  // every time markets refresh.
+  const mappedGameIds = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    mappedGameIds.current = new Set(markets.map((m) => m.marketId.split(":")[1]).filter(Boolean));
+  }, [markets]);
+
+  // Poll ESPN scores for the mapped games; flash a bright-yellow SCORES item when a team
+  // scores. The first sighting of a game sets a baseline (no spam) — only score CHANGES on
+  // a live (in-progress) game emit an event.
+  useEffect(() => {
+    let cancelled = false;
+    const emoji = (s: string) => (s === "baseball" ? "⚾" : s === "basketball" ? "🏀" : s === "soccer" ? "⚽" : "•");
+    async function poll() {
+      const data = (await fetch("/api/arbitrage/scores").then((r) => r.json()).catch(() => null)) as { scores?: GameScore[] } | null;
+      if (cancelled || !data?.scores) return;
+      const newItems: ScoreEvent[] = [];
+      for (const g of data.scores) {
+        if (!mappedGameIds.current.has(g.id)) continue; // only games the engine maps
+        const prev = prevScores.current.get(g.id);
+        const cur = { home: g.home.score, away: g.away.score };
+        prevScores.current.set(g.id, cur);
+        if (!prev || g.state !== "in") continue; // baseline / only live games emit
+        const awayInc = cur.away > prev.away;
+        const homeInc = cur.home > prev.home;
+        if (!awayInc && !homeInc) continue;
+        const scorer = awayInc ? g.away : g.home;
+        const delta = awayInc ? cur.away - prev.away : cur.home - prev.home;
+        newItems.push({
+          id: `score-${g.id}-${cur.away}-${cur.home}-${Date.now()}`,
+          time: new Date().toISOString(),
+          text: `${emoji(g.sport)} ${scorer.name} scored${delta > 1 ? ` (+${delta})` : ""}!  ${g.away.abbr} ${cur.away}–${cur.home} ${g.home.abbr}${g.detail ? ` · ${g.detail}` : ""}`,
+        });
+      }
+      if (newItems.length) setScoreFeed((prev) => [...newItems, ...prev].slice(0, 60));
+    }
+    poll();
+    const iv = setInterval(poll, 20000);
+    return () => { cancelled = true; clearInterval(iv); };
+  }, []);
 
   // Live-data path (enabled once Phase-2 routes are wired). No-op while USE_MOCK.
   useEffect(() => {
@@ -438,6 +486,7 @@ export default function ArbitrageClient() {
         <ArenaCanvas
           venues={venues}
           logs={logs}
+          scores={scoreFeed}
           edges={scanning && !killSwitch ? edges : []}
           agentName={agent.name}
           agentTrade={agentTrade}

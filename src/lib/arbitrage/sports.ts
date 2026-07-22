@@ -38,6 +38,8 @@ export type SportConfig = {
   sport: Sport; // NormalizedMarket.sport
   league: string; // "mlb" | "wnba" | "mls" | "ucl" | "wta"
   fetchGames: (date: string) => Promise<ArbGame[]>;
+  // ESPN scoreboard path for live scores (team sports only). Omit to skip score updates.
+  espnScorePath?: string;
   // Which market types to ingest. Soccer/tennis are moneyline-only for now.
   markets: { totals?: boolean; spread?: boolean; moneyline?: boolean };
   // Per-venue league identifiers — omit a venue that doesn't carry the sport.
@@ -58,6 +60,7 @@ export const SPORTS: SportConfig[] = [
     sport: "baseball",
     league: "mlb",
     fetchGames: fetchESPNGames,
+    espnScorePath: "baseball/mlb",
     markets: { totals: true, spread: true, moneyline: true },
     kalshi: { game: "KXMLBGAME", total: "KXMLBTOTAL", spread: "KXMLBSPREAD" },
     polyTag: "mlb",
@@ -70,6 +73,7 @@ export const SPORTS: SportConfig[] = [
     sport: "basketball",
     league: "wnba",
     fetchGames: fetchWNBAGames,
+    espnScorePath: "basketball/wnba",
     markets: { totals: true, spread: true, moneyline: true },
     kalshi: { game: "KXWNBAGAME", total: "KXWNBATOTAL", spread: "KXWNBASPREAD" },
     polyTag: "wnba",
@@ -84,6 +88,7 @@ export const SPORTS: SportConfig[] = [
     sport: "soccer",
     league: "mls",
     fetchGames: espnTeamGamesFetcher("soccer/usa.1"),
+    espnScorePath: "soccer/usa.1",
     markets: { moneyline: true },
     polyTag: "mls",
     sxDynamic: { sportId: 5, leagueMatch: /major league soccer/i, threeWay: true }, // SX league 1115
@@ -93,6 +98,7 @@ export const SPORTS: SportConfig[] = [
     sport: "soccer",
     league: "ucl",
     fetchGames: espnTeamGamesFetcher("soccer/uefa.champions"),
+    espnScorePath: "soccer/uefa.champions",
     markets: { moneyline: true },
     polyTag: "champions-league",
     sxDynamic: { sportId: 5, leagueMatch: /champions league/i, threeWay: true }, // SX league 30

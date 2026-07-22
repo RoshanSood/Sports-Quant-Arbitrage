@@ -5,7 +5,7 @@ import { Check, KeyRound, X } from "lucide-react";
 import type { ArbLog, Venue } from "@/types/arbitrage";
 import { venueStatusColor } from "./arbFormat";
 import { CREDS_CHANGED_EVENT, hasVenueCreds } from "./venueCreds";
-import ActivityFeed from "./ActivityFeed";
+import ActivityFeed, { type ScoreEvent } from "./ActivityFeed";
 
 // Fractional layout (0-1 of the canvas) for the default node positions. Users can
 // drag nodes; only dragged positions are stored as overrides so no seeding effect
@@ -34,6 +34,7 @@ export type AgentTrade = {
 export default function ArenaCanvas({
   venues,
   logs,
+  scores = [],
   edges,
   agentName,
   agentTrade,
@@ -42,6 +43,7 @@ export default function ArenaCanvas({
 }: {
   venues: Venue[];
   logs: ArbLog[];
+  scores?: ScoreEvent[];
   edges: BookEdge[];
   agentName: string;
   agentTrade: AgentTrade | null;
@@ -265,7 +267,7 @@ export default function ArenaCanvas({
 
       {/* Docked activity feed */}
       <div className="absolute bottom-3 left-3 w-80 rounded-lg border shadow-xl" style={{ background: "#0e1014", borderColor: "#1e2130" }}>
-        <ActivityFeed logs={logs} compact />
+        <ActivityFeed logs={logs} scores={scores} compact />
       </div>
 
       <div className="absolute top-3 right-4 flex items-center gap-2 text-[10px] text-gray-600">
