@@ -8,13 +8,16 @@ import type {
   Agent,
   ArbLeg,
   ArbLog,
+  ArbOpportunity,
   ArbResult,
   FeeBreakdown,
+  NormalizedMarket,
   ReasonCode,
   RiskSettings,
   Trade,
 } from "@/types/arbitrage";
 import { getMarkets } from "./marketStore";
+import { ingestTotals } from "./ingest";
 import { matchMarkets } from "./matching";
 import { detectArbs } from "./arbEngine";
 import { getAgent } from "./agentStore";
@@ -105,11 +108,29 @@ export async function prepareExecution(opportunityId: string, date: string): Pro
   const agent = (await getAgent(DEFAULT_AGENT.id)) ?? DEFAULT_AGENT;
   const risk: RiskSettings = await getRiskSettings();
 
-  const markets = await getMarkets(date);
-  const { matched } = matchMarkets(markets);
-  const { opportunities } = detectArbs(matched, agent, risk.minLiquidityUsd);
-  const opp = opportunities.find((o) => o.id === opportunityId);
   const priorMatchup = opportunityId.split(":")[2] ?? opportunityId;
+
+  // Load stored markets → matched events → opportunities, and locate this one.
+  const detect = async () => {
+    const markets = await getMarkets(date);
+    const { matched } = matchMarkets(markets);
+    const { opportunities } = detectArbs(matched, agent, risk.minLiquidityUsd);
+    return { markets, opp: opportunities.find((o) => o.id === opportunityId) };
+  };
+  // Age (ms) of the oldest quote backing the opportunity's legs.
+  const legAgeMs = (o: ArbOpportunity, mkts: NormalizedMarket[]) =>
+    Math.max(0, ...o.legs.map((l) => {
+      const m = mkts.find((mk) => mk.marketId === l.marketId);
+      return m ? Date.now() - Date.parse(m.lastUpdated) : 0;
+    }));
+
+  let { markets, opp } = await detect();
+  // Refresh stale quotes ONCE before executing so a real order fires on current prices,
+  // not the last scan. (Without this, execution silently depended on the scanner running.)
+  if (!opp || legAgeMs(opp, markets) > risk.staleQuoteMs) {
+    await ingestTotals(date).catch((e) => console.error("[arbitrage/exec] pre-execution refresh failed:", e));
+    ({ markets, opp } = await detect());
+  }
 
   const asHalt = async (rc: ReasonCode, reason: string, matchup: string, venues: string[], edge: number, details: Record<string, unknown>) => {
     const h = halt(rc, reason);
@@ -123,14 +144,9 @@ export async function prepareExecution(opportunityId: string, date: string): Pro
 
   const venues = [...new Set(opp.legs.map((l) => l.venueId))];
 
-  const oldestMs = Math.max(
-    0,
-    ...opp.legs.map((l) => {
-      const m = markets.find((mk) => mk.marketId === l.marketId);
-      return m ? Date.now() - Date.parse(m.lastUpdated) : 0;
-    })
-  );
-  if (oldestMs > risk.staleQuoteMs) return asHalt("stale_quote", `Quote age ${oldestMs}ms exceeds ${risk.staleQuoteMs}ms`, opp.matchup, venues, opp.netEdge, { oldestMs });
+  // Still stale after a fresh re-ingest ⇒ the venue feeds themselves aren't updating.
+  const oldestMs = legAgeMs(opp, markets);
+  if (oldestMs > risk.staleQuoteMs) return asHalt("stale_quote", `Quote age ${oldestMs}ms exceeds ${risk.staleQuoteMs}ms (venue feed not refreshing)`, opp.matchup, venues, opp.netEdge, { oldestMs });
 
   const todays = await getTradesByDate(date);
   const openForEvent = todays.find(
