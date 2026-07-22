@@ -13,7 +13,7 @@ const ESPN = "https://site.api.espn.com/apis/site/v2/sports";
 type EspnTeam = { displayName?: string; shortDisplayName?: string; name?: string; abbreviation?: string };
 type EspnAthlete = { displayName?: string; shortName?: string; fullName?: string };
 type EspnCompetitor = { homeAway?: string; team?: EspnTeam; athlete?: EspnAthlete; score?: string | number };
-type EspnStatus = { type?: { state?: string; completed?: boolean; shortDetail?: string } };
+type EspnStatus = { period?: number; type?: { state?: string; completed?: boolean; shortDetail?: string } };
 type EspnCompetition = { id?: string | number; competitors?: EspnCompetitor[]; date?: string; status?: EspnStatus };
 type EspnEvent = {
   id?: string | number;
@@ -96,6 +96,7 @@ export type GameScore = {
   away: { name: string; abbr: string; score: number };
   home: { name: string; abbr: string; score: number };
   state: "pre" | "in" | "post";
+  period: number; // current period/quarter/inning (basketball fires per-quarter, not per-point)
   detail: string;
 };
 
@@ -128,6 +129,7 @@ export async function fetchEspnScores(path: string, sport: string, league: strin
         away: { name: a.name, abbr: a.abbreviation, score: toScore(away?.score) },
         home: { name: h.name, abbr: h.abbreviation, score: toScore(home?.score) },
         state: state === "in" || state === "post" ? state : "pre",
+        period: Number(e.status?.period) || 0,
         detail: e.status?.type?.shortDetail ?? "",
       });
     }

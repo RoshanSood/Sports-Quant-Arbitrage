@@ -84,7 +84,7 @@ export default function ArbitrageClient() {
 
   // Live score updates for the games the engine currently maps (Activity → SCORES tab).
   const [scoreFeed, setScoreFeed] = useState<ScoreEvent[]>([]);
-  const prevScores = useRef<Map<string, { home: number; away: number }>>(new Map());
+  const prevScores = useRef<Map<string, { home: number; away: number; period: number; state: string }>>(new Map());
 
   const pnl = trades.reduce((s, t) => s + (t.realizedPnl ?? 0), 0);
 
@@ -115,6 +115,7 @@ export default function ArbitrageClient() {
   useEffect(() => {
     let cancelled = false;
     const emoji = (s: string) => (s === "baseball" ? "⚾" : s === "basketball" ? "🏀" : s === "soccer" ? "⚽" : "•");
+    const quarterLabel = (p: number) => (p <= 4 ? `Q${p}` : p === 5 ? "OT" : `OT${p - 4}`);
     async function poll() {
       const data = (await fetch("/api/arbitrage/scores").then((r) => r.json()).catch(() => null)) as { scores?: GameScore[] } | null;
       if (cancelled || !data?.scores) return;
@@ -122,19 +123,31 @@ export default function ArbitrageClient() {
       for (const g of data.scores) {
         if (!mappedGameIds.current.has(g.id)) continue; // only games the engine maps
         const prev = prevScores.current.get(g.id);
-        const cur = { home: g.home.score, away: g.away.score };
+        const cur = { home: g.home.score, away: g.away.score, period: g.period, state: g.state };
         prevScores.current.set(g.id, cur);
-        if (!prev || g.state !== "in") continue; // baseline / only live games emit
-        const awayInc = cur.away > prev.away;
-        const homeInc = cur.home > prev.home;
-        if (!awayInc && !homeInc) continue;
-        const scorer = awayInc ? g.away : g.home;
-        const delta = awayInc ? cur.away - prev.away : cur.home - prev.home;
-        newItems.push({
-          id: `score-${g.id}-${cur.away}-${cur.home}-${Date.now()}`,
-          time: new Date().toISOString(),
-          text: `${emoji(g.sport)} ${scorer.name} scored${delta > 1 ? ` (+${delta})` : ""}!  ${g.away.abbr} ${cur.away}–${cur.home} ${g.home.abbr}${g.detail ? ` · ${g.detail}` : ""}`,
-        });
+        if (!prev) continue; // first sighting sets the baseline (no emit)
+
+        const line = `${g.away.abbr} ${cur.away}–${cur.home} ${g.home.abbr}`;
+        let text: string | null = null;
+        if (g.sport === "basketball") {
+          // WNBA: fire only at quarter boundaries + final, not on every basket.
+          if (cur.state === "in" && cur.period > prev.period) {
+            text = `🏀 End of ${quarterLabel(prev.period)} — ${line}`;
+          } else if (cur.state === "post" && prev.state !== "post") {
+            text = `🏀 Final — ${line}`;
+          }
+        } else if (g.state === "in") {
+          // Baseball/soccer: per scoring event (run/goal).
+          const awayInc = cur.away > prev.away;
+          const homeInc = cur.home > prev.home;
+          if (awayInc || homeInc) {
+            const scorer = awayInc ? g.away : g.home;
+            const delta = awayInc ? cur.away - prev.away : cur.home - prev.home;
+            text = `${emoji(g.sport)} ${scorer.name} scored${delta > 1 ? ` (+${delta})` : ""}!  ${line}${g.detail ? ` · ${g.detail}` : ""}`;
+          }
+        }
+        if (!text) continue;
+        newItems.push({ id: `score-${g.id}-${cur.away}-${cur.home}-${cur.period}-${Date.now()}`, time: new Date().toISOString(), text });
       }
       if (newItems.length) setScoreFeed((prev) => [...newItems, ...prev].slice(0, 60));
     }
