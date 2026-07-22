@@ -16,8 +16,9 @@ import { getSxMetadata } from "@/lib/arbitrage/execution/sxMeta";
 import { extractOnchainCredsFromHeaders } from "@/lib/arbitrage/execution/onchainCreds";
 import { approveUsdc, hasWalletKey } from "@/lib/arbitrage/execution/wallet";
 import { POLYMARKET_DEPOSIT_WALLET_SIG_TYPE, updatePolymarketBalanceAllowance } from "@/lib/arbitrage/execution/polymarketAdapter";
+import { pfSetApprovals, pfWalletKey } from "@/lib/arbitrage/execution/predictFunAdapter";
 
-type Body = { venue?: "polymarket" | "sxbet"; password?: string; amountUsd?: number };
+type Body = { venue?: "polymarket" | "sxbet" | "predictfun"; password?: string; amountUsd?: number };
 
 export async function POST(req: Request) {
   let body: Body = {};
@@ -31,8 +32,23 @@ export async function POST(req: Request) {
   }
 
   const venue = body.venue;
+
+  // predict.fun: run the SDK's one-shot setApprovals (ERC-1155 CTF + ERC-20 USDT). Needs
+  // the wallet key + a little BNB gas (unless the smart account sponsors it).
+  if (venue === "predictfun") {
+    const creds = extractOnchainCredsFromHeaders(req.headers).predictfun;
+    if (!pfWalletKey(creds)) {
+      return NextResponse.json({ error: "predict.fun wallet key not provided (enter it in the venue Credentials tab)" }, { status: 400 });
+    }
+    const result = await pfSetApprovals(creds ?? {});
+    if (!result.ok) {
+      return NextResponse.json({ error: result.error ?? "setApprovals failed", result }, { status: 500 });
+    }
+    return NextResponse.json({ venue, result });
+  }
+
   if (venue !== "polymarket" && venue !== "sxbet") {
-    return NextResponse.json({ error: "venue must be 'polymarket' or 'sxbet'" }, { status: 400 });
+    return NextResponse.json({ error: "venue must be 'polymarket', 'sxbet', or 'predictfun'" }, { status: 400 });
   }
   // Polymarket US is custodial — no on-chain allowance to set (funds sit in the account).
   if (venue === "polymarket" && polymarketRegion() === "us") {

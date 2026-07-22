@@ -423,21 +423,24 @@ function OnchainStatus({ venueId }: { venueId: string }) {
       });
       const d = (await res.json()) as {
         error?: string;
-        result?: { ok?: boolean; txHash?: string; error?: string };
-        spenders?: Record<string, { ok?: boolean; txHash?: string; error?: string }>;
+        result?: { ok?: boolean; txHash?: string; txHashes?: string[]; error?: string };
+        spenders?: Record<string, { ok?: boolean; txHash?: string; txHashes?: string[]; error?: string }>;
       };
+      const gasToken = isPf ? "BNB" : venueId === "sxbet" ? "SX" : "POL";
       if (!res.ok) {
-        setApproveMsg(d.error || "Approval failed");
+        const gasHint = /gas|insufficient funds/i.test(d.error || "") ? ` — the signer needs a little ${gasToken} for gas.` : "";
+        setApproveMsg(`${d.error || "Approval failed"}${gasHint}`);
         return;
       }
-      // Inspect the ACTUAL on-chain approve result (not just that the request went through).
+      // Inspect the ACTUAL on-chain result (not just that the request went through).
       const results = d.result ? [d.result] : d.spenders ? Object.values(d.spenders) : [];
       const failed = results.find((r) => r?.ok === false);
       if (failed) {
-        const gasHint = /gas|insufficient funds/i.test(failed.error || "") ? " — the wallet needs a little native gas token (SX) to send the tx." : "";
+        const gasHint = /gas|insufficient funds/i.test(failed.error || "") ? ` — the signer needs a little ${gasToken} for gas.` : "";
         setApproveMsg(`Approval FAILED: ${failed.error || "unknown"}${gasHint}`);
       } else {
-        setApproveMsg(`Approved ✓ ${results[0]?.txHash ? `(tx ${results[0].txHash.slice(0, 10)}…)` : ""} — allowance updating.`);
+        const tx = results[0]?.txHash ?? results[0]?.txHashes?.[0];
+        setApproveMsg(`${isPf ? "Approvals set" : "Approved"} ✓ ${tx ? `(tx ${tx.slice(0, 10)}…)` : ""}`);
         setTimeout(load, 4000);
       }
     } catch (e) {
@@ -585,12 +588,14 @@ function OnchainStatus({ venueId }: { venueId: string }) {
             )}
             {status.message && <p className="text-[10px] text-red-400 pt-1">{status.message}</p>}
 
-            {(venueId === "sxbet" || (isPoly && !polyUs)) && (
+            {(venueId === "sxbet" || isPf || (isPoly && !polyUs)) && (
               <div className="pt-2 mt-1 border-t space-y-1.5" style={{ borderColor: "#1e2130" }}>
                 <p className="text-[10px] text-gray-500">
-                  {isPoly && sigType === 3
-                    ? "Refresh Polymarket CLOB balance/allowance for the deposit wallet. Signed with your key; admin password gates the action."
-                    : `One-time: approve the ${name} exchange to spend USDC (required before any fill). Signed with your key; admin password gates the action.`}
+                  {isPf
+                    ? "One-time: approve the predict.fun exchanges to move your USDT + outcome shares (required before the first order). Needs a little BNB gas in the signer unless the smart account sponsors it. Signed with your key; admin password gates it."
+                    : isPoly && sigType === 3
+                      ? "Refresh Polymarket CLOB balance/allowance for the deposit wallet. Signed with your key; admin password gates the action."
+                      : `One-time: approve the ${name} exchange to spend USDC (required before any fill). Signed with your key; admin password gates the action.`}
                 </p>
                 <div className="flex gap-1.5">
                   <input
@@ -604,10 +609,10 @@ function OnchainStatus({ venueId }: { venueId: string }) {
                   <button
                     onClick={approve}
                     disabled={approving || !pw}
-                    className="rounded px-2 py-1 text-[11px] font-medium disabled:opacity-40"
+                    className="rounded px-2 py-1 text-[11px] font-medium disabled:opacity-40 whitespace-nowrap"
                     style={{ background: "#1e2a1e", color: "#86efac", border: "1px solid #2f4a2f" }}
                   >
-                    {approving ? "Approving..." : isPoly && sigType === 3 ? "Refresh" : "Approve USDC"}
+                    {approving ? "Working…" : isPf ? "Set approvals" : isPoly && sigType === 3 ? "Refresh" : "Approve USDC"}
                   </button>
                 </div>
                 {approveMsg && <p className="text-[10px] text-gray-400">{approveMsg}</p>}

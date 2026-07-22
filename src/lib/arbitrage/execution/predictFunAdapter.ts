@@ -189,6 +189,29 @@ export async function pfAccountAddress(c: PredictFunCreds): Promise<string | nul
   }
 }
 
+// One-time on-chain approvals (ERC-1155 CTF + ERC-20 USDT to the exchanges) via the SDK's
+// setApprovals(), which approves everything the protocol may need in a single call. The
+// signer needs a little BNB for gas unless the ZeroDev smart account sponsors it. Returns
+// a serializable summary (never the raw receipts).
+export async function pfSetApprovals(c: PredictFunCreds): Promise<{ ok: boolean; txHashes: string[]; error?: string }> {
+  const key = pfWalletKey(c);
+  if (!key) return { ok: false, txHashes: [], error: "predict.fun wallet key not configured" };
+  try {
+    const signer = new Wallet(key, new JsonRpcProvider(bnbRpcUrl()));
+    const account = pfAccount(c);
+    const builder = await OrderBuilder.make(ChainId.BnbMainnet, signer, account ? { predictAccount: account } : undefined);
+    const result = await builder.setApprovals();
+    const txHashes: string[] = [];
+    for (const t of result.transactions ?? []) {
+      const hash = (t as { receipt?: { hash?: string } })?.receipt?.hash;
+      if (hash) txHashes.push(hash);
+    }
+    return { ok: Boolean(result.success), txHashes };
+  } catch (e) {
+    return { ok: false, txHashes: [], error: String(e).slice(0, 200) };
+  }
+}
+
 export class PredictFunExecutionAdapter implements ExecutionAdapter {
   id = "predictfun";
   constructor(private creds?: PredictFunCreds) {}
