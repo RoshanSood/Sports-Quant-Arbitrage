@@ -148,11 +148,17 @@ export async function prepareExecution(opportunityId: string, date: string): Pro
   const oldestMs = legAgeMs(opp, markets);
   if (oldestMs > risk.staleQuoteMs) return asHalt("stale_quote", `Quote age ${oldestMs}ms exceeds ${risk.staleQuoteMs}ms (venue feed not refreshing)`, opp.matchup, venues, opp.netEdge, { oldestMs });
 
+  // Position cap PER opportunity (match + line + market). risk.maxOpenPositions is the
+  // number of concurrent open positions allowed on the same arb; <= 0 means unlimited, so
+  // you can re-enter as long as the edge/depth checks above still pass on fresh quotes.
   const todays = await getTradesByDate(date);
-  const openForEvent = todays.find(
+  const openForEvent = todays.filter(
     (t) => t.opportunityId === opp.id && (t.status === "open" || t.status === "partial" || t.status === "naked")
   );
-  if (openForEvent) return asHalt("position_dedup", "Already tracking this match + line + agent (max=1, open=1)", opp.matchup, venues, opp.netEdge, { existingTrade: openForEvent.id });
+  const maxPer = risk.maxOpenPositions;
+  if (maxPer > 0 && openForEvent.length >= maxPer) {
+    return asHalt("position_dedup", `Already at ${openForEvent.length}/${maxPer} open positions for this match + line`, opp.matchup, venues, opp.netEdge, { openCount: openForEvent.length, maxPer });
+  }
 
   const openExposure = todays
     .filter((t) => (t.status === "open" || t.status === "partial" || t.status === "naked"))

@@ -45,6 +45,14 @@ export default function RiskPanel({
 
   const STAKE_PRESETS = [5, 10, 25, 50, 100];
 
+  // Max concurrent open positions on the SAME arb (match + line). 0 = unlimited — you can
+  // re-enter as long as fresh quotes still show edge + depth.
+  function setMaxOpen(n: number) {
+    const v = Math.max(0, Math.round(n));
+    if (v !== risk.maxOpenPositions) onUpdateRisk({ maxOpenPositions: v });
+  }
+  const maxOpen = risk.maxOpenPositions ?? 1;
+
   // Auto-execution is LIVE (real money, no click) when auto-trade and the agent Live
   // toggle are both on. Every order still passes the server gate and risk cap.
   const autoLiveArmed = autoTrade && agentLive;
@@ -137,6 +145,55 @@ export default function RiskPanel({
         </div>
       </div>
 
+      {/* Max open positions per arb — set Unlimited to stack multiple bets on one game. */}
+      <div className="rounded-lg border px-3 py-2.5 mb-4" style={{ borderColor: "#1e2130", background: "#0e1014" }}>
+        <div className="flex items-center justify-between gap-2">
+          <div>
+            <div className="text-xs font-semibold text-gray-200">Max open per match</div>
+            <div className="text-[10px] text-gray-500">Concurrent positions on the same arb (line). Each re-entry still re-checks edge + depth.</div>
+          </div>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              type="button"
+              onClick={() => setMaxOpen(maxOpen - 1)}
+              disabled={maxOpen <= 0}
+              aria-label="Decrease max open per match"
+              className="w-8 h-8 rounded flex items-center justify-center text-lg font-bold leading-none text-gray-200 hover:bg-[#1a1d24] disabled:opacity-30 disabled:cursor-not-allowed"
+              style={{ background: "#12151b", border: "1px solid #2a2f3e" }}
+            >
+              −
+            </button>
+            <span className="w-10 text-center text-sm font-bold text-gray-100">{maxOpen === 0 ? "∞" : maxOpen}</span>
+            <button
+              type="button"
+              onClick={() => setMaxOpen(maxOpen + 1)}
+              aria-label="Increase max open per match"
+              className="w-8 h-8 rounded flex items-center justify-center text-lg font-bold leading-none text-gray-200 hover:bg-[#1a1d24]"
+              style={{ background: "#12151b", border: "1px solid #2a2f3e" }}
+            >
+              +
+            </button>
+          </div>
+        </div>
+        <div className="flex items-center flex-wrap gap-1.5 mt-2.5">
+          <span className="text-[10px] text-gray-500 mr-0.5">Quick set</span>
+          {[1, 3, 5, 0].map((v) => {
+            const active = maxOpen === v;
+            return (
+              <button
+                key={v}
+                type="button"
+                onClick={() => setMaxOpen(v)}
+                className="px-2 py-0.5 rounded text-[11px] font-semibold transition-colors"
+                style={active ? { background: "#1e2a3b", color: "#93c5fd", border: "1px solid #2563eb" } : { background: "#0b0d11", color: "#9ca3af", border: "1px solid #2a2f3e" }}
+              >
+                {v === 0 ? "Unlimited" : v}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
       {/* Live auto-execute — real money, no click. Armed only with all three switches. */}
       <div className="rounded-lg border px-3 py-2.5 mb-4" style={{ borderColor: autoLiveArmed ? "#3b1717" : "#1e2130", background: autoLiveArmed ? "#160c0c" : "#0e1014" }}>
         <div className="flex items-center justify-between mb-1">
@@ -167,7 +224,7 @@ export default function RiskPanel({
         <div className="grid grid-cols-2 gap-3 pt-2">
           <Cell label="Daily P&L" value={formatSignedDollars(risk.dailyPnl)} accent={risk.dailyPnl >= 0 ? "#34d399" : "#f87171"} />
           <Cell label="Max Daily Loss" value={formatDollars(risk.maxDailyLoss)} />
-          <Cell label="Max Open Positions" value={String(risk.maxOpenPositions)} />
+          <Cell label="Min Liquidity" value={`$${risk.minLiquidityUsd ?? 0}`} />
           <Cell label="Pause on Naked" value={risk.pauseOnNaked ? "On" : "Off"} />
           <Cell label="Stale Quote Age" value={`${risk.staleQuoteMs} ms`} />
           <Cell label="Status" value={killSwitch ? "HALTED" : "OK"} accent={killSwitch ? "#f87171" : "#34d399"} />
