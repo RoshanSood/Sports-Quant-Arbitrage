@@ -118,14 +118,11 @@ async function pfJwt(apiKey: string, walletKey: string, account?: string): Promi
 
   const attempts = account
     ? [
-        { signer: signer.address, account, signature },
+        { signer: account, signature, message },
         { signer: signer.address, account, signature, message },
-        { address: account, signature },
       ]
     : [
-        { signer: signer.address, signature },
-        { address: signer.address, signature },
-        { address: signer.address, signature, message },
+        { signer: signer.address, signature, message },
       ];
 
   let lastError = "auth failed";
@@ -264,11 +261,19 @@ export class PredictFunExecutionAdapter implements ExecutionAdapter {
       const typed = builder.buildTypedData(order, { isNegRisk: flags.isNegRisk, isYieldBearing: flags.isYieldBearing });
       const signed = await builder.signTypedDataOrder(typed);
       const hash = builder.buildTypedDataHash(typed);
+      const token = await pfJwt(apiKey, walletKey, account);
 
       const res = await fetch(`${API}/v1/orders`, {
         method: "POST",
-        headers: { "x-api-key": apiKey, "Content-Type": "application/json", Accept: "application/json" },
-        body: JSON.stringify({ data: { order: { ...signed, hash }, strategy: "LIMIT" } }),
+        headers: { "x-api-key": apiKey, Authorization: `Bearer ${token}`, "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({
+          data: {
+            order: { ...signed, hash },
+            pricePerShare: amounts.pricePerShare.toString(),
+            strategy: "LIMIT",
+            isFillOrKill: true,
+          },
+        }),
       });
       const text = await res.text();
       let body: { success?: boolean; data?: { orderId?: string; filledSize?: string; status?: string }; message?: string } = {};

@@ -13,6 +13,7 @@ describe("SX.bet fill math", () => {
   it("desiredOdds = takerImpliedProb × 1e20 (= cents × 1e18)", () => {
     expect(desiredOddsFor(50)).toBe("50000000000000000000"); // 0.5 × 1e20
     expect(desiredOddsFor(62)).toBe("62000000000000000000");
+    expect(desiredOddsFor(86.125)).toBe("86125000000000000000");
     expect(desiredOddsFor(100)).toBe("100000000000000000000"); // 1.0 × 1e20
   });
 });

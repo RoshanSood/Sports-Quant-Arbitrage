@@ -44,7 +44,13 @@ function nativeSideFor(
   if (venueId === "polymarket") return polymarketRegion() === "us" ? ids.kalshiYesNo : ids.polyTokenId;
   if (venueId === "predictfun") return ids.polyTokenId; // on-chain outcome token id
   if (venueId === "cloudbet") return ids.polyTokenId; // Cloudbet market URL (marketKey/outcome)
-  if (venueId === "sxbet") return ids.sxIsOne === undefined ? undefined : ids.sxIsOne ? "one" : "two";
+  if (venueId === "sxbet") {
+    // Dynamic SX 1X2 soccer markets are modeled as separate "X vs Not X" markets.
+    // The per-outcome hash rides in polyTokenId, and backing that result is always
+    // outcome ONE. Fixed two-way SX markets use the explicit outcome-one mapping.
+    if (ids.polyTokenId) return "one";
+    return ids.sxIsOne === undefined ? undefined : ids.sxIsOne ? "one" : "two";
+  }
   return undefined;
 }
 
@@ -122,7 +128,7 @@ function normalizeVenueTwoWay(
       venueId,
       marketId: `${venueId}:${game.id}:${marketType}:${lineKey}:${outcome}`,
       // Kalshi two-way: buy YES on the team the market's YES side represents, else NO.
-      nativeMarketId: q.marketId,
+      nativeMarketId: venueId === "sxbet" && tokenId ? tokenId : q.marketId,
       nativeSide: nativeSideFor(venueId, {
         kalshiYesNo: q.yesSide && outcome === q.yesSide ? "yes" : "no",
         polyTokenId: tokenId,

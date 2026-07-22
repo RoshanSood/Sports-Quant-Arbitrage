@@ -27,6 +27,8 @@ import { appendLog } from "./arbLogStore";
 import { DEFAULT_AGENT } from "./seed";
 import { centsToDollars } from "./arbMath";
 import { computeFees, feeFractionOfStake } from "./feeEngine";
+import { getVenues } from "./venueStore";
+import { filterMarketsToEnabledVenues } from "./venueFilters";
 
 export type ExecutionOutcome = {
   result: ArbResult | "halted";
@@ -107,12 +109,13 @@ export type PrepareResult =
 export async function prepareExecution(opportunityId: string, date: string): Promise<PrepareResult> {
   const agent = (await getAgent(DEFAULT_AGENT.id)) ?? DEFAULT_AGENT;
   const risk: RiskSettings = await getRiskSettings();
+  const configuredVenues = await getVenues();
 
   const priorMatchup = opportunityId.split(":")[2] ?? opportunityId;
 
   // Load stored markets → matched events → opportunities, and locate this one.
   const detect = async () => {
-    const markets = await getMarkets(date);
+    const markets = filterMarketsToEnabledVenues(await getMarkets(date), configuredVenues);
     const { matched } = matchMarkets(markets);
     const { opportunities } = detectArbs(matched, agent, risk.minLiquidityUsd);
     return { markets, opp: opportunities.find((o) => o.id === opportunityId) };
@@ -140,7 +143,7 @@ export async function prepareExecution(opportunityId: string, date: string): Pro
 
   if (!agent.enabled || agent.strategy !== "arbitrage") return asHalt("agent_disabled", "Agent is off or not an arbitrage agent", priorMatchup, [], 0, { opportunityId });
   if (risk.killSwitch) return asHalt("kill_switch", "Risk kill switch is active", priorMatchup, [], 0, { opportunityId });
-  if (!opp) return asHalt("final_refresh_failed", "Opportunity no longer exists after quote refresh", priorMatchup, ["kalshi", "polymarket"], 0, { opportunityId });
+  if (!opp) return asHalt("final_refresh_failed", "Opportunity no longer exists after quote refresh", priorMatchup, [], 0, { opportunityId });
 
   const venues = [...new Set(opp.legs.map((l) => l.venueId))];
 

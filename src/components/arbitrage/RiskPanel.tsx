@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ShieldAlert } from "lucide-react";
 import type { RiskSettings } from "@/types/arbitrage";
 import { FloatingPanel } from "./ui";
@@ -11,6 +11,8 @@ export default function RiskPanel({
   killSwitch,
   onToggleKill,
   onUpdateRisk,
+  agentMaxStake,
+  onUpdateAgentStake,
   agentLive,
   autoTrade,
   onClose,
@@ -19,12 +21,33 @@ export default function RiskPanel({
   killSwitch: boolean;
   onToggleKill: (v: boolean) => void;
   onUpdateRisk: (partial: Partial<RiskSettings>) => void;
+  agentMaxStake: number;
+  onUpdateAgentStake: (maxStake: number) => void;
   agentLive: boolean;
   autoTrade: boolean;
   onClose: () => void;
 }) {
   const exposurePct = risk.maxExposure > 0 ? Math.min(1, risk.currentExposure / risk.maxExposure) : 0;
+  const [targetStakeInput, setTargetStakeInput] = useState(String(agentMaxStake ?? 50));
   const [stakeInput, setStakeInput] = useState(String(risk.maxLiveStakeUsd ?? 5));
+
+  useEffect(() => setTargetStakeInput(String(agentMaxStake ?? 50)), [agentMaxStake]);
+  useEffect(() => setStakeInput(String(risk.maxLiveStakeUsd ?? 5)), [risk.maxLiveStakeUsd]);
+
+  function applyTargetStake(n: number) {
+    const v = Math.max(1, Math.round(n));
+    setTargetStakeInput(String(v));
+    if (v !== agentMaxStake) onUpdateAgentStake(v);
+  }
+  function commitTargetStake() {
+    const n = Number(targetStakeInput);
+    if (Number.isFinite(n) && n > 0) applyTargetStake(n);
+    else setTargetStakeInput(String(agentMaxStake ?? 50));
+  }
+  function stepTarget(delta: number) {
+    const base = Number(targetStakeInput);
+    applyTargetStake((Number.isFinite(base) ? base : agentMaxStake ?? 50) + delta);
+  }
 
   // Set the cap to an exact value: clamp to ≥ 0, reflect it in the field, and persist if
   // it actually changed. Shared by the field, the −/+ steppers, and the quick-set chips.
@@ -75,6 +98,80 @@ export default function RiskPanel({
           <ShieldAlert className="w-3.5 h-3.5" />
           {killSwitch ? "ARMED — STOP ALL" : "KILL SWITCH"}
         </button>
+      </div>
+
+      {/* Target arb stake sizes newly detected opportunities before the live gate runs. */}
+      <div className="rounded-lg border px-3 py-2.5 mb-4" style={{ borderColor: "#173047", background: "#0d141c" }}>
+        <div className="flex items-center justify-between gap-2">
+          <div>
+            <div className="text-xs font-semibold text-sky-300">Target arb stake</div>
+            <div className="text-[10px] text-gray-500">Sizes new arbs before execution. Lower this for smaller positions.</div>
+          </div>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              type="button"
+              onClick={() => stepTarget(-1)}
+              disabled={Number(targetStakeInput) <= 1}
+              aria-label="Decrease target arb stake by $1"
+              className="w-8 h-8 rounded flex items-center justify-center text-lg font-bold leading-none text-sky-200 hover:bg-[#102235] disabled:opacity-30 disabled:cursor-not-allowed"
+              style={{ background: "#0b1a28", border: "1px solid #18344f" }}
+            >
+              -
+            </button>
+            <div className="flex items-center gap-0.5">
+              <span className="text-gray-400 text-sm">$</span>
+              <input
+                type="number"
+                min={1}
+                step={1}
+                value={targetStakeInput}
+                onChange={(e) => setTargetStakeInput(e.target.value)}
+                onBlur={commitTargetStake}
+                onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()}
+                className="w-16 rounded bg-[#0b0d11] border px-2 py-1 text-sm text-right text-gray-100"
+                style={{ borderColor: "#18344f" }}
+              />
+            </div>
+            <button
+              type="button"
+              onClick={() => stepTarget(1)}
+              aria-label="Increase target arb stake by $1"
+              className="w-8 h-8 rounded flex items-center justify-center text-lg font-bold leading-none text-sky-200 hover:bg-[#102235]"
+              style={{ background: "#0b1a28", border: "1px solid #18344f" }}
+            >
+              +
+            </button>
+          </div>
+        </div>
+        <div className="flex items-center flex-wrap gap-1.5 mt-2.5">
+          <span className="text-[10px] text-gray-500 mr-0.5">Quick set</span>
+          {STAKE_PRESETS.map((v) => {
+            const active = agentMaxStake === v;
+            return (
+              <button
+                key={v}
+                type="button"
+                onClick={() => applyTargetStake(v)}
+                className="px-2 py-0.5 rounded text-[11px] font-semibold transition-colors"
+                style={
+                  active
+                    ? { background: "#0f2c46", color: "#7dd3fc", border: "1px solid #0284c7" }
+                    : { background: "#0b0d11", color: "#9ca3af", border: "1px solid #2a2f3e" }
+                }
+              >
+                ${v}
+              </button>
+            );
+          })}
+          <button
+            type="button"
+            onClick={() => applyStake(agentMaxStake)}
+            className="px-2 py-0.5 rounded text-[11px] font-semibold"
+            style={{ background: "#101827", color: "#cbd5e1", border: "1px solid #334155" }}
+          >
+            Match live cap
+          </button>
+        </div>
       </div>
 
       {/* Live stake cap — the hard per-trade $ ceiling on REAL orders (UI-configured). */}

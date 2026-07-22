@@ -66,8 +66,8 @@ function bestPrices(orders: SxOrder[] | undefined): BookPrices | null {
   }
   if (bestPforO1 === 0 || bestPforO2 === 0) return null; // one-sided book
   return {
-    o1Cents: Math.round((1 - bestPforO1) * 100),
-    o2Cents: Math.round((1 - bestPforO2) * 100),
+    o1Cents: Number(((1 - bestPforO1) * 100).toFixed(4)),
+    o2Cents: Number(((1 - bestPforO2) * 100).toFixed(4)),
     o1LiqUsd: o1Liq / USDC_DECIMALS,
     o2LiqUsd: o2Liq / USDC_DECIMALS,
   };

@@ -12,7 +12,7 @@
 // against a live $1 fill before enabling; the EIP-712 signing schema below is quoted
 // from SX's API docs. The deterministic math lives in exported pure helpers (tested).
 
-import { Wallet, ZeroAddress, ZeroHash, hexlify, randomBytes } from "ethers";
+import { Wallet, ZeroAddress, ZeroHash, hexlify, parseUnits, randomBytes } from "ethers";
 import { SX_CHAIN_ID } from "./chains";
 import { getSxMetadata } from "./sxMeta";
 import { verifySx } from "./verify";
@@ -33,8 +33,7 @@ export function stakeWeiFor(sizeContracts: number, limitPriceCents: number): str
 // Worst acceptable odds in SX format = takerImpliedProb × 1e20. Our price in cents is
 // that implied probability × 100, so desiredOdds = cents × 1e18 (exact, no float 1e20).
 export function desiredOddsFor(limitPriceCents: number): string {
-  const TEN_POW_18 = BigInt("1000000000000000000"); // 1e18 (BigInt literals need ES2020 target)
-  return (BigInt(Math.round(limitPriceCents)) * TEN_POW_18).toString();
+  return parseUnits((limitPriceCents / 100).toFixed(6), 20).toString();
 }
 
 export function fillSalt(): string {

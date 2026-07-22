@@ -524,7 +524,17 @@ export default function ArbitrageClient() {
           <PortfolioPanel trades={trades} live={portfolioLive} onSettle={settleTrade} onClose={() => setPanel(null)} />
         )}
         {panel === "risk" && (
-          <RiskPanel risk={risk} killSwitch={killSwitch} onToggleKill={toggleKill} onUpdateRisk={updateRisk} agentLive={agent.live} autoTrade={agent.autoTrade} onClose={() => setPanel(null)} />
+          <RiskPanel
+            risk={risk}
+            killSwitch={killSwitch}
+            onToggleKill={toggleKill}
+            onUpdateRisk={updateRisk}
+            agentMaxStake={agent.maxStake}
+            onUpdateAgentStake={(maxStake) => updateAgent({ maxStake })}
+            agentLive={agent.live}
+            autoTrade={agent.autoTrade}
+            onClose={() => setPanel(null)}
+          />
         )}
         {panel === "matchmap" && <MatchMapPanel data={matchMap} live={marketsLive} onClose={() => setPanel(null)} />}
         {panel === "log" && <ArbLogPanel logs={logs} live={portfolioLive} onClose={() => setPanel(null)} />}

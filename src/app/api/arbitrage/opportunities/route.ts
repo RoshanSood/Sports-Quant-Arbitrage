@@ -5,6 +5,8 @@ import { detectArbs } from "@/lib/arbitrage/arbEngine";
 import { getAgent } from "@/lib/arbitrage/agentStore";
 import { getRiskSettings } from "@/lib/arbitrage/riskStore";
 import { DEFAULT_AGENT } from "@/lib/arbitrage/seed";
+import { getVenues } from "@/lib/arbitrage/venueStore";
+import { filterMarketsToEnabledVenues } from "@/lib/arbitrage/venueFilters";
 
 function todayDateStr(): string {
   const d = new Date();
@@ -18,13 +20,15 @@ export async function GET(request: NextRequest) {
     const date = request.nextUrl.searchParams.get("date") ?? todayDateStr();
     const agentId = request.nextUrl.searchParams.get("agent") ?? DEFAULT_AGENT.id;
 
-    const [markets, agent, risk] = await Promise.all([
+    const [markets, agent, risk, venues] = await Promise.all([
       getMarkets(date),
       getAgent(agentId).then((a) => a ?? DEFAULT_AGENT),
       getRiskSettings(),
+      getVenues(),
     ]);
 
-    const { matched } = matchMarkets(markets);
+    const activeMarkets = filterMarketsToEnabledVenues(markets, venues);
+    const { matched } = matchMarkets(activeMarkets);
     const { opportunities, rejects, watch } = detectArbs(matched, agent, risk.minLiquidityUsd);
 
     return NextResponse.json({
