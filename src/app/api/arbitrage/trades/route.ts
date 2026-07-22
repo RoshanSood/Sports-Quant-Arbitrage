@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { getAllTrades, getTradesByDate, updateTrade } from "@/lib/arbitrage/tradeStore";
 import { settledPnl } from "@/lib/arbitrage/executionPipeline";
 import { runExecution } from "@/lib/arbitrage/execution/executor";
-import { isAuthorized } from "@/lib/adminAuth";
 import { extractCredsFromHeaders } from "@/lib/kalshiAuth";
 import { extractOnchainCredsFromHeaders } from "@/lib/arbitrage/execution/onchainCreds";
 import type { Trade, TradeMode } from "@/types/arbitrage";
@@ -25,20 +24,17 @@ export async function GET(request: NextRequest) {
 }
 
 // Execute an opportunity through the full pipeline. Paper requests run dry-run (simulated).
-// A "live" request requires admin auth AND passes through the execution gate (agent Live
-// toggle, kill switch, stake cap, adapter credentials) — if any switch fails the trade is
+// A "live" request passes through the execution gate (agent Live toggle, kill switch,
+// stake cap, adapter credentials) — if any switch fails the trade is
 // reported FAILED with the blocking reasons and NO order is placed. A live request is never
 // silently downgraded to a paper trade.
 export async function POST(request: NextRequest) {
   try {
-    const body = (await request.json()) as { opportunityId?: string; date?: string; mode?: TradeMode; password?: string };
+    const body = (await request.json()) as { opportunityId?: string; date?: string; mode?: TradeMode };
     if (!body.opportunityId) {
       return NextResponse.json({ error: "Missing opportunityId" }, { status: 400 });
     }
     const requestedMode = body.mode === "live" ? "live" : "dry_run";
-    if (requestedMode === "live" && !isAuthorized(request, body.password)) {
-      return NextResponse.json({ error: "Live execution requires admin authorization" }, { status: 401 });
-    }
     const date = body.date ?? todayDateStr();
     // Venue creds forwarded from the browser (localStorage → headers); undefined falls
     // back to server env inside each adapter. Used transiently, never persisted/logged.

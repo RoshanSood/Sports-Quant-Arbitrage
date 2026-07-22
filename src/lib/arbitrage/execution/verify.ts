@@ -9,7 +9,7 @@ import { polymarketRegion } from "@/lib/polymarketRegion";
 import { BNB_CHAIN_ID, POLYGON_CHAIN_ID, SX_CHAIN_ID, polygonUsdcAddress } from "./chains";
 import type { OnchainCreds, PolymarketCreds, SxbetCreds } from "./onchainCreds";
 import { pmusBuyingPower, pmusCreds } from "./polymarketUsAuth";
-import { pfAccount, pfApiKey, pfUsdtBalance, pfWalletKey } from "./predictFunAdapter";
+import { pfAccount, pfAccountAddress, pfApiKey, pfUsdtBalance, pfWalletKey } from "./predictFunAdapter";
 import { cbApiKey, cbBalanceResult, cbCurrency } from "./cloudbetAdapter";
 import type { CloudbetCreds, PredictFunCreds } from "./onchainCreds";
 import { polymarketBalanceAllowance } from "./polymarketAdapter";
@@ -141,9 +141,8 @@ export async function verifySx(creds?: SxbetCreds): Promise<VenueVerification> {
   }
 }
 
-// predict.fun (BNB CLOB): confirm the API key + wallet key are present and read USDT
-// buying power on BNB. Balance-only (no on-chain allowance shown — the SDK's setApprovals
-// handles the ERC-1155/ERC-20 approvals separately).
+// predict.fun: confirm the API key + wallet key are present and read Predict Account
+// buying power via the API/SDK. Balance-only.
 export async function verifyPredictFun(creds?: PredictFunCreds): Promise<VenueVerification> {
   const base: VenueVerification = {
     venueId: "predictfun",
@@ -158,12 +157,12 @@ export async function verifyPredictFun(creds?: PredictFunCreds): Promise<VenueVe
   const key = pfWalletKey(creds);
   if (!base.configured || !key) return base;
   try {
-    // Show the account that holds funds (smart account if set, else the signer).
-    const owner = pfAccount(creds) ?? new Wallet(key).address;
-    const bal = await pfUsdtBalance(owner);
+    // Show the Predict Account/deposit address if set, else the signer.
+    const owner = (creds ? await pfAccountAddress(creds) : null) ?? pfAccount(creds) ?? new Wallet(key).address;
+    const bal = await pfUsdtBalance(creds ?? {});
     return { ...base, address: owner, usdcBalance: bal, status: (bal ?? 0) > 0 ? "verified" : "no_balance" };
   } catch (e) {
-    return { ...base, status: "error", message: `predict.fun balance read failed: ${String(e).slice(0, 120)}` };
+    return { ...base, status: "error", message: `predict.fun account/balance read failed: ${String(e).slice(0, 120)}` };
   }
 }
 

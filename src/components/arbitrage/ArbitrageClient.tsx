@@ -77,8 +77,6 @@ export default function ArbitrageClient() {
   const [scanning, setScanning] = useState(true);
   const [soundOn, setSoundOn] = useState(false);
   const [killSwitch, setKillSwitch] = useState(false);
-  // Session admin password for LIVE auto-execution (kept in memory only, never stored).
-  const [livePassword, setLivePassword] = useState("");
   const [agentTrade, setAgentTrade] = useState<AgentTrade | null>(null);
   const tradeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -281,10 +279,10 @@ export default function ArbitrageClient() {
 
   // Execute an opportunity — animate the agent sliding to leg A + edge to leg B, run the
   // full pipeline server-side, mark the agent ✓/✗ by the real result, refresh Portfolio +
-  // Arb Log. `mode:"live"` forwards the admin password + (base64) Kalshi creds; the server
-  // still runs it through the execution gate and downgrades to dry-run if any switch fails.
+  // Arb Log. `mode:"live"` forwards venue creds; the server
+  // still runs it through the execution gate and blocks it if any switch fails.
   const executeOpportunity = useCallback(
-    async (opp: ArbOpportunity, mode: "paper" | "live", password?: string): Promise<ExecResponse> => {
+    async (opp: ArbOpportunity, mode: "paper" | "live"): Promise<ExecResponse> => {
       const legA = opp.legs[0]?.venueId ?? "kalshi";
       const legB = opp.legs[1]?.venueId ?? "polymarket";
       if (tradeTimer.current) clearTimeout(tradeTimer.current);
@@ -299,7 +297,7 @@ export default function ArbitrageClient() {
         res = await fetch("/api/arbitrage/trades", {
           method: "POST",
           headers,
-          body: JSON.stringify({ opportunityId: opp.id, date: todayDateStr(), mode, password }),
+          body: JSON.stringify({ opportunityId: opp.id, date: todayDateStr(), mode }),
         }).then((r) => r.json());
       } catch (e) {
         console.error(e);
@@ -363,11 +361,11 @@ export default function ArbitrageClient() {
 
   // Auto-execute: when auto-trade is on and scanning is live, fire each qualifying
   // opportunity once (dedup via a fired-set). Mode is LIVE when the agent's Live toggle is
-  // on AND a session admin password is set — otherwise paper. A live fire still passes the
+  // on; otherwise paper. A live fire still passes the
   // server gate (agent.live, kill switch, stake cap, per-venue creds); if it can't fire it
   // is reported FAILED with the blocking reasons — never run as paper. Kill switch / Stop halts it.
   const autoFiredRef = useRef<Set<string>>(new Set());
-  const autoLive = agent.autoTrade && agent.live && Boolean(livePassword);
+  const autoLive = agent.autoTrade && agent.live;
   useEffect(() => {
     if (!agent.autoTrade || !scanning || killSwitch) return;
     const pending = opportunities.filter((o) => !autoFiredRef.current.has(o.id));
@@ -377,7 +375,7 @@ export default function ArbitrageClient() {
       for (const opp of pending) {
         if (cancelled) break;
         autoFiredRef.current.add(opp.id);
-        if (autoLive) await executeOpportunity(opp, "live", livePassword);
+        if (autoLive) await executeOpportunity(opp, "live");
         else await executeOpportunity(opp, "paper");
         await new Promise((r) => setTimeout(r, 800));
       }
@@ -385,7 +383,7 @@ export default function ArbitrageClient() {
     return () => {
       cancelled = true;
     };
-  }, [opportunities, agent.autoTrade, scanning, killSwitch, autoLive, livePassword, executeOpportunity]);
+  }, [opportunities, agent.autoTrade, scanning, killSwitch, autoLive, executeOpportunity]);
 
   // Auto-scan: while Scanning is on, re-ingest fresh quotes back-to-back (a new scan
   // starts as soon as the previous finishes) so prices — and auto-execution — stay as
@@ -464,7 +462,7 @@ export default function ArbitrageClient() {
           <PortfolioPanel trades={trades} live={portfolioLive} onSettle={settleTrade} onClose={() => setPanel(null)} />
         )}
         {panel === "risk" && (
-          <RiskPanel risk={risk} killSwitch={killSwitch} onToggleKill={toggleKill} onUpdateRisk={updateRisk} agentLive={agent.live} autoTrade={agent.autoTrade} livePassword={livePassword} onLivePassword={setLivePassword} onClose={() => setPanel(null)} />
+          <RiskPanel risk={risk} killSwitch={killSwitch} onToggleKill={toggleKill} onUpdateRisk={updateRisk} agentLive={agent.live} autoTrade={agent.autoTrade} onClose={() => setPanel(null)} />
         )}
         {panel === "matchmap" && <MatchMapPanel data={matchMap} live={marketsLive} onClose={() => setPanel(null)} />}
         {panel === "log" && <ArbLogPanel logs={logs} live={portfolioLive} onClose={() => setPanel(null)} />}

@@ -21,10 +21,9 @@ export default function PlayModal({
 }: {
   opp: ArbOpportunity;
   onClose: () => void;
-  onExecute: (opp: ArbOpportunity, mode: "paper" | "live", password?: string) => Promise<ExecResponse>;
+  onExecute: (opp: ArbOpportunity, mode: "paper" | "live") => Promise<ExecResponse>;
 }) {
   const [mode, setMode] = useState<"paper" | "live">("paper");
-  const [password, setPassword] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [outcome, setOutcome] = useState<ExecResponse>(null);
 
@@ -32,7 +31,7 @@ export default function PlayModal({
     setSubmitting(true);
     setOutcome(null);
     try {
-      const res = await onExecute(opp, mode, mode === "live" ? password : undefined);
+      const res = await onExecute(opp, mode);
       if (mode === "paper" && (res?.result === "executed" || res?.result === "partial")) {
         onClose();
         return;
@@ -113,14 +112,6 @@ export default function PlayModal({
                   will <strong>not</strong> run as a paper trade.
                 </span>
               </div>
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="admin password"
-                className="w-full rounded bg-[#0b0d11] border px-2 py-1 text-[11px] text-gray-200"
-                style={{ borderColor: "#2a2f3e" }}
-              />
             </div>
           )}
 
@@ -155,7 +146,7 @@ export default function PlayModal({
           <button onClick={onClose} className="px-3 py-1.5 rounded text-xs text-gray-400 hover:text-white">Close</button>
           <button
             onClick={confirm}
-            disabled={submitting || (mode === "live" && !password)}
+            disabled={submitting}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-semibold text-white disabled:opacity-40"
             style={{ background: mode === "live" ? "#dc2626" : "#d946ef" }}
           >

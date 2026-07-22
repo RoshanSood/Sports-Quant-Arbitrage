@@ -13,8 +13,6 @@ export default function RiskPanel({
   onUpdateRisk,
   agentLive,
   autoTrade,
-  livePassword,
-  onLivePassword,
   onClose,
 }: {
   risk: RiskSettings;
@@ -23,8 +21,6 @@ export default function RiskPanel({
   onUpdateRisk: (partial: Partial<RiskSettings>) => void;
   agentLive: boolean;
   autoTrade: boolean;
-  livePassword: string;
-  onLivePassword: (v: string) => void;
   onClose: () => void;
 }) {
   const exposurePct = risk.maxExposure > 0 ? Math.min(1, risk.currentExposure / risk.maxExposure) : 0;
@@ -49,9 +45,9 @@ export default function RiskPanel({
 
   const STAKE_PRESETS = [5, 10, 25, 50, 100];
 
-  // Auto-execution is LIVE (real money, no click) only when: auto-trade on + agent Live
-  // toggle on + a session admin password entered here. Otherwise auto-trade runs paper.
-  const autoLiveArmed = autoTrade && agentLive && Boolean(livePassword);
+  // Auto-execution is LIVE (real money, no click) when auto-trade and the agent Live
+  // toggle are both on. Every order still passes the server gate and risk cap.
+  const autoLiveArmed = autoTrade && agentLive;
 
   return (
     <FloatingPanel title="Risk" onClose={onClose} width="max-w-md">
@@ -150,19 +146,11 @@ export default function RiskPanel({
           </span>
         </div>
         <p className="text-[10px] text-gray-500 mb-1.5">
-          Fires trades automatically with no click. Needs auto-trade ON, the agent&apos;s Live toggle ON, and the admin
-          password below. Every trade still passes the gate + the ${risk.maxLiveStakeUsd} cap above.
+          Fires trades automatically with no click. Needs auto-trade ON and the agent&apos;s Live toggle ON.
+          Every trade still passes the gate + the ${risk.maxLiveStakeUsd} cap above.
         </p>
-        <input
-          type="password"
-          value={livePassword}
-          onChange={(e) => onLivePassword(e.target.value)}
-          placeholder="admin password (kept in memory only)"
-          className="w-full rounded bg-[#0b0d11] border px-2 py-1 text-[11px] text-gray-200"
-          style={{ borderColor: "#2a2f3e" }}
-        />
         <div className="text-[10px] mt-1 text-gray-500">
-          {!autoTrade ? "Turn on auto-trade (top bar) to enable." : !agentLive ? "Turn on the agent's Live toggle (Settings) to go live — otherwise auto-trade is paper." : !livePassword ? "Enter the admin password to arm live." : "Armed: real trades will fire automatically."}
+          {!autoTrade ? "Turn on auto-trade (top bar) to enable." : !agentLive ? "Turn on the agent's Live toggle (Settings) to go live - otherwise auto-trade is paper." : "Armed: real trades will fire automatically."}
         </div>
       </div>
 

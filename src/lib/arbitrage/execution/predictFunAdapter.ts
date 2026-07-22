@@ -1,5 +1,7 @@
-// predict.fun live order adapter (BNB Chain, USDT). Signs a marketable LIMIT BUY with the
-// OFFICIAL @predictdotfun/sdk (ethers v6 — matches our stack) and posts it to
+// predict.fun live order adapter. Balance verification authenticates the Predict Account
+// and reads the SDK's protocol USDT balance; order signing uses the official SDK's
+// BNB-native CLOB flow.
+// Signs a marketable LIMIT BUY with the OFFICIAL @predictdotfun/sdk (ethers v6) and posts it to
 // POST /v1/orders with the x-api-key. The leg's nativeMarketId is the predict.fun market
 // id and nativeSide is the outcome's on-chain token id. Credentials come from env
 // (PREDICTFUN_API_KEY + PREDICTFUN_WALLET_KEY); the wallet key never leaves the process.
@@ -9,9 +11,9 @@
 // the SDK's documented path. Before trading, run the SDK's setApprovals() once (ERC-1155
 // CTF + ERC-20 USDT to the exchanges) — the wallet also needs a little BNB for that gas.
 
-import { AddressesByChainId, ChainId, OrderBuilder, Side } from "@predictdotfun/sdk";
-import { Contract, JsonRpcProvider, Wallet, formatUnits, parseUnits } from "ethers";
-import { BNB_CHAIN_ID, BNB_USDT_DECIMALS, ERC20_ABI, bnbRpcUrl } from "./chains";
+import { ChainId, OrderBuilder, Side } from "@predictdotfun/sdk";
+import { JsonRpcProvider, Wallet, formatUnits, parseUnits } from "ethers";
+import { BNB_USDT_DECIMALS, bnbRpcUrl } from "./chains";
 import type { PredictFunCreds } from "./onchainCreds";
 import type { ExecutionAdapter, OrderRequest, OrderResult } from "./types";
 
@@ -32,6 +34,7 @@ export function pfAccount(c?: PredictFunCreds): string | undefined {
 }
 
 type PfMarketFlags = { feeRateBps: number; isNegRisk: boolean; isYieldBearing: boolean };
+type JsonRecord = Record<string, unknown>;
 
 async function marketFlags(marketId: string, apiKey: string): Promise<PfMarketFlags> {
   try {
@@ -47,13 +50,140 @@ async function marketFlags(marketId: string, apiKey: string): Promise<PfMarketFl
   }
 }
 
-// USDT balance on BNB for an address (18 decimals).
-export async function pfUsdtBalance(address: string): Promise<number | null> {
+function asRecord(v: unknown): JsonRecord | null {
+  return v && typeof v === "object" && !Array.isArray(v) ? (v as JsonRecord) : null;
+}
+
+function pickString(body: unknown, paths: string[][]): string | null {
+  for (const path of paths) {
+    let cur: unknown = body;
+    for (const key of path) cur = asRecord(cur)?.[key];
+    if (typeof cur === "string" && cur.trim()) return cur.trim();
+  }
+  return null;
+}
+
+function findBalanceLike(body: unknown): number | null {
+  const seen = new Set<unknown>();
+  function walk(v: unknown, key = ""): number | null {
+    if (v == null || seen.has(v)) return null;
+    if (typeof v === "object") seen.add(v);
+    const k = key.toLowerCase();
+    const looksLikeBalance = k.includes("balance") || k.includes("buyingpower") || k.includes("buying_power") || k.includes("available");
+    if ((typeof v === "number" || typeof v === "string") && looksLikeBalance) {
+      const n = Number(v);
+      if (Number.isFinite(n)) return n > 1_000_000 ? n / 1e18 : n;
+    }
+    if (Array.isArray(v)) {
+      for (const item of v) {
+        const found = walk(item, key);
+        if (found != null) return found;
+      }
+    } else {
+      const rec = asRecord(v);
+      if (rec) {
+        for (const [childKey, childValue] of Object.entries(rec)) {
+          const found = walk(childValue, childKey);
+          if (found != null) return found;
+        }
+      }
+    }
+    return null;
+  }
+  return walk(body);
+}
+
+async function fetchJson(url: string, init: RequestInit): Promise<unknown> {
+  const r = await fetch(url, { ...init, cache: "no-store" });
+  const text = await r.text();
+  let body: unknown = {};
   try {
-    const usdt = AddressesByChainId[BNB_CHAIN_ID].USDT;
-    const c = new Contract(usdt, ERC20_ABI, new JsonRpcProvider(bnbRpcUrl()));
-    const raw = (await c.balanceOf(address)) as bigint;
-    return Number(formatUnits(raw, BNB_USDT_DECIMALS));
+    body = text ? JSON.parse(text) : {};
+  } catch {
+    body = { message: text };
+  }
+  if (!r.ok) throw new Error(pickString(body, [["message"], ["error"]]) ?? `HTTP ${r.status}`);
+  return body;
+}
+
+async function pfJwt(apiKey: string, walletKey: string, account?: string): Promise<string> {
+  const signer = new Wallet(walletKey, new JsonRpcProvider(bnbRpcUrl()));
+  const msgBody = await fetchJson(`${API}/v1/auth/message`, { headers: { "x-api-key": apiKey, Accept: "application/json" } });
+  const message = pickString(msgBody, [["data", "message"], ["message"], ["data"]]);
+  if (!message) throw new Error("auth message missing from predict.fun");
+
+  const signature = account
+    ? await (await OrderBuilder.make(ChainId.BnbMainnet, signer, { predictAccount: account })).signPredictAccountMessage(message)
+    : await signer.signMessage(message);
+
+  const attempts = account
+    ? [
+        { signer: signer.address, account, signature },
+        { signer: signer.address, account, signature, message },
+        { address: account, signature },
+      ]
+    : [
+        { signer: signer.address, signature },
+        { address: signer.address, signature },
+        { address: signer.address, signature, message },
+      ];
+
+  let lastError = "auth failed";
+  for (const data of attempts) {
+    try {
+      const body = await fetchJson(`${API}/v1/auth`, {
+        method: "POST",
+        headers: { "x-api-key": apiKey, "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify(data),
+      });
+      const token = pickString(body, [["data", "token"], ["token"]]);
+      if (token) return token;
+      lastError = "auth response missing token";
+    } catch (e) {
+      lastError = String(e).slice(0, 120);
+    }
+  }
+  throw new Error(lastError);
+}
+
+async function pfAccountApiBalance(c: PredictFunCreds): Promise<{ address: string | null; balance: number | null; message?: string }> {
+  const apiKey = pfApiKey(c);
+  const walletKey = pfWalletKey(c);
+  if (!apiKey || !walletKey) return { address: null, balance: null };
+  const account = pfAccount(c);
+  const token = await pfJwt(apiKey, walletKey, account);
+  const body = await fetchJson(`${API}/v1/account`, {
+    headers: { "x-api-key": apiKey, Authorization: `Bearer ${token}`, Accept: "application/json" },
+  });
+  return {
+    address: pickString(body, [["data", "address"], ["address"]]),
+    balance: findBalanceLike(body),
+    message: "predict.fun account authenticated",
+  };
+}
+
+export async function pfUsdtBalance(c: PredictFunCreds): Promise<number | null> {
+  try {
+    const apiBalance = await pfAccountApiBalance(c);
+    if (apiBalance.balance != null) return apiBalance.balance;
+  } catch {
+    // Fall through to the SDK's on-protocol balance read.
+  }
+  try {
+    const key = pfWalletKey(c);
+    if (!key) return null;
+    const signer = new Wallet(key, new JsonRpcProvider(bnbRpcUrl()));
+    const account = pfAccount(c);
+    const builder = await OrderBuilder.make(ChainId.BnbMainnet, signer, account ? { predictAccount: account } : undefined);
+    return Number(formatUnits(await builder.balanceOf(), BNB_USDT_DECIMALS));
+  } catch {
+    return null;
+  }
+}
+
+export async function pfAccountAddress(c: PredictFunCreds): Promise<string | null> {
+  try {
+    return (await pfAccountApiBalance(c)).address;
   } catch {
     return null;
   }
@@ -72,8 +202,7 @@ export class PredictFunExecutionAdapter implements ExecutionAdapter {
     if (!key) return null;
     try {
       // Prefer the ZeroDev smart account (where the USDT lives); fall back to the signer.
-      const owner = pfAccount(this.creds) ?? new Wallet(key).address;
-      return await pfUsdtBalance(owner);
+      return await pfUsdtBalance(this.creds ?? {});
     } catch {
       return null;
     }
