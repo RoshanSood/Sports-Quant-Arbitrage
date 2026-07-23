@@ -3,10 +3,10 @@
 // We post a marketable BACK bet to POST /pub/v3/bets/place with the X-API-Key, mapping our
 // contract/limit model onto Cloudbet's stake/odds model:
 //   • decimal limit odds  = 100 / limitPriceCents               (min odds we'll accept)
-//   • stake (currency)     = sizeContracts * limitPriceCents/100 (cost at the limit)
+//   • stake (currency)     = USD cost at the limit / USD value per currency unit
 //   • acceptPriceChange    = BETTER  → fill only at that price or better (limit semantics)
-// Contracts filled ($1-payout units) = stake * acceptedOdds. Credentials: an API key
-// (CLOUDBET_API_KEY) + the settlement currency (CLOUDBET_CURRENCY, default USDT). The key
+// Contracts filled ($1-payout units) = stake * acceptedOdds * USD value. Credentials: an API key
+// (CLOUDBET_API_KEY) + the settlement currency (CLOUDBET_CURRENCY, default USDC). The key
 // is used only to sign the request and is never persisted/logged.
 //
 // UNVALIDATED — confirm the create-bet response envelope + your currency code with a $1
@@ -26,6 +26,17 @@ export function cbCurrency(c?: CloudbetCreds): string {
   // Default to USDC (most Cloudbet crypto balances); override per-request or via
   // CLOUDBET_CURRENCY for USDT/BTC/ETH/etc.
   return c?.currency?.trim() || process.env.CLOUDBET_CURRENCY?.trim() || "USDC";
+}
+
+// The arb engine sizes every leg in USD. Stablecoins map one-for-one; volatile/native
+// Cloudbet currencies require an explicit USD rate before live betting can be enabled.
+// This prevents (for example) treating a 1 SOL stake as $1.
+export function cbUsdPerCurrencyUnit(currency: string): number | null {
+  const code = currency.trim().toUpperCase();
+  if (["USD", "USDC", "USDT", "USDP", "DAI"].includes(code)) return 1;
+  const raw = process.env[`CLOUDBET_${code}_USD_RATE`]?.trim() || process.env.CLOUDBET_CURRENCY_USD_RATE?.trim();
+  const rate = Number(raw);
+  return Number.isFinite(rate) && rate > 0 ? rate : null;
 }
 
 // Account balance for a settlement currency (units of that currency; USDC/USDT ≈ USD).
@@ -73,29 +84,39 @@ export class CloudbetExecutionAdapter implements ExecutionAdapter {
   constructor(private creds?: CloudbetCreds) {}
 
   supportsLive(): boolean {
-    return Boolean(cbApiKey(this.creds));
+    return Boolean(cbApiKey(this.creds) && cbUsdPerCurrencyUnit(cbCurrency(this.creds)));
   }
 
   async getBalanceUsd(): Promise<number | null> {
     const key = cbApiKey(this.creds);
     if (!key) return null;
-    return cbBalance(key, cbCurrency(this.creds));
+    const currency = cbCurrency(this.creds);
+    const rate = cbUsdPerCurrencyUnit(currency);
+    if (rate == null) return null;
+    const nativeBalance = await cbBalance(key, currency);
+    return nativeBalance == null ? null : nativeBalance * rate;
   }
 
   async placeOrder(req: OrderRequest): Promise<OrderResult> {
     const apiKey = cbApiKey(this.creds);
     if (!apiKey) return reject(req, "Cloudbet API key not configured");
+    const currency = cbCurrency(this.creds);
+    const usdPerCurrencyUnit = cbUsdPerCurrencyUnit(currency);
+    if (usdPerCurrencyUnit == null) {
+      return reject(req, `Cloudbet live sizing needs CLOUDBET_${currency.toUpperCase()}_USD_RATE`);
+    }
     const eventId = req.nativeMarketId;
     const marketUrl = req.nativeSide; // e.g. "baseball.moneyline/home"
     if (!eventId || !marketUrl) return reject(req, "missing Cloudbet event/market — live bet not wired for this leg");
     if (req.limitPriceCents <= 0 || req.limitPriceCents >= 100) return reject(req, "invalid Cloudbet limit price");
 
     const decimalLimit = 100 / req.limitPriceCents; // min odds we'll accept
-    const stake = (req.sizeContracts * req.limitPriceCents) / 100; // cost at the limit, in currency
+    const stakeUsd = (req.sizeContracts * req.limitPriceCents) / 100;
+    const stake = stakeUsd / usdPerCurrencyUnit;
     const referenceId = crypto.randomUUID();
     const body = {
       referenceId,
-      currency: cbCurrency(this.creds),
+      currency,
       eventId: String(eventId),
       marketUrl,
       price: decimalLimit.toFixed(4),
@@ -131,7 +152,7 @@ export class CloudbetExecutionAdapter implements ExecutionAdapter {
       }
 
       const acceptedOdds = Number(b.price) || decimalLimit;
-      const filledContracts = Math.max(1, Math.round(stake * acceptedOdds));
+      const filledContracts = Math.max(1, Math.round(stake * acceptedOdds * usdPerCurrencyUnit));
       return {
         ok: true,
         orderId: referenceId,
@@ -154,8 +175,10 @@ export class CloudbetExecutionAdapter implements ExecutionAdapter {
     const status = (s?.status ?? "").toUpperCase();
     if (PLACED_STATUSES.has(status)) {
       const odds = Number(s?.price) || 100 / req.limitPriceCents;
-      const stake = (req.sizeContracts * req.limitPriceCents) / 100;
-      return { status: "settled", filledContracts: Math.max(1, Math.round(stake * odds)) };
+      const rate = cbUsdPerCurrencyUnit(cbCurrency(this.creds));
+      if (rate == null) return { status: "unknown" };
+      const stake = ((req.sizeContracts * req.limitPriceCents) / 100) / rate;
+      return { status: "settled", filledContracts: Math.max(1, Math.round(stake * odds * rate)) };
     }
     if (status === "PENDING_ACCEPTANCE") return { status: "pending" };
     return { status: "failed", filledContracts: 0 };

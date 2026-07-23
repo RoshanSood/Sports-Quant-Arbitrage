@@ -12,7 +12,16 @@ type Tab = "status" | "live" | "edges" | "settings" | "credentials";
 // Live credential verification for the Status tab — reflects the venue's REAL state
 // (a signed balance read via /api/arbitrage/execution/status) rather than the seeded
 // venue.status. Forwards the browser-stored creds as headers; re-checks when creds change.
-type VenueVerify = { venueId: string; configured: boolean; usdcBalance: number | null; allowance: number | null; status: string; message?: string };
+type VenueVerify = {
+  venueId: string;
+  configured: boolean;
+  usdcBalance: number | null;
+  nativeBalance?: number | null;
+  balanceCurrency?: string | null;
+  allowance: number | null;
+  status: string;
+  message?: string;
+};
 
 function useVenueVerification(venueId: string): { v: VenueVerify | null; loading: boolean } {
   const [v, setV] = useState<VenueVerify | null>(null);
@@ -111,8 +120,14 @@ export default function VenueDrawer({
                 </span>
               )}
             </KV>
-            {verify?.configured && verify.usdcBalance != null && (
-              <KV label={venue.id === "kalshi" ? "Balance" : "USDC Balance"}><span className="text-gray-200">${verify.usdcBalance.toFixed(2)}</span></KV>
+            {verify?.configured && (verify.usdcBalance != null || verify.nativeBalance != null) && (
+              <KV label={venue.id === "cloudbet" ? "Balance" : venue.id === "kalshi" ? "Balance" : "USDC Balance"}>
+                <span className="text-gray-200">
+                  {venue.id === "cloudbet" && verify.nativeBalance != null
+                    ? `${verify.nativeBalance.toFixed(6)} ${verify.balanceCurrency ?? ""}`
+                    : `$${verify.usdcBalance?.toFixed(2)}`}
+                </span>
+              </KV>
             )}
             <KV label="Last Update"><span className="text-gray-300">{liveStatus || venue.status === "connected" ? "<1s ago" : "—"}</span></KV>
             <KV label="Active Edges"><span className="text-gray-300">{venueEdges.length}</span></KV>
@@ -292,6 +307,8 @@ type ExecStatus = {
   address: string | null;
   chainId: number | null;
   usdcBalance: number | null;
+  nativeBalance?: number | null;
+  balanceCurrency?: string | null;
   allowance: number | null;
   status: string;
   message?: string;
@@ -582,11 +599,17 @@ function OnchainStatus({ venueId }: { venueId: string }) {
             </KV>
             <KV label={isCb ? "Currency" : isPf ? "Account" : polyUs ? "Key ID" : "Wallet"}><span className="text-gray-300 font-mono">{status.address ?? "—"}</span></KV>
             {!polyUs && !isCb && <KV label={isPoly ? "Trading chain" : "Chain"}><span className="text-gray-300">{chainName} ({status.chainId})</span></KV>}
-            <KV label={isCb ? "Balance" : isPf ? "USDT Balance" : polyUs ? "Buying power" : "USDC Balance"}><span className="text-gray-200">{status.usdcBalance != null ? `$${status.usdcBalance.toFixed(2)}` : "—"}</span></KV>
+            <KV label={isCb ? "Balance" : isPf ? "USDT Balance" : polyUs ? "Buying power" : "USDC Balance"}>
+              <span className="text-gray-200">
+                {isCb && status.nativeBalance != null
+                  ? `${status.nativeBalance.toFixed(6)} ${status.balanceCurrency ?? status.address ?? ""}`
+                  : status.usdcBalance != null ? `$${status.usdcBalance.toFixed(2)}` : "—"}
+              </span>
+            </KV>
             {venueId === "sxbet" && (
               <KV label="USDC Allowance"><span className="text-gray-200">{status.allowance != null ? `$${status.allowance.toFixed(2)}` : "—"}</span></KV>
             )}
-            {status.message && <p className="text-[10px] text-red-400 pt-1">{status.message}</p>}
+            {status.message && <p className={`text-[10px] pt-1 ${status.status === "verified" ? "text-amber-400" : "text-red-400"}`}>{status.message}</p>}
 
             {(venueId === "sxbet" || isPf || (isPoly && !polyUs)) && (
               <div className="pt-2 mt-1 border-t space-y-1.5" style={{ borderColor: "#1e2130" }}>

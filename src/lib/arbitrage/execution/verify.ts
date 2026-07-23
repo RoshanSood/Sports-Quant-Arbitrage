@@ -10,7 +10,7 @@ import { BNB_CHAIN_ID, POLYGON_CHAIN_ID, SX_CHAIN_ID, polygonUsdcAddress } from 
 import type { OnchainCreds, PolymarketCreds, SxbetCreds } from "./onchainCreds";
 import { pmusBuyingPower, pmusCreds } from "./polymarketUsAuth";
 import { pfAccount, pfAccountAddress, pfApiKey, pfUsdtBalance, pfWalletKey } from "./predictFunAdapter";
-import { cbApiKey, cbBalanceResult, cbCurrency } from "./cloudbetAdapter";
+import { cbApiKey, cbBalanceResult, cbCurrency, cbUsdPerCurrencyUnit } from "./cloudbetAdapter";
 import type { CloudbetCreds, PredictFunCreds } from "./onchainCreds";
 import { polymarketBalanceAllowance } from "./polymarketAdapter";
 import { getSxMetadata } from "./sxMeta";
@@ -22,6 +22,8 @@ export type VenueVerification = {
   address: string | null; // EOA (wallet venues) — masked identity
   chainId: number | null;
   usdcBalance: number | null; // USD
+  nativeBalance?: number | null; // venue-native units when the account is not USD-denominated
+  balanceCurrency?: string | null;
   allowance: number | null; // USDC spending allowance (wallet venues that need it)
   spender: string | null; // allowance spender (SX transfer proxy)
   status: "missing" | "verified" | "no_balance" | "needs_allowance" | "error";
@@ -186,7 +188,18 @@ export async function verifyCloudbet(creds?: CloudbetCreds): Promise<VenueVerifi
   if (!key) return base;
   const r = await cbBalanceResult(key, currency);
   if (!r.ok) return { ...base, status: "error", message: `Cloudbet balance read failed: ${r.detail}` };
-  return { ...base, usdcBalance: r.amount, status: r.amount > 0 ? "verified" : "no_balance" };
+  const usdRate = cbUsdPerCurrencyUnit(currency);
+  return {
+    ...base,
+    address: currency,
+    nativeBalance: r.amount,
+    balanceCurrency: currency,
+    usdcBalance: usdRate == null ? null : r.amount * usdRate,
+    status: r.amount > 0 ? "verified" : "no_balance",
+    message: usdRate == null
+      ? `Connected with ${currency}; live USD sizing is disabled until CLOUDBET_${currency.toUpperCase()}_USD_RATE is configured.`
+      : undefined,
+  };
 }
 
 export async function verifyAllVenues(
