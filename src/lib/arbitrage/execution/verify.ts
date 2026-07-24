@@ -54,6 +54,10 @@ export async function verifyPolymarket(creds?: PolymarketCreds): Promise<VenueVe
   return polymarketRegion() === "us" ? verifyPolymarketUs(creds) : verifyPolymarketIntl(creds);
 }
 
+function normalizeFunder(value?: string): string | undefined {
+  return value?.trim().match(/^0x[a-fA-F0-9]{40}/)?.[0];
+}
+
 // US: a SIGNED account-balances read confirms the Key ID + Ed25519 secret work + shows
 // USD buying power. No wallet/on-chain.
 async function verifyPolymarketUs(creds?: PolymarketCreds): Promise<VenueVerification> {
@@ -89,7 +93,7 @@ async function verifyPolymarketIntl(creds?: PolymarketCreds): Promise<VenueVerif
   if (!base.configured) return base;
   const eoa = deriveEoa("polymarket", creds?.key);
   if (!eoa) return { ...base, status: "error", message: "invalid Polymarket wallet key" };
-  const owner = creds?.funder?.trim() || process.env.POLYMARKET_FUNDER?.trim() || eoa; // proxy wallets fund via a funder addr
+  const owner = normalizeFunder(creds?.funder) || normalizeFunder(process.env.POLYMARKET_DEPOSIT_WALLET) || normalizeFunder(process.env.POLYMARKET_FUNDER) || eoa; // proxy wallets fund via a funder addr
   const key = walletKey("polymarket", creds?.key);
   if (key) {
     try {
@@ -166,7 +170,7 @@ export async function verifyPredictFun(creds?: PredictFunCreds): Promise<VenueVe
   }
 }
 
-// Cloudbet (crypto sportsbook): confirm the API key is present and read the settlement
+// CloudBet (crypto sportsbook): confirm the API key is present and read the settlement
 // currency's account balance. Balance-only — a bet has no on-chain allowance, and books
 // don't expose an order book. `address` carries the currency label (short strings pass the
 // status route's masker unchanged) so the UI can show what the balance is denominated in.
@@ -185,7 +189,7 @@ export async function verifyCloudbet(creds?: CloudbetCreds): Promise<VenueVerifi
   };
   if (!key) return base;
   const r = await cbBalanceResult(key, currency);
-  if (!r.ok) return { ...base, status: "error", message: `Cloudbet balance read failed: ${r.detail}` };
+  if (!r.ok) return { ...base, status: "error", message: `CloudBet balance read failed: ${r.detail}` };
   return { ...base, usdcBalance: r.amount, status: r.amount > 0 ? "verified" : "no_balance" };
 }
 

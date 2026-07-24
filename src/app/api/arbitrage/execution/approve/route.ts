@@ -14,11 +14,15 @@ import {
 } from "@/lib/arbitrage/execution/chains";
 import { getSxMetadata } from "@/lib/arbitrage/execution/sxMeta";
 import { extractOnchainCredsFromHeaders } from "@/lib/arbitrage/execution/onchainCreds";
-import { approveUsdc, hasWalletKey } from "@/lib/arbitrage/execution/wallet";
+import { approveUsdc, hasWalletKey, walletKey } from "@/lib/arbitrage/execution/wallet";
 import { POLYMARKET_DEPOSIT_WALLET_SIG_TYPE, updatePolymarketBalanceAllowance } from "@/lib/arbitrage/execution/polymarketAdapter";
 import { pfSetApprovals, pfWalletKey } from "@/lib/arbitrage/execution/predictFunAdapter";
 
 type Body = { venue?: "polymarket" | "sxbet" | "predictfun"; password?: string; amountUsd?: number };
+
+function normalizeAddress(value?: string): string | undefined {
+  return value?.trim().match(/^0x[a-fA-F0-9]{40}/)?.[0];
+}
 
 export async function POST(req: Request) {
   let body: Body = {};
@@ -56,15 +60,21 @@ export async function POST(req: Request) {
   }
 
   const onchain = extractOnchainCredsFromHeaders(req.headers);
-  const keyOverride = venue === "polymarket" ? onchain.polymarket?.key : onchain.sxbet?.key;
+  const polyCreds = onchain.polymarket;
+  const keyOverride = venue === "polymarket" ? polyCreds?.key : onchain.sxbet?.key;
   if (!hasWalletKey(venue, keyOverride)) {
     return NextResponse.json({ error: `${venue} wallet key not provided (enter it in the venue Credentials tab or set it server-side)` }, { status: 400 });
   }
 
   try {
     if (venue === "polymarket") {
-      if (onchain.polymarket?.sigType === POLYMARKET_DEPOSIT_WALLET_SIG_TYPE) {
-        await updatePolymarketBalanceAllowance(keyOverride!, onchain.polymarket.funder, onchain.polymarket.sigType);
+      const depositWallet = normalizeAddress(process.env.POLYMARKET_DEPOSIT_WALLET);
+      const uiFunder = normalizeAddress(polyCreds?.funder);
+      const envSigType = Number(process.env.POLYMARKET_SIG_TYPE);
+      const sigType = polyCreds?.sigType ?? (Number.isFinite(envSigType) ? envSigType : undefined);
+      if (uiFunder || depositWallet || sigType === POLYMARKET_DEPOSIT_WALLET_SIG_TYPE) {
+        const funder = uiFunder || depositWallet || normalizeAddress(process.env.POLYMARKET_FUNDER);
+        await updatePolymarketBalanceAllowance(walletKey("polymarket", keyOverride)!, funder, sigType);
         return NextResponse.json({ venue, updated: "polymarket-balance-allowance" });
       }
       // intl: approve both exchanges (regular + neg-risk) so either market type can fill.

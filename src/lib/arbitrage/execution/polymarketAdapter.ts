@@ -41,13 +41,23 @@ function signatureType(sig?: number): SignatureTypeV2 {
 // network, so we do it once per key (UI-entered or env). Keyed by the raw key string.
 const clientCache = new Map<string, ClobClient>();
 
-async function buildClient(key: string, funderOverride?: string, sigType?: number): Promise<ClobClient> {
+function normalizeFunder(value?: string): string | undefined {
+  return value?.trim().match(/^0x[a-fA-F0-9]{40}/)?.[0];
+}
+
+function configuredDepositWallet(): string | undefined {
+  return normalizeFunder(process.env.POLYMARKET_DEPOSIT_WALLET);
+}
+
+async function buildClient(key: string, funderOverride?: string, sigTypeOverride?: number): Promise<ClobClient> {
   const wallet = new Wallet(key);
   const signer = clobSignerShim(wallet);
   const host = polymarketClobHost();
   const chainId = POLYGON_CHAIN_ID as Chain;
-  const st = signatureType(sigType);
-  const funder = funderOverride?.trim() || process.env.POLYMARKET_FUNDER?.trim() || (await wallet.getAddress());
+  const depositWallet = configuredDepositWallet();
+  const uiFunder = normalizeFunder(funderOverride);
+  const funder = uiFunder || depositWallet || normalizeFunder(process.env.POLYMARKET_FUNDER) || (await wallet.getAddress());
+  const st = Number.isFinite(sigTypeOverride) ? signatureType(sigTypeOverride) : depositWallet && funder.toLowerCase() === depositWallet.toLowerCase() ? SignatureTypeV2.POLY_1271 : signatureType();
   const cacheKey = `${key}:${funder.toLowerCase()}:${st}`;
   const cached = clientCache.get(cacheKey);
   if (cached) return cached;
@@ -105,12 +115,14 @@ export async function updatePolymarketBalanceAllowance(key: string, funderOverri
 
 type PostOrderResponse = {
   success?: boolean;
+  error?: string;
   errorMsg?: string;
   orderID?: string;
   status?: string;
   takingAmount?: string; // shares received (BUY)
   makingAmount?: string; // USDC paid (BUY)
 };
+
 
 // avg fill price in cents from the response amounts (USDC paid / shares received),
 // falling back to our limit when the amounts are absent.
@@ -123,12 +135,47 @@ function avgCentsFrom(resp: PostOrderResponse, limitCents: number): number {
   return limitCents;
 }
 
+function floorTo(value: number, decimals: number): number {
+  const scale = 10 ** decimals;
+  return Math.floor((value + Number.EPSILON) * scale) / scale;
+}
+
+function roundTo(value: number, decimals: number): number {
+  const scale = 10 ** decimals;
+  return Math.round((value + Number.EPSILON) * scale) / scale;
+}
+
+export function polymarketFokBuyAmount(sizeContracts: number, limitPriceCents: number): number {
+  return roundTo(sizeContracts * (limitPriceCents / 100), 2);
+}
+
+function filledContractsFrom(resp: PostOrderResponse, fallback: number): number {
+  const shares = Number(resp.takingAmount);
+  return Number.isFinite(shares) && shares > 0 ? shares : fallback;
+}
+
+function orderError(resp: PostOrderResponse): string {
+  const message = resp.errorMsg || resp.error || "";
+  if (/maker address not allowed|deposit wallet flow/i.test(message)) {
+    return "Polymarket rejected direct EOA/MetaMask CLOB order placement; current API requires the deposit-wallet/POLY_1271 flow for this maker";
+  }
+  return message || `order not filled (${resp.status ?? "unknown"})`;
+}
+
 export class PolymarketExecutionAdapter implements ExecutionAdapter {
   id = "polymarket";
   constructor(private creds?: PolymarketCreds) {}
 
   private key(): string | undefined {
     return walletKey("polymarket", this.creds?.key);
+  }
+
+  private funder(): string | undefined {
+    return this.creds?.funder;
+  }
+
+  private sigType(): number | undefined {
+    return this.creds?.sigType;
   }
 
   supportsLive(): boolean {
@@ -142,7 +189,13 @@ export class PolymarketExecutionAdapter implements ExecutionAdapter {
     if (!key) return null;
     const eoa = deriveEoa("polymarket", this.creds?.key);
     if (!eoa) return null;
-    const owner = this.creds?.funder?.trim() || process.env.POLYMARKET_FUNDER?.trim() || eoa;
+    try {
+      const ba = await polymarketBalanceAllowance(key, this.funder(), this.sigType());
+      if (Number.isFinite(ba.balance)) return ba.balance;
+    } catch {
+      // Fall back to a direct on-chain read for older EOA/proxy flows.
+    }
+    const owner = normalizeFunder(this.funder()) || configuredDepositWallet() || normalizeFunder(process.env.POLYMARKET_FUNDER) || eoa;
     try {
       return await usdcBalance(providerFor("polymarket"), polygonUsdcAddress(), owner);
     } catch {
@@ -160,21 +213,24 @@ export class PolymarketExecutionAdapter implements ExecutionAdapter {
 
     const price = req.limitPriceCents / 100; // probability price 0..1
     try {
-      const client = await buildClient(key, this.creds?.funder, this.creds?.sigType);
-      // createOrder auto-resolves tickSize + negRisk for the token and rounds price.
-      const signed = await client.createOrder({ tokenID, price, size: req.sizeContracts, side: Side.BUY });
+      const client = await buildClient(key, this.funder(), this.sigType());
+      const amount = polymarketFokBuyAmount(req.sizeContracts, req.limitPriceCents);
+      if (amount <= 0) return reject(req, "Polymarket order cost rounds below $0.01");
+      // createMarketOrder keeps FOK buy maker amounts at cent precision and derives
+      // the CLOB token amount at Polymarket's required precision.
+      const signed = await client.createMarketOrder({ tokenID, amount, price, side: Side.BUY, orderType: OrderType.FOK });
       const resp = (await client.postOrder(signed, OrderType.FOK)) as PostOrderResponse;
 
       const ok = resp.success === true && Boolean(resp.orderID);
       // FOK is all-or-nothing: success ⇒ fully filled, else nothing filled.
-      const filled = ok ? req.sizeContracts : 0;
+      const filled = ok ? filledContractsFrom(resp, req.sizeContracts) : 0;
       return {
         ok,
         orderId: resp.orderID ?? null,
         filledContracts: filled,
         avgPriceCents: avgCentsFrom(resp, req.limitPriceCents),
         status: ok ? "filled" : "unfilled",
-        error: ok ? undefined : resp.errorMsg || `order not filled (${resp.status ?? "unknown"})`,
+        error: ok ? undefined : orderError(resp),
         raw: resp,
       };
     } catch (e) {

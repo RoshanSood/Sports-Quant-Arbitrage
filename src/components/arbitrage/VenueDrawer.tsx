@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { KeyRound, ShieldCheck } from "lucide-react";
 import type { ArbOpportunity, NormalizedMarket, Venue } from "@/types/arbitrage";
 import { Drawer, Toggle, Pill } from "./ui";
-import { formatCents, formatEdgePct, formatOdds, venueStatusColor, venueStatusLabel } from "./arbFormat";
+import { formatCents, formatEdgePct, formatOdds, venueDisplayName, venueStatusColor, venueStatusLabel } from "./arbFormat";
 import { allAuthHeaders, clearVenueCreds, CREDS_CHANGED_EVENT, emitCredsChanged, loadVenueCreds, onchainAuthHeaders, saveVenueCreds, type CbCreds, type PfCreds, type PolyCreds } from "./venueCreds";
 
 type Tab = "status" | "live" | "edges" | "settings" | "credentials";
@@ -321,7 +321,7 @@ function SaveRow({ onSave, disabled, hasKey, onCancel }: { onSave: () => void; d
 function OnchainStatus({ venueId }: { venueId: string }) {
   const isPf = venueId === "predictfun";
   const isCb = venueId === "cloudbet";
-  const name = venueId === "polymarket" ? "Polymarket" : venueId === "sxbet" ? "SX.bet" : isPf ? "predict.fun" : isCb ? "Cloudbet" : venueId;
+  const name = venueDisplayName(venueId);
   const chainName = venueId === "polymarket" ? "Polygon" : isPf ? "BNB Chain" : "SX Network";
   const [status, setStatus] = useState<ExecStatus | null>(null);
   const [gate, setGate] = useState<ExecGate | null>(null);
@@ -330,7 +330,7 @@ function OnchainStatus({ venueId }: { venueId: string }) {
   const [approving, setApproving] = useState(false);
   const [approveMsg, setApproveMsg] = useState<string | null>(null);
 
-  // Credential entry (write-only). Polymarket intl = wallet key (+ funder/sigType);
+  // Credential entry (write-only). Polymarket intl = owner wallet key + deposit wallet;
   // Polymarket US = Key ID + Ed25519 secret; SX.bet = wallet key. We track only whether
   // creds are stored — never re-read or display them.
   const isPoly = venueId === "polymarket";
@@ -345,17 +345,13 @@ function OnchainStatus({ venueId }: { venueId: string }) {
       return Boolean((loadVenueCreds(venueId) as CbCreds | null)?.apiKey);
     }
     const c = loadVenueCreds(venueId) as PolyCreds | null;
-    return isPoly ? Boolean(c?.key || (c?.keyId && c?.secret)) : Boolean((c as { key?: string } | null)?.key);
+    return isPoly ? Boolean((c?.key && (c.sigType === 0 || c.funder)) || (c?.keyId && c?.secret)) : Boolean((c as { key?: string } | null)?.key);
   };
   const [hasKey, setHasKey] = useState(storedHas);
   const [f1, setF1] = useState(""); // wallet key (intl poly / sx) | Key ID (us poly) | API key (pf)
   const [f2, setF2] = useState(""); // Ed25519 secret (us poly) | wallet key (pf)
   const [funder, setFunder] = useState(""); // poly funder | pf smart-account | cb currency
-  const [sigType, setSigType] = useState(() => {
-    if (!isPoly) return 0;
-    const c = loadVenueCreds(venueId) as PolyCreds | null;
-    return typeof c?.sigType === "number" ? c.sigType : 3;
-  });
+  const [sigType, setSigType] = useState<number>(3);
   const [editing, setEditing] = useState(() => !storedHas());
 
   const load = useCallback(() => {
@@ -390,7 +386,7 @@ function OnchainStatus({ venueId }: { venueId: string }) {
       if (!f1.trim() || !f2.trim()) return;
       saveVenueCreds(venueId, { keyId: f1.trim(), secret: f2.trim() });
     } else if (isPoly) {
-      if (!f1.trim()) return;
+      if (!f1.trim() || (sigType !== 0 && !funder.trim())) return;
       saveVenueCreds(venueId, { key: f1.trim(), funder: funder.trim() || undefined, sigType });
     } else {
       if (!f1.trim()) return;
@@ -457,15 +453,15 @@ function OnchainStatus({ venueId }: { venueId: string }) {
     <div className="space-y-3">
       <div className="rounded-lg border px-3 py-2 text-[11px]" style={{ borderColor: "#3f2d10", background: "#1a160e", color: "#fbbf24" }}>
         <div className="font-semibold">
-          {isCb ? "Cloudbet API key" : isPf ? "predict.fun API key + wallet key" : polyUs ? "Polymarket US API credentials" : isPoly ? "Polymarket wallet key" : "SX.bet wallet key"}
+          {isCb ? "CloudBet API key" : isPf ? "predict.fun API key + wallet key" : polyUs ? "Polymarket US API credentials" : isPoly ? "Polymarket deposit-wallet credentials" : "SX.bet wallet key"}
         </div>
         <p className="text-gray-400 mt-0.5">
           {isCb ? (
             <>
-              Your <strong>API key</strong> (a long JWT) from the Cloudbet dashboard → My Account → API. It authorizes both
+              Your <strong>API key</strong> (a long JWT) from the CloudBet dashboard → My Account → API. It authorizes both
               odds reads and bet placement. Optionally set the <strong>settlement currency</strong> your balance is held in
               (default <strong>USDC</strong>). Kept only in <strong>this browser</strong>, used transiently to sign requests,
-              never stored on the server or shown again. Note: Cloudbet is a sportsbook — a placed bet is final and cannot
+              never stored on the server or shown again. Note: CloudBet is a sportsbook — a placed bet is final and cannot
               be cancelled.
             </>
           ) : isPf ? (
@@ -507,7 +503,7 @@ function OnchainStatus({ venueId }: { venueId: string }) {
         ) : isCb ? (
           <div className="space-y-1.5">
             <label className="text-[10px] uppercase tracking-wide text-gray-500">API key (JWT)</label>
-            <input type="password" value={f1} onChange={(e) => setF1(e.target.value)} placeholder="eyJ… (Cloudbet API key)" autoComplete="off" className="w-full rounded bg-[#0b0d11] border px-2 py-1 text-[11px] text-gray-200 font-mono" style={{ borderColor: "#2a2f3e" }} />
+            <input type="password" value={f1} onChange={(e) => setF1(e.target.value)} placeholder="eyJ... (CloudBet API key)" autoComplete="off" className="w-full rounded bg-[#0b0d11] border px-2 py-1 text-[11px] text-gray-200 font-mono" style={{ borderColor: "#2a2f3e" }} />
             <label className="text-[10px] uppercase tracking-wide text-gray-500">Settlement currency (optional)</label>
             <input value={funder} onChange={(e) => setFunder(e.target.value)} placeholder="USDC (default)" autoComplete="off" className="w-full rounded bg-[#0b0d11] border px-2 py-1 text-[11px] text-gray-200 font-mono" style={{ borderColor: "#2a2f3e" }} />
             <SaveRow onSave={saveKey} disabled={!f1.trim()} hasKey={hasKey} onCancel={() => setEditing(false)} />
@@ -532,11 +528,11 @@ function OnchainStatus({ venueId }: { venueId: string }) {
           </div>
         ) : (
           <div className="space-y-1.5">
-            <label className="text-[10px] uppercase tracking-wide text-gray-500">{name} wallet private key ({chainName})</label>
+            <label className="text-[10px] uppercase tracking-wide text-gray-500">{isPoly ? "Owner wallet private key" : `${name} wallet private key (${chainName})`}</label>
             <input type="password" value={f1} onChange={(e) => setF1(e.target.value)} placeholder="0x… (64-hex private key)" autoComplete="off" className="w-full rounded bg-[#0b0d11] border px-2 py-1 text-[11px] text-gray-200 font-mono" style={{ borderColor: "#2a2f3e" }} />
             {isPoly && (
               <>
-                <label className="text-[10px] uppercase tracking-wide text-gray-500">Funder address {sigType === 0 ? "(optional)" : "(required)"}</label>
+                <label className="text-[10px] uppercase tracking-wide text-gray-500">Funder / deposit wallet address {sigType === 0 ? "(optional)" : "(required)"}</label>
                 <input value={funder} onChange={(e) => setFunder(e.target.value)} placeholder={sigType === 3 ? "0x... Polymarket deposit address" : "0x... blank only for a direct EOA wallet"} className="w-full rounded bg-[#0b0d11] border px-2 py-1 text-[11px] text-gray-200 font-mono" style={{ borderColor: "#2a2f3e" }} />
                 <label className="text-[10px] uppercase tracking-wide text-gray-500">Signature type</label>
                 <select value={sigType} onChange={(e) => setSigType(Number(e.target.value))} className="w-full rounded bg-[#0b0d11] border px-2 py-1 text-[11px] text-gray-200" style={{ borderColor: "#2a2f3e" }}>
@@ -593,7 +589,7 @@ function OnchainStatus({ venueId }: { venueId: string }) {
                 <p className="text-[10px] text-gray-500">
                   {isPf
                     ? "One-time: approve the predict.fun exchanges to move your USDT + outcome shares (required before the first order). Needs a little BNB gas in the signer unless the smart account sponsors it. Signed with your key; admin password gates it."
-                    : isPoly && sigType === 3
+                    : isPoly
                       ? "Refresh Polymarket CLOB balance/allowance for the deposit wallet. Signed with your key; admin password gates the action."
                       : `One-time: approve the ${name} exchange to spend USDC (required before any fill). Signed with your key; admin password gates the action.`}
                 </p>

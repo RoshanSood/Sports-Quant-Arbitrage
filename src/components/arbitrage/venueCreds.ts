@@ -12,7 +12,7 @@ export const CB_CREDS_KEY = "cloudbet_creds";
 
 // predict.fun: x-api-key + wallet private key + (optional) ZeroDev smart-account address.
 export type PfCreds = { apiKey?: string; walletKey?: string; account?: string };
-// Cloudbet: X-API-Key (JWT) + optional settlement currency code (default USDT).
+// CloudBet: X-API-Key (JWT) + optional settlement currency code (default USDT).
 export type CbCreds = { apiKey?: string; currency?: string };
 
 // Polymarket creds carry either region's shape:
@@ -86,21 +86,17 @@ export function emitCredsChanged(): void {
   if (typeof window !== "undefined") window.dispatchEvent(new Event(CREDS_CHANGED_EVENT));
 }
 
-// Headers carrying venue creds. Polymarket intl: base64 wallet key (+ funder/sigType);
-// Polymarket US: Key ID (plain) + base64 Ed25519 secret. SX.bet: base64 wallet key.
-// Whatever is stored is sent; the server uses the set that matches its region.
+// Headers carrying venue creds. Wallet/private keys are base64-encoded in transit so
+// they are not recognizable in routine header dumps. They are decoded server-side and
+// used only for the current request.
 export function onchainAuthHeaders(): Record<string, string> {
   const h: Record<string, string> = {};
   const p = read<PolyCreds>(POLY_CREDS_KEY);
-  if (p?.key) {
-    h["x-polymarket-key"] = btoa(p.key);
-    if (p.funder) h["x-polymarket-funder"] = p.funder;
-    if (p.sigType != null) h["x-polymarket-sig-type"] = String(p.sigType);
-  }
-  if (p?.keyId && p?.secret) {
-    h["x-polymarket-key-id"] = p.keyId;
-    h["x-polymarket-secret"] = btoa(p.secret);
-  }
+  if (p?.key) h["x-polymarket-key"] = btoa(p.key);
+  if (p?.funder) h["x-polymarket-funder"] = p.funder;
+  if (p?.sigType != null) h["x-polymarket-sig-type"] = String(p.sigType);
+  if (p?.keyId) h["x-polymarket-key-id"] = p.keyId;
+  if (p?.secret) h["x-polymarket-secret"] = btoa(p.secret);
   const s = read<SxCreds>(SX_CREDS_KEY);
   if (s?.key) h["x-sxbet-key"] = btoa(s.key);
   // predict.fun: api key (plain) + base64 wallet key + optional smart-account address.
@@ -108,7 +104,7 @@ export function onchainAuthHeaders(): Record<string, string> {
   if (pf?.apiKey) h["x-predictfun-api-key"] = pf.apiKey;
   if (pf?.walletKey) h["x-predictfun-wallet-key"] = btoa(pf.walletKey);
   if (pf?.account) h["x-predictfun-account"] = pf.account;
-  // Cloudbet: api key (plain JWT) + optional currency code. No wallet key to encode.
+  // CloudBet: api key (plain JWT) + optional currency code. No wallet key to encode.
   const cb = read<CbCreds>(CB_CREDS_KEY);
   if (cb?.apiKey) h["x-cloudbet-api-key"] = cb.apiKey;
   if (cb?.currency) h["x-cloudbet-currency"] = cb.currency;
