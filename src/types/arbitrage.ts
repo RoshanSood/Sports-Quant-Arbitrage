@@ -1,8 +1,8 @@
-// Data models for the standalone cross-venue arbitrage module ("Claw Arbs").
-// Field sets mirror the arbitrage manual §6 (Data Models). Kept framework-agnostic
+﻿// Data models for the standalone cross-venue arbitrage module ("Claw Arbs").
+// Field sets mirror the arbitrage manual section 6 (Data Models). Kept framework-agnostic
 // so the same shapes flow through mock data, JSON stores, API routes, and the UI.
 
-// ── Enumerations / unions ────────────────────────────────────────────────────
+// Enumerations / unions
 
 export type VenueId = string;
 
@@ -46,7 +46,7 @@ export type SizingMethod = "equal_profit" | "fixed" | "proportional";
 
 export type StrategyType = "arbitrage" | "value";
 
-// Deterministic halt/decision reason codes (manual §13 + execution codes §18).
+// Deterministic halt/decision reason codes (manual section 13 + execution codes section 18).
 export type ReasonCode =
   | "position_dedup"
   | "identity_dedup"
@@ -69,7 +69,22 @@ export type ReasonCode =
 
 export type ArbResult = "executed" | "halted" | "failed" | "partial" | "naked";
 
-// ── Supporting shapes ────────────────────────────────────────────────────────
+export type PostFillCheck = {
+  checkedAt: string;
+  status: "arb_gone" | "edge_intact" | "not_found" | "not_checked";
+  remainingNetEdge: number | null;
+  edgeDrift: number | null;
+  reason: string;
+};
+
+export type ExecutionStep = {
+  key: string;
+  label: string;
+  status: "pass" | "halt" | "warn" | "info";
+  detail?: string;
+};
+
+// Supporting shapes
 
 export type FeeModel = "kalshi_tier" | "polymarket_flat" | "sxbet_flat" | "placeholder";
 
@@ -107,7 +122,7 @@ export type StakePlan = {
   profitPerLeg: number; // for equal-profit sizing, ~constant across outcomes
 };
 
-// ── Core models (manual §6) ──────────────────────────────────────────────────
+// Core models (manual section 6)
 
 export type Venue = {
   id: VenueId;
@@ -133,7 +148,7 @@ export type Venue = {
 export type NormalizedMarket = {
   venueId: VenueId;
   marketId: string;
-  // Venue-native order identifier + side (Kalshi ticker + yes/no, etc.) — carried so
+  // Venue-native order identifier + side (Kalshi ticker + yes/no, etc.) carried so
   // real execution can place a correct order rather than parse the synthetic marketId.
   nativeMarketId?: string;
   nativeSide?: string;
@@ -166,7 +181,7 @@ export type MatchKey = {
   confidence: number; // 0-1 match confidence
 };
 
-// ── Matching engine outputs (manual §5) ──────────────────────────────────────
+// Matching engine outputs (manual section 5)
 
 export type MatchRejectReason =
   | "match_confidence_low"
@@ -283,12 +298,14 @@ export type Trade = {
   date: string; // YYYYMMDD (storage key)
   finalScore?: { away: number; home: number }; // set at settlement
   nakedLegIndex?: number; // for naked positions, which leg actually filled
+  postFill?: PostFillCheck;
+  executionSteps?: ExecutionStep[];
 };
 
 export type ArbLog = {
   id: string;
   time: string; // ISO timestamp
-  pair: string; // "[CB:kalshi-mlb] Phillies v Reds"
+  pair: string; // "[AG:kalshi-mlb] Phillies v Reds"
   venues: VenueId[];
   edge: number; // fraction
   mode: TradeMode;
@@ -300,7 +317,7 @@ export type ArbLog = {
   date: string; // YYYYMMDD (storage key)
 };
 
-// ── Agent + risk (not in §6 table but required for the default agent + risk panel)
+// Agent + risk (not in section 6 table but required for the default agent + risk panel)
 
 export type Agent = {
   id: string;
@@ -310,7 +327,7 @@ export type Agent = {
   paper: boolean; // paper trading on
   live: boolean; // live execution enabled
   autoTrade: boolean; // auto-fill qualifying paper arbs without a manual Play
-  minEdge: number; // fraction, default 0.005
+  minEdge: number; // fraction, default 0.02
   maxEdge: number; // fraction, default 0.25
   sizingMethod: SizingMethod;
   maxStake: number; // dollars, user cap per arb
@@ -327,12 +344,14 @@ export type RiskSettings = {
   maxOpenPositions: number;
   pauseOnNaked: boolean;
   staleQuoteMs: number;
-  minLiquidityUsd: number; // drop legs with less executable $ than this (manual §13)
+  minLiquidityUsd: number; // drop legs with less executable $ than this (manual section 13)
+  minExpectedProfitUsd: number; // drop tiny arbs whose profit cushion is likely to vanish
+  liquidityStakeBufferMultiple: number; // require top-of-book liquidity >= stake * this multiple
   maxLiveStakeUsd: number; // hard cap on $ any single LIVE trade may commit (UI-configured)
   perVenueCap: Record<VenueId, number>;
 };
 
-// ── Aggregations for API responses ───────────────────────────────────────────
+// Aggregations for API responses
 
 export type PortfolioSummary = {
   mode: TradeMode;

@@ -5,6 +5,7 @@ import type { Trade } from "@/types/arbitrage";
 // Ported from src/lib/liveTradeStore.ts — date-keyed JSON, retains `mode` so paper
 // and real trades coexist in the same store.
 const DATA_DIR = path.join(process.cwd(), "data", "arbitrage", "trades");
+const writeQueues = new Map<string, Promise<unknown>>();
 
 async function ensureDir() {
   await fs.mkdir(DATA_DIR, { recursive: true });
@@ -22,19 +23,32 @@ async function readDateFile(date: string): Promise<Trade[]> {
   }
 }
 
+async function withDateWriteLock<T>(date: string, fn: () => Promise<T>): Promise<T> {
+  const previous = writeQueues.get(date) ?? Promise.resolve();
+  const next = previous.then(fn, fn);
+  writeQueues.set(date, next.finally(() => {
+    if (writeQueues.get(date) === next) writeQueues.delete(date);
+  }));
+  return next;
+}
+
 export async function saveTrade(trade: Trade): Promise<void> {
-  await ensureDir();
-  const existing = await readDateFile(trade.date);
-  await fs.writeFile(tradeFile(trade.date), JSON.stringify([...existing, trade], null, 2), "utf-8");
+  await withDateWriteLock(trade.date, async () => {
+    await ensureDir();
+    const existing = await readDateFile(trade.date);
+    await fs.writeFile(tradeFile(trade.date), JSON.stringify([...existing, trade], null, 2), "utf-8");
+  });
 }
 
 export async function updateTrade(id: string, date: string, updates: Partial<Trade>): Promise<boolean> {
-  const trades = await readDateFile(date);
-  const idx = trades.findIndex((t) => t.id === id);
-  if (idx === -1) return false;
-  trades[idx] = { ...trades[idx], ...updates };
-  await fs.writeFile(tradeFile(date), JSON.stringify(trades, null, 2), "utf-8");
-  return true;
+  return withDateWriteLock(date, async () => {
+    const trades = await readDateFile(date);
+    const idx = trades.findIndex((t) => t.id === id);
+    if (idx === -1) return false;
+    trades[idx] = { ...trades[idx], ...updates };
+    await fs.writeFile(tradeFile(date), JSON.stringify(trades, null, 2), "utf-8");
+    return true;
+  });
 }
 
 export async function getTradesByDate(date: string): Promise<Trade[]> {

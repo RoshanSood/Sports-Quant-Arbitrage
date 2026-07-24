@@ -1,30 +1,14 @@
 "use client";
 
-import { useState } from "react";
+import { Fragment, useState } from "react";
+import { ChevronDown, ChevronRight } from "lucide-react";
 import type { ArbLeg, Trade, TradeMode } from "@/types/arbitrage";
 import { FloatingPanel, StatCard, Pill } from "./ui";
-import { centsToDollars, formatClock, formatDollars, formatEdgePct, formatSignedDollars, timeAgo, tradeStatusColor } from "./arbFormat";
+import { centsToDollars, formatClock, formatDollars, formatEdgePct, formatSignedDollars, timeAgo, tradeStatusColor, venueDisplayName, venueStyle } from "./arbFormat";
 
 const STARTING_BANKROLL = 10000;
 
 // ── Row helpers ──────────────────────────────────────────────────────────────
-
-function venueName(id: string): string {
-  const l = id.toLowerCase();
-  if (l.includes("kalshi")) return "Kalshi";
-  if (l.includes("poly")) return "Poly";
-  if (l.includes("sx")) return "SX";
-  if (l.includes("sport")) return "SM";
-  return id;
-}
-
-function venueStyle(id: string): { color: string; text: string } {
-  const l = id.toLowerCase();
-  if (l.includes("kalshi")) return { color: "#3b82f6", text: "#93c5fd" };
-  if (l.includes("poly")) return { color: "#8b5cf6", text: "#c4b5fd" };
-  if (l.includes("sx")) return { color: "#a855f7", text: "#d8b4fe" };
-  return { color: "#6b7280", text: "#d1d5db" };
-}
 
 // Dollars committed on a leg = contracts × price.
 function legDollars(leg: ArbLeg): number {
@@ -62,6 +46,7 @@ export default function PortfolioPanel({
   onClose: () => void;
 }) {
   const [mode, setMode] = useState<TradeMode>("paper");
+  const [expandedTradeId, setExpandedTradeId] = useState<string | null>(null);
   const rows = trades.filter((t) => t.mode === mode);
 
   const open = rows.filter((t) => t.status === "open" || t.status === "partial" || t.status === "naked");
@@ -159,20 +144,29 @@ export default function PortfolioPanel({
           </thead>
           <tbody>
             {visibleRows.map((t) => {
+              const expanded = expandedTradeId === t.id;
               const venues = [...new Set(t.legs.map((l) => l.venueId))];
               const a = t.legs[0];
               const b = t.legs[1];
               const arbDesc = a && b ? `${a.venueId}_${a.outcome}_vs_${b.venueId}_${b.outcome}` : "";
               const contracts = a?.size ?? 0;
               return (
-                <tr key={t.id} className="border-b align-top" style={{ borderColor: "#15171e" }}>
+                <Fragment key={t.id}>
+                <tr className="border-b align-top" style={{ borderColor: "#15171e" }}>
                   {/* EVENT */}
                   <td className="py-3 pr-3">
+                    <button
+                      onClick={() => setExpandedTradeId(expanded ? null : t.id)}
+                      className="mb-1 inline-flex items-center gap-1 text-[10px] font-semibold text-gray-500 hover:text-gray-300"
+                    >
+                      {expanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+                      Details
+                    </button>
                     <div className="font-semibold text-white">{t.matchup}</div>
                     <div className="flex gap-1 mt-1">
                       {venues.map((v) => {
                         const s = venueStyle(v);
-                        return <Pill key={v} color={s.color} text={s.text}>{venueName(v)}</Pill>;
+                        return <Pill key={v} color={s.color} text={s.text}>{venueDisplayName(v)}</Pill>;
                       })}
                     </div>
                     <div className="flex items-center gap-1 mt-1 text-[10px] text-gray-600">
@@ -227,6 +221,7 @@ export default function PortfolioPanel({
                   </td>
                   {/* ACTIONS */}
                   <td className="py-3 pr-3">
+                    <div className="flex flex-col items-start gap-2">
                     {onSettle && (t.status === "open" || t.status === "partial" || t.status === "naked") && (
                       <button
                         onClick={() => onSettle(t)}
@@ -236,8 +231,25 @@ export default function PortfolioPanel({
                         Settle
                       </button>
                     )}
+                    <a
+                      href={`/api/arbitrage/trades/${encodeURIComponent(t.id)}/postmortem?date=${t.date}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-[10px] font-semibold text-blue-300 hover:text-blue-200"
+                    >
+                      API
+                    </a>
+                    </div>
                   </td>
                 </tr>
+                {expanded && (
+                  <tr className="border-b" style={{ borderColor: "#15171e", background: "#0b0d12" }}>
+                    <td colSpan={10} className="px-4 py-3">
+                      <TradeDetails trade={t} />
+                    </td>
+                  </tr>
+                )}
+                </Fragment>
               );
             })}
             {visibleRows.length === 0 && (
@@ -252,6 +264,63 @@ export default function PortfolioPanel({
   );
 }
 
+function TradeDetails({ trade }: { trade: Trade }) {
+  const postFill = trade.postFill;
+  const postColor =
+    postFill?.status === "arb_gone" ? "#22c55e" : postFill?.status === "edge_intact" ? "#eab308" : "#6b7280";
+  return (
+    <div className="grid gap-3 md:grid-cols-[1fr_1.2fr_1fr] text-[11px]">
+      <div className="rounded-lg border p-3" style={{ borderColor: "#1e2130", background: "#0e1014" }}>
+        <div className="text-[10px] uppercase tracking-wide text-gray-500 mb-2">Post-fill</div>
+        <div className="flex items-center gap-2">
+          <Pill color={postColor} text={postColor}>{postFill?.status?.replace("_", " ") ?? "not checked"}</Pill>
+          {postFill?.remainingNetEdge != null && <span className="text-gray-300">{formatEdgePct(postFill.remainingNetEdge)}</span>}
+        </div>
+        <div className="mt-2 text-gray-400">{postFill?.reason ?? "No post-fill verification stored for this trade."}</div>
+        {postFill?.edgeDrift != null && (
+          <div className="mt-1 text-gray-500">Drift {postFill.edgeDrift >= 0 ? "+" : ""}{formatEdgePct(postFill.edgeDrift)}</div>
+        )}
+      </div>
+
+      <div className="rounded-lg border p-3" style={{ borderColor: "#1e2130", background: "#0e1014" }}>
+        <div className="text-[10px] uppercase tracking-wide text-gray-500 mb-2">Pipeline</div>
+        <div className="grid gap-1.5">
+          {(trade.executionSteps ?? []).map((step) => (
+            <div key={`${trade.id}-${step.key}`} className="flex items-start gap-2">
+              <span
+                className="mt-1 h-1.5 w-1.5 rounded-full shrink-0"
+                style={{ background: step.status === "pass" ? "#22c55e" : step.status === "warn" ? "#eab308" : step.status === "halt" ? "#ef4444" : "#6b7280" }}
+              />
+              <div className="min-w-0">
+                <span className="font-semibold text-gray-200">{step.label}</span>
+                {step.detail && <span className="text-gray-500"> - {step.detail}</span>}
+              </div>
+            </div>
+          ))}
+          {(trade.executionSteps ?? []).length === 0 && <div className="text-gray-500">No gate trail stored.</div>}
+        </div>
+      </div>
+
+      <div className="rounded-lg border p-3" style={{ borderColor: "#1e2130", background: "#0e1014" }}>
+        <div className="text-[10px] uppercase tracking-wide text-gray-500 mb-2">Storage</div>
+        <div className="space-y-1 text-gray-400">
+          <div><span className="text-gray-500">Trade:</span> {trade.id}</div>
+          <div><span className="text-gray-500">Opportunity:</span> {trade.opportunityId}</div>
+          <div><span className="text-gray-500">File:</span> data/arbitrage/trades/{trade.date}.json</div>
+        </div>
+        <div className="mt-3 text-[10px] uppercase tracking-wide text-gray-500">Orders</div>
+        <div className="mt-1 space-y-1">
+          {trade.orderIds.map((id, i) => (
+            <div key={`${trade.id}-order-${i}`} className="truncate text-gray-400">
+              <span className="text-gray-500">{trade.legs[i]?.venueId ?? `leg ${i + 1}`}:</span> {id ?? "none"}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // A position leg: venue on top, then decimal odds (cents) side, then $ committed —
 // mirroring the reference portfolio layout.
 function LegColumn({ leg }: { leg?: ArbLeg }) {
@@ -260,7 +329,7 @@ function LegColumn({ leg }: { leg?: ArbLeg }) {
   const side = leg.label ?? leg.outcome;
   return (
     <td className="py-3 pr-3 text-right align-top whitespace-nowrap">
-      <div className="text-[10px]" style={{ color: s.text }}>{venueName(leg.venueId)}</div>
+      <div className="text-[10px]" style={{ color: s.text }}>{venueDisplayName(leg.venueId)}</div>
       <div className="font-semibold text-white">
         {leg.decimalOdds.toFixed(2)} <span className="text-gray-400">({leg.priceCents}c)</span>{" "}
         <span className="text-gray-300 capitalize">{side}</span>

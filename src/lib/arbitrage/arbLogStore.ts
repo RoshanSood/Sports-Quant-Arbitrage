@@ -3,6 +3,7 @@ import path from "path";
 import type { ArbLog } from "@/types/arbitrage";
 
 const DATA_DIR = path.join(process.cwd(), "data", "arbitrage", "logs");
+const writeQueues = new Map<string, Promise<unknown>>();
 
 function logFile(date: string) {
   return path.join(DATA_DIR, `${date}.json`);
@@ -16,11 +17,22 @@ async function readDateFile(date: string): Promise<ArbLog[]> {
   }
 }
 
+async function withDateWriteLock<T>(date: string, fn: () => Promise<T>): Promise<T> {
+  const previous = writeQueues.get(date) ?? Promise.resolve();
+  const next = previous.then(fn, fn);
+  writeQueues.set(date, next.finally(() => {
+    if (writeQueues.get(date) === next) writeQueues.delete(date);
+  }));
+  return next;
+}
+
 // Append is fire-and-forget at call sites so logging never blocks execution.
 export async function appendLog(log: ArbLog): Promise<void> {
-  await fs.mkdir(DATA_DIR, { recursive: true });
-  const existing = await readDateFile(log.date);
-  await fs.writeFile(logFile(log.date), JSON.stringify([log, ...existing], null, 2), "utf-8");
+  await withDateWriteLock(log.date, async () => {
+    await fs.mkdir(DATA_DIR, { recursive: true });
+    const existing = await readDateFile(log.date);
+    await fs.writeFile(logFile(log.date), JSON.stringify([log, ...existing], null, 2), "utf-8");
+  });
 }
 
 export async function getLogs(date?: string): Promise<ArbLog[]> {

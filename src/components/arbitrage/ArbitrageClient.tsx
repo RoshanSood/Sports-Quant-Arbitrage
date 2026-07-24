@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
@@ -32,7 +32,7 @@ export type PanelKey = "arbs" | "portfolio" | "risk" | "log" | "matchmap" | "ana
 
 // Server response from POST /api/arbitrage/trades. `mode` is the effective mode: "live" if
 // it fired live, "dry_run" if it was an explicit paper request. A blocked live request
-// (`blocked:true`) is reported FAILED with `blockers` — it is never downgraded to paper.
+// (`blocked:true`) is reported FAILED with `blockers` â€” it is never downgraded to paper.
 export type ExecResponse = {
   result?: string;
   reason?: string;
@@ -43,12 +43,14 @@ export type ExecResponse = {
 } | null;
 
 // Live-only: the dashboard renders real ingested data (or honest empty/scanning
-// states) — never mock fixtures. Venues start from the seed so the arena has nodes.
+// states) â€” never mock fixtures. Venues start from the seed so the arena has nodes.
 const USE_MOCK = false;
 
 // Floor gap between back-to-back scans (each scan re-ingests all venues; the natural
 // pace is however long a scan takes, this just prevents a busy-loop if one returns fast).
-const SCAN_MIN_GAP_MS = 1000;
+const SCAN_MIN_GAP_MS = 150;
+const INGEST_POLL_MS = 120;
+const AUTO_BATCH_LIMIT = 4;
 
 function todayDateStr(): string {
   const d = new Date();
@@ -81,8 +83,10 @@ export default function ArbitrageClient() {
   const [killSwitch, setKillSwitch] = useState(false);
   const [agentTrade, setAgentTrade] = useState<AgentTrade | null>(null);
   const tradeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const autoFiredRef = useRef<Set<string>>(new Set());
+  const autoInFlightRef = useRef<Set<string>>(new Set());
 
-  // Live score updates for the games the engine currently maps (Activity → SCORES tab).
+  // Live score updates for the games the engine currently maps (Activity â†’ SCORES tab).
   const [scoreFeed, setScoreFeed] = useState<ScoreEvent[]>([]);
   const prevScores = useRef<Map<string, { home: number; away: number; period: number; state: string }>>(new Map());
 
@@ -110,11 +114,11 @@ export default function ArbitrageClient() {
   }, [markets]);
 
   // Poll ESPN scores for the mapped games; flash a bright-yellow SCORES item when a team
-  // scores. The first sighting of a game sets a baseline (no spam) — only score CHANGES on
+  // scores. The first sighting of a game sets a baseline (no spam) â€” only score CHANGES on
   // a live (in-progress) game emit an event.
   useEffect(() => {
     let cancelled = false;
-    const emoji = (s: string) => (s === "baseball" ? "⚾" : s === "basketball" ? "🏀" : s === "soccer" ? "⚽" : "•");
+    const sportTag = (s: string) => (s === "baseball" ? "[MLB]" : s === "basketball" ? "[WNBA]" : s === "soccer" ? "[SOC]" : "[SCORE]");
     const quarterLabel = (p: number) => (p <= 4 ? `Q${p}` : p === 5 ? "OT" : `OT${p - 4}`);
     async function poll() {
       const data = (await fetch("/api/arbitrage/scores").then((r) => r.json()).catch(() => null)) as { scores?: GameScore[] } | null;
@@ -127,14 +131,14 @@ export default function ArbitrageClient() {
         prevScores.current.set(g.id, cur);
         if (!prev) continue; // first sighting sets the baseline (no emit)
 
-        const line = `${g.away.abbr} ${cur.away}–${cur.home} ${g.home.abbr}`;
+        const line = `${g.away.abbr} ${cur.away}-${cur.home} ${g.home.abbr}`;
         let text: string | null = null;
         if (g.sport === "basketball") {
           // WNBA: fire only at quarter boundaries + final, not on every basket.
           if (cur.state === "in" && cur.period > prev.period) {
-            text = `🏀 End of ${quarterLabel(prev.period)} — ${line}`;
+            text = `[WNBA] End of ${quarterLabel(prev.period)} - ${line}`;
           } else if (cur.state === "post" && prev.state !== "post") {
-            text = `🏀 Final — ${line}`;
+            text = `[WNBA] Final - ${line}`;
           }
         } else if (g.state === "in") {
           // Baseball/soccer: per scoring event (run/goal).
@@ -143,7 +147,7 @@ export default function ArbitrageClient() {
           if (awayInc || homeInc) {
             const scorer = awayInc ? g.away : g.home;
             const delta = awayInc ? cur.away - prev.away : cur.home - prev.home;
-            text = `${emoji(g.sport)} ${scorer.name} scored${delta > 1 ? ` (+${delta})` : ""}!  ${line}${g.detail ? ` · ${g.detail}` : ""}`;
+            text = `${sportTag(g.sport)} ${scorer.name} scored${delta > 1 ? ` (+${delta})` : ""}! ${line}${g.detail ? ` | ${g.detail}` : ""}`;
           }
         }
         if (!text) continue;
@@ -183,7 +187,7 @@ export default function ArbitrageClient() {
   }, []);
 
   // Phase 3: pull live normalized markets (Kalshi + Polymarket game totals). Runs
-  // regardless of USE_MOCK — real market data flows into the Venue drawer + Arena
+  // regardless of USE_MOCK â€” real market data flows into the Venue drawer + Arena
   // counts while opportunities/trades/logs stay on fixtures until Phase 5. If the
   // ingestion yields nothing (e.g. no Kalshi creds + Polymarket offseason), the
   // mock markets remain so the UI never goes blank.
@@ -239,7 +243,7 @@ export default function ArbitrageClient() {
       }
       if (res.running && polls < 15) {
         polls += 1;
-        setTimeout(poll, 2000);
+        setTimeout(poll, 500);
       }
     }
 
@@ -250,9 +254,9 @@ export default function ArbitrageClient() {
         applyMarkets(first.markets, first.venueCounts ?? {});
         return;
       }
-      // Nothing cached yet — the GET above auto-triggers ingestion server-side
+      // Nothing cached yet â€” the GET above auto-triggers ingestion server-side
       // (no admin password), so just poll for results.
-      if (!cancelled) setTimeout(poll, 2000);
+      if (!cancelled) setTimeout(poll, 500);
     })();
 
     return () => {
@@ -282,7 +286,7 @@ export default function ArbitrageClient() {
     }
   }, [agent.id]);
 
-  // Persist risk changes server-side — the execution gate reads server risk.json, so a
+  // Persist risk changes server-side â€” the execution gate reads server risk.json, so a
   // UI-only change (kill switch, live stake cap) must be PATCHed or it won't be enforced.
   const updateRisk = useCallback((partial: Partial<RiskSettings>) => {
     setRisk((prev) => ({ ...prev, ...partial }));
@@ -338,12 +342,13 @@ export default function ArbitrageClient() {
     };
   }, []);
 
-  // Execute an opportunity — animate the agent sliding to leg A + edge to leg B, run the
-  // full pipeline server-side, mark the agent ✓/✗ by the real result, refresh Portfolio +
+  // Execute an opportunity â€” animate the agent sliding to leg A + edge to leg B, run the
+  // full pipeline server-side, mark the agent âœ“/âœ— by the real result, refresh Portfolio +
   // Arb Log. `mode:"live"` forwards venue creds; the server
   // still runs it through the execution gate and blocks it if any switch fails.
   const executeOpportunity = useCallback(
-    async (opp: ArbOpportunity, mode: "paper" | "live"): Promise<ExecResponse> => {
+    async (opp: ArbOpportunity, mode: "paper" | "live", options: { refreshAfter?: boolean } = {}): Promise<ExecResponse> => {
+      const refreshAfter = options.refreshAfter ?? true;
       const legA = opp.legs[0]?.venueId ?? "kalshi";
       const legB = opp.legs[1]?.venueId ?? "polymarket";
       if (tradeTimer.current) clearTimeout(tradeTimer.current);
@@ -351,7 +356,7 @@ export default function ArbitrageClient() {
 
       let res: ExecResponse = null;
       try {
-        // Live: forward the venue creds entered in the UI (localStorage → headers). The
+        // Live: forward the venue creds entered in the UI (localStorage â†’ headers). The
         // server uses them transiently and never persists them; env is the fallback.
         const headers: Record<string, string> = { "Content-Type": "application/json" };
         if (mode === "live") Object.assign(headers, allAuthHeaders());
@@ -366,7 +371,7 @@ export default function ArbitrageClient() {
 
       const ok = res?.result === "executed" || res?.result === "partial";
       setAgentTrade({ legA, legB, status: ok ? "success" : "fail" });
-      await refreshPortfolio();
+      if (refreshAfter) await refreshPortfolio();
       tradeTimer.current = setTimeout(() => setAgentTrade(null), 2800);
       return res;
     },
@@ -389,6 +394,27 @@ export default function ArbitrageClient() {
     [refreshPortfolio]
   );
 
+  const fireAutoBatch = useCallback(
+    async (nextOpps: ArbOpportunity[]) => {
+      if (!agent.autoTrade || !scanning || killSwitch) return;
+      const batch = nextOpps
+        .filter((o) => !autoFiredRef.current.has(o.id) && !autoInFlightRef.current.has(o.id))
+        .slice(0, AUTO_BATCH_LIMIT);
+      if (batch.length === 0) return;
+
+      for (const opp of batch) {
+        autoFiredRef.current.add(opp.id);
+        autoInFlightRef.current.add(opp.id);
+      }
+
+      const mode = agent.live ? "live" : "paper";
+      await Promise.allSettled(batch.map((opp) => executeOpportunity(opp, mode, { refreshAfter: false })));
+      for (const opp of batch) autoInFlightRef.current.delete(opp.id);
+      await refreshPortfolio();
+    },
+    [agent.autoTrade, agent.live, scanning, killSwitch, executeOpportunity, refreshPortfolio]
+  );
+
   // Re-run the scan: re-ingest fresh quotes, then re-derive match map + opportunities
   // + the main-line watch board. Lets the user refresh the live prices on demand.
   const refreshScan = useCallback(async () => {
@@ -401,7 +427,7 @@ export default function ArbitrageClient() {
       // Poll until ingestion settles, then pull derived data. Tight granularity so a
       // finished scan is picked up fast (the loop below re-scans immediately after).
       for (let i = 0; i < 40; i++) {
-        await new Promise((r) => setTimeout(r, 750));
+        await new Promise((r) => setTimeout(r, INGEST_POLL_MS));
         const m = await fetch(`/api/arbitrage/markets?date=${date}`).then((r) => r.json()).catch(() => null);
         if (m && !m.running && m.markets?.length) break;
       }
@@ -411,43 +437,37 @@ export default function ArbitrageClient() {
       ]);
       if (mm?.stats) setMatchMap({ matched: mm.matched, rejects: mm.rejects, stats: mm.stats });
       if (Array.isArray(op?.opportunities)) {
-        setOpportunities(op.opportunities);
+        const nextOpps = op.opportunities as ArbOpportunity[];
+        setOpportunities(nextOpps);
         setWatch(Array.isArray(op.watch) ? op.watch : []);
         setOppsLive(true);
+        await fireAutoBatch(nextOpps);
       }
     } finally {
       setRefreshing(false);
     }
-  }, []);
+  }, [fireAutoBatch]);
 
   // Auto-execute: when auto-trade is on and scanning is live, fire each qualifying
   // opportunity once (dedup via a fired-set). Mode is LIVE when the agent's Live toggle is
   // on; otherwise paper. A live fire still passes the
   // server gate (agent.live, kill switch, stake cap, per-venue creds); if it can't fire it
-  // is reported FAILED with the blocking reasons — never run as paper. Kill switch / Stop halts it.
-  const autoFiredRef = useRef<Set<string>>(new Set());
-  const autoLive = agent.autoTrade && agent.live;
+  // is reported FAILED with the blocking reasons â€” never run as paper. Kill switch / Stop halts it.
   useEffect(() => {
     if (!agent.autoTrade || !scanning || killSwitch) return;
-    const pending = opportunities.filter((o) => !autoFiredRef.current.has(o.id));
+    const pending = opportunities.filter((o) => !autoFiredRef.current.has(o.id) && !autoInFlightRef.current.has(o.id));
     if (pending.length === 0) return;
     let cancelled = false;
     (async () => {
-      for (const opp of pending) {
-        if (cancelled) break;
-        autoFiredRef.current.add(opp.id);
-        if (autoLive) await executeOpportunity(opp, "live");
-        else await executeOpportunity(opp, "paper");
-        await new Promise((r) => setTimeout(r, 800));
-      }
+      if (!cancelled) await fireAutoBatch(pending);
     })();
     return () => {
       cancelled = true;
     };
-  }, [opportunities, agent.autoTrade, scanning, killSwitch, autoLive, executeOpportunity]);
+  }, [opportunities, agent.autoTrade, scanning, killSwitch, fireAutoBatch]);
 
   // Auto-scan: while Scanning is on, re-ingest fresh quotes back-to-back (a new scan
-  // starts as soon as the previous finishes) so prices — and auto-execution — stay as
+  // starts as soon as the previous finishes) so prices â€” and auto-execution â€” stay as
   // fresh as the venues allow, for catching short-lived arbs. A small floor prevents a
   // busy-loop; Stop / kill switch halts it.
   useEffect(() => {

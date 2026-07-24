@@ -10,8 +10,10 @@ import type {
   ArbLog,
   ArbOpportunity,
   ArbResult,
+  ExecutionStep,
   FeeBreakdown,
   NormalizedMarket,
+  PostFillCheck,
   ReasonCode,
   RiskSettings,
   Trade,
@@ -58,7 +60,7 @@ export async function writeLog(
   const log: ArbLog = {
     id: `log-${date}-${Date.now()}-${Math.floor(Math.random() * 1e4)}`,
     time: nowIso(),
-    pair: `[CB:${agent.id}] ${matchup}`,
+    pair: `[AG:${agent.id}] ${matchup}`,
     venues,
     edge,
     mode,
@@ -97,6 +99,7 @@ export type PreparedContext = {
   guaranteedPayout: number;
   expectedProfit: number;
   netAfter: number;
+  executionSteps: ExecutionStep[];
 };
 
 export type PrepareResult =
@@ -110,6 +113,10 @@ export async function prepareExecution(opportunityId: string, date: string): Pro
   const agent = (await getAgent(DEFAULT_AGENT.id)) ?? DEFAULT_AGENT;
   const risk: RiskSettings = await getRiskSettings();
   const configuredVenues = await getVenues();
+  const executionSteps: ExecutionStep[] = [];
+  const addStep = (key: string, label: string, status: ExecutionStep["status"], detail?: string) => {
+    executionSteps.push({ key, label, status, detail });
+  };
 
   const priorMatchup = opportunityId.split(":")[2] ?? opportunityId;
 
@@ -117,7 +124,7 @@ export async function prepareExecution(opportunityId: string, date: string): Pro
   const detect = async () => {
     const markets = filterMarketsToEnabledVenues(await getMarkets(date), configuredVenues);
     const { matched } = matchMarkets(markets);
-    const { opportunities } = detectArbs(matched, agent, risk.minLiquidityUsd);
+    const { opportunities } = detectArbs(matched, agent, risk);
     return { markets, opp: opportunities.find((o) => o.id === opportunityId) };
   };
   // Age (ms) of the oldest quote backing the opportunity's legs.
@@ -136,19 +143,24 @@ export async function prepareExecution(opportunityId: string, date: string): Pro
   }
 
   const asHalt = async (rc: ReasonCode, reason: string, matchup: string, venues: string[], edge: number, details: Record<string, unknown>) => {
+    addStep(rc, reasonCodeLabel(rc), "halt", reason);
     const h = halt(rc, reason);
-    await writeLog(agent, matchup, venues, edge, "halted", rc, reason, details, date);
+    await writeLog(agent, matchup, venues, edge, "halted", rc, reason, { ...details, opportunityId, pipelineSteps: executionSteps }, date);
     return { kind: "halt" as const, outcome: h };
   };
 
+  addStep("cb_arb_enabled", "Agent enabled", "pass", agent.enabled ? "Agent is enabled" : "Agent is off");
   if (!agent.enabled || agent.strategy !== "arbitrage") return asHalt("agent_disabled", "Agent is off or not an arbitrage agent", priorMatchup, [], 0, { opportunityId });
+  addStep("kill_switch", "Kill switch", "pass", "Risk kill switch is clear");
   if (risk.killSwitch) return asHalt("kill_switch", "Risk kill switch is active", priorMatchup, [], 0, { opportunityId });
+  addStep("final_refresh", "Final quote refresh", opp ? "pass" : "halt", opp ? "Opportunity survived refresh" : "Opportunity disappeared");
   if (!opp) return asHalt("final_refresh_failed", "Opportunity no longer exists after quote refresh", priorMatchup, [], 0, { opportunityId });
 
   const venues = [...new Set(opp.legs.map((l) => l.venueId))];
 
   // Still stale after a fresh re-ingest ⇒ the venue feeds themselves aren't updating.
   const oldestMs = legAgeMs(opp, markets);
+  addStep("stale_quote", "Quote freshness", oldestMs <= risk.staleQuoteMs ? "pass" : "halt", `${oldestMs}ms oldest quote`);
   if (oldestMs > risk.staleQuoteMs) return asHalt("stale_quote", `Quote age ${oldestMs}ms exceeds ${risk.staleQuoteMs}ms (venue feed not refreshing)`, opp.matchup, venues, opp.netEdge, { oldestMs });
 
   // Position cap PER opportunity (match + line + market). risk.maxOpenPositions is the
@@ -159,6 +171,7 @@ export async function prepareExecution(opportunityId: string, date: string): Pro
     (t) => t.opportunityId === opp.id && (t.status === "open" || t.status === "partial" || t.status === "naked")
   );
   const maxPer = risk.maxOpenPositions;
+  addStep("position_dedup", "Position dedup", maxPer > 0 && openForEvent.length >= maxPer ? "halt" : "pass", `${openForEvent.length}/${Math.max(maxPer, 0)} open for this opportunity`);
   if (maxPer > 0 && openForEvent.length >= maxPer) {
     return asHalt("position_dedup", `Already at ${openForEvent.length}/${maxPer} open positions for this match + line`, opp.matchup, venues, opp.netEdge, { openCount: openForEvent.length, maxPer });
   }
@@ -166,6 +179,7 @@ export async function prepareExecution(opportunityId: string, date: string): Pro
   const openExposure = todays
     .filter((t) => (t.status === "open" || t.status === "partial" || t.status === "naked"))
     .reduce((s, t) => s + t.totalCost, 0);
+  addStep("exposure", "Exposure cap", openExposure + opp.stakePlan.totalStake <= risk.maxExposure ? "pass" : "halt", `$${(openExposure + opp.stakePlan.totalStake).toFixed(2)} / $${risk.maxExposure.toFixed(2)}`);
   if (openExposure + opp.stakePlan.totalStake > risk.maxExposure) return asHalt("exposure_exceeded", `Exposure ${(openExposure + opp.stakePlan.totalStake).toFixed(0)} > cap ${risk.maxExposure}`, opp.matchup, venues, opp.netEdge, { openExposure });
 
   // ── Final refresh: apply slippage, recompute net edge ───────────────────────
@@ -182,12 +196,39 @@ export async function prepareExecution(opportunityId: string, date: string): Pro
   const feeFrac = feeFractionOfStake(fees, legSizes);
   const netAfter = round(grossAfter - feeFrac - SLIPPAGE_RESERVE, 6);
 
+  addStep("min_edge", "Minimum edge", netAfter >= agent.minEdge ? "pass" : "halt", `${(netAfter * 100).toFixed(2)}% after refresh`);
   if (netAfter < agent.minEdge) return asHalt("final_refresh_failed", `Edge collapsed to ${(netAfter * 100).toFixed(2)}% after slippage`, opp.matchup, venues, netAfter, { grossAfter, netAfter });
 
   const totalStake = round(Object.values(legSizes).reduce((s, v) => s + v, 0), 2);
   const guaranteedPayout = executedLegs[0]?.size ?? 0; // both legs buy equal contracts
   const totalFeeDollars = fees.reduce((s, f) => s + f.feeCents / 100, 0);
   const expectedProfit = round(guaranteedPayout - totalStake - totalFeeDollars, 2);
+  const minExpectedProfitUsd = risk.minExpectedProfitUsd ?? 0;
+  addStep("expected_profit", "Expected profit", expectedProfit >= minExpectedProfitUsd ? "pass" : "halt", `$${expectedProfit.toFixed(2)} / $${minExpectedProfitUsd.toFixed(2)} min`);
+  if (expectedProfit < minExpectedProfitUsd) {
+    return asHalt(
+      "final_refresh_failed",
+      `Expected profit $${expectedProfit.toFixed(2)} below min $${minExpectedProfitUsd.toFixed(2)} after refresh`,
+      opp.matchup,
+      venues,
+      netAfter,
+      { expectedProfit, minExpectedProfitUsd }
+    );
+  }
+  const liquidityStakeBufferMultiple = Math.max(1, risk.liquidityStakeBufferMultiple ?? 1);
+  const pairLiquidity = Math.min(...executedLegs.map((l) => l.liquidityUsd ?? 0));
+  const requiredLiquidityUsd = Math.max(risk.minLiquidityUsd, totalStake * liquidityStakeBufferMultiple);
+  addStep("min_depth", "Executable depth", pairLiquidity >= requiredLiquidityUsd ? "pass" : "halt", `$${pairLiquidity.toFixed(0)} / $${requiredLiquidityUsd.toFixed(0)} required`);
+  if (pairLiquidity < requiredLiquidityUsd) {
+    return asHalt(
+      "insufficient_depth",
+      `Executable liquidity $${pairLiquidity.toFixed(0)} below required $${requiredLiquidityUsd.toFixed(0)} (${liquidityStakeBufferMultiple}x stake buffer)`,
+      opp.matchup,
+      venues,
+      netAfter,
+      { pairLiquidity, requiredLiquidityUsd, liquidityStakeBufferMultiple }
+    );
+  }
 
   return {
     kind: "ready",
@@ -204,8 +245,51 @@ export async function prepareExecution(opportunityId: string, date: string): Pro
       guaranteedPayout,
       expectedProfit,
       netAfter,
+      executionSteps,
     },
   };
+}
+
+function reasonCodeLabel(code: ReasonCode): string {
+  return code.split("_").map((part) => part[0]?.toUpperCase() + part.slice(1)).join(" ");
+}
+
+export async function verifyPostFill(opportunityId: string, date: string, entryNetEdge: number): Promise<PostFillCheck> {
+  const checkedAt = nowIso();
+  try {
+    const agent = (await getAgent(DEFAULT_AGENT.id)) ?? DEFAULT_AGENT;
+    const risk = await getRiskSettings();
+    const configuredVenues = await getVenues();
+    const markets = filterMarketsToEnabledVenues(await getMarkets(date), configuredVenues);
+    const { matched } = matchMarkets(markets);
+    const { opportunities } = detectArbs(matched, agent, risk);
+    const same = opportunities.find((o) => o.id === opportunityId);
+    if (!same) {
+      return {
+        checkedAt,
+        status: "arb_gone",
+        remainingNetEdge: null,
+        edgeDrift: null,
+        reason: "Post-fill scan did not find the same executable arb",
+      };
+    }
+    const edgeDrift = round(same.netEdge - entryNetEdge, 6);
+    return {
+      checkedAt,
+      status: "edge_intact",
+      remainingNetEdge: same.netEdge,
+      edgeDrift,
+      reason: `Same arb still detected at ${(same.netEdge * 100).toFixed(2)}% net edge`,
+    };
+  } catch (error) {
+    return {
+      checkedAt,
+      status: "not_checked",
+      remainingNetEdge: null,
+      edgeDrift: null,
+      reason: String(error),
+    };
+  }
 }
 
 // Legacy simulated executor (paper). Kept for compatibility; the trades route now

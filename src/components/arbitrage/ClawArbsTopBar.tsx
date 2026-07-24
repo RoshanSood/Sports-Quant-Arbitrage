@@ -57,15 +57,18 @@ export default function ClawArbsTopBar({
         style={{ background: killSwitch ? "#7f1d1d" : scanning ? "#dc2626" : "#16a34a" }}
       >
         <Square className="w-3 h-3" fill="currentColor" />
-        {killSwitch ? "Halted" : scanning ? "Stop" : "Start"}
+        {killSwitch ? "Halted" : scanning ? "Stop Arena" : "Start Arena"}
       </button>
 
-      <Chip active={scanning && !killSwitch} onClick={onToggleScanning} icon={<Radio className="w-3 h-3" />} label="Scanning" color="#22c55e" />
+      <Chip active={scanning && !killSwitch} onClick={onToggleScanning} icon={<Radio className="w-3 h-3" />} label="Scanner" color="#22c55e" />
       <Chip active={autoTrade && !killSwitch} onClick={onToggleAuto ?? (() => {})} icon={<Bot className="w-3 h-3" />} label="Auto-trade" color="#d946ef" />
       <Chip active={soundOn} onClick={onToggleSound} icon={<Volume2 className="w-3 h-3" />} label="Sound" color="#eab308" />
 
       <span className="flex items-center gap-1 px-2 py-1 rounded text-[11px] shrink-0" style={{ background: "#12151d", color: "#9ca3af" }}>
         <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" /> {agentCount} agents
+      </span>
+      <span className="flex items-center gap-1 px-2 py-1 rounded text-[11px] shrink-0" style={{ background: "#12151d", color: "#9ca3af" }}>
+        <span className="w-1.5 h-1.5 rounded-full" style={{ background: scanning && !killSwitch ? "#22c55e" : "#6b7280" }} /> Fast loop
       </span>
 
       <div className="flex items-center gap-1 shrink-0">
