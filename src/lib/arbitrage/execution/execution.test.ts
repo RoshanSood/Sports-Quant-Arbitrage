@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { resolveExecutionMode, type GateInput } from "./config";
+import { fragileVenueFirstOrder, shouldSequenceFragileVenuePair } from "./executor";
+import type { OrderRequest } from "./types";
 
 // The gate must FAIL CLOSED: live only when every independent (UI-driven) switch passes.
 // No environment variables — arming is the agent Live toggle + risk kill switch + risk
@@ -75,5 +77,21 @@ describe("execution safety gate (UI-driven)", () => {
     const d = resolveExecutionMode({ ...base, agentLive: false, killSwitch: true, stakeUsd: 999 });
     expect(d.blocked).toBe(true);
     expect(d.blockers.length).toBeGreaterThanOrEqual(3);
+  });
+});
+
+describe("live execution sequencing", () => {
+  const req = (venueId: string): OrderRequest => ({
+    venueId,
+    marketId: `${venueId}-market`,
+    outcome: "home",
+    sizeContracts: 2,
+    limitPriceCents: 50,
+  });
+
+  it("places predict.fun before kalshi so a predict.fun reject cannot leave a kalshi-only fill", () => {
+    const requests = [req("kalshi"), req("predictfun")];
+    expect(shouldSequenceFragileVenuePair(requests)).toBe(true);
+    expect(fragileVenueFirstOrder(requests)).toEqual([1, 0]);
   });
 });

@@ -4,12 +4,13 @@ const { ethers } = require("ethers");
 const { ChainId, OrderBuilder, Side } = require("@predictdotfun/sdk");
 
 const API = "https://api.predict.fun";
-const MARKET_ID = "806481";
-const TEAM_PATTERN = /STL|Cardinals/i;
+const SPORTS_VARIANT = "SPORTS_TEAM_MATCH";
+const TEAM_PATTERN = /^(KC|Kansas City Royals)$/i;
 
 function loadEnvLocal() {
   const envPath = path.join(process.cwd(), ".env.local");
   if (!fs.existsSync(envPath)) return;
+
   for (const line of fs.readFileSync(envPath, "utf8").split(/\r?\n/)) {
     const match = line.match(/^\s*([^#=\s]+)\s*=\s*(.*)\s*$/);
     if (!match) continue;
@@ -28,21 +29,6 @@ function requireEnv(name) {
   return value;
 }
 
-async function fetchJson(url, init) {
-  const res = await fetch(url, init);
-  const text = await res.text();
-  let body = {};
-  try {
-    body = text ? JSON.parse(text) : {};
-  } catch {
-    body = { message: text };
-  }
-  if (!res.ok) {
-    throw new Error(`${res.status} ${JSON.stringify(body).slice(0, 500)}`);
-  }
-  return body;
-}
-
 function pickString(body, paths) {
   for (const parts of paths) {
     let current = body;
@@ -50,6 +36,78 @@ function pickString(body, paths) {
     if (typeof current === "string" && current.trim()) return current.trim();
   }
   return null;
+}
+
+async function fetchJson(url, init) {
+  const res = await fetch(url, { ...init, cache: "no-store" });
+  const text = await res.text();
+  let body = {};
+  try {
+    body = text ? JSON.parse(text) : {};
+  } catch {
+    body = { message: text };
+  }
+  if (!res.ok) throw new Error(`${res.status} ${JSON.stringify(body).slice(0, 500)}`);
+  return body;
+}
+
+async function predictJwt(apiKey, signer, predictAccount, builder) {
+  const msgBody = await fetchJson(`${API}/v1/auth/message`, {
+    headers: { "x-api-key": apiKey, Accept: "application/json" },
+  });
+  const message = pickString(msgBody, [["data", "message"], ["message"], ["data"]]);
+  if (!message) throw new Error("predict.fun auth message missing");
+
+  const signature = predictAccount ? await builder.signPredictAccountMessage(message) : await signer.signMessage(message);
+  const attempts = predictAccount
+    ? [
+        { signer: predictAccount, signature, message },
+        { signer: signer.address, account: predictAccount, signature, message },
+      ]
+    : [{ signer: signer.address, signature, message }];
+
+  let lastError = "auth failed";
+  for (const data of attempts) {
+    try {
+      const authBody = await fetchJson(`${API}/v1/auth`, {
+        method: "POST",
+        headers: { "x-api-key": apiKey, "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify(data),
+      });
+      const token = pickString(authBody, [["data", "token"], ["token"]]);
+      if (token) return token;
+      lastError = "predict.fun auth response missing token";
+    } catch (e) {
+      lastError = String(e).slice(0, 200);
+    }
+  }
+  throw new Error(lastError);
+}
+
+function isTargetMarket(market, opponentPattern) {
+  const title = String(market.title || "");
+  return /Kansas City Royals/i.test(title) && opponentPattern.test(title);
+}
+
+async function findMarket(apiKey, opponent) {
+  const body = await fetchJson(`${API}/v1/markets?status=OPEN&first=200&marketVariant=${SPORTS_VARIANT}`, {
+    headers: { "x-api-key": apiKey, Accept: "application/json" },
+  });
+  const opponentPattern = new RegExp(opponent, "i");
+  const markets = (body.data || []).filter((m) => isTargetMarket(m, opponentPattern));
+  if (!markets.length) throw new Error(`No open predict.fun KC moneyline market found for opponent "${opponent}"`);
+
+  // Prefer the tightest/current-looking market: lowest KC ask, then highest available ask size.
+  markets.sort((a, b) => {
+    const aKc = (a.outcomes || []).find((o) => TEAM_PATTERN.test(o.name || ""));
+    const bKc = (b.outcomes || []).find((o) => TEAM_PATTERN.test(o.name || ""));
+    const aPrice = Number(aKc?.bestAsk?.price ?? Infinity);
+    const bPrice = Number(bKc?.bestAsk?.price ?? Infinity);
+    if (aPrice !== bPrice) return aPrice - bPrice;
+    return Number(bKc?.bestAsk?.size ?? 0) - Number(aKc?.bestAsk?.size ?? 0);
+  });
+
+  return markets[0];
 }
 
 function normalizeBook(marketId, body) {
@@ -81,64 +139,50 @@ async function orderbook(apiKey, marketId) {
   return book;
 }
 
-async function predictJwt(apiKey, signer, predictAccount, builder) {
-  const msgBody = await fetchJson(`${API}/v1/auth/message`, {
-    headers: { "x-api-key": apiKey, Accept: "application/json" },
-  });
-  const message = pickString(msgBody, [["data", "message"], ["message"], ["data"]]);
-  if (!message) throw new Error("predict.fun auth message missing");
-  const signature = predictAccount ? await builder.signPredictAccountMessage(message) : await signer.signMessage(message);
-  const authBody = await fetchJson(`${API}/v1/auth`, {
-    method: "POST",
-    headers: { "x-api-key": apiKey, "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify({ signer: predictAccount || signer.address, signature, message }),
-  });
-  const token = pickString(authBody, [["data", "token"], ["token"]]);
-  if (!token) throw new Error("predict.fun auth response missing token");
-  return token;
-}
-
 async function main() {
   loadEnvLocal();
 
   const executeLive = process.argv.includes("--execute-live");
+  const spendUsd = Number(argValue("--spend", "1"));
   const sharesArg = argValue("--shares", null);
-  const spendUsd = Number(argValue("--spend", "2"));
   const fixedShares = sharesArg == null ? null : Number(sharesArg);
-  const maxPrice = Number(argValue("--max-price", "0.85"));
+  const maxPrice = Number(argValue("--max-price", "0.45"));
+  const opponent = argValue("--opponent", "Detroit");
+  const predictAccount = argValue("--account", process.env.PREDICTFUN_ACCOUNT || "").trim() || undefined;
+
   if (!Number.isFinite(spendUsd) || spendUsd <= 0) throw new Error("--spend must be a positive number");
   if (fixedShares != null && (!Number.isFinite(fixedShares) || fixedShares <= 0)) throw new Error("--shares must be a positive number");
   if (!Number.isFinite(maxPrice) || maxPrice <= 0 || maxPrice > 1) throw new Error("--max-price must be between 0 and 1");
 
   const apiKey = requireEnv("PREDICTFUN_API_KEY");
   const walletKey = requireEnv("PREDICTFUN_WALLET_KEY");
-  const predictAccount = requireEnv("PREDICTFUN_ACCOUNT");
+  const provider = new ethers.JsonRpcProvider(process.env.BNB_RPC_URL || "https://bsc-dataseed.binance.org");
+  const signer = new ethers.Wallet(walletKey, provider);
+  const builder = await OrderBuilder.make(ChainId.BnbMainnet, signer, predictAccount ? { predictAccount } : undefined);
 
-  const market = (await fetchJson(`${API}/v1/markets/${MARKET_ID}`, {
-    headers: { "x-api-key": apiKey, Accept: "application/json" },
-  })).data;
-  if (!market || market.tradingStatus !== "OPEN") throw new Error(`Market ${MARKET_ID} is not OPEN`);
+  const market = await findMarket(apiKey, opponent);
+  if (!market || market.tradingStatus !== "OPEN") throw new Error(`Market ${market?.id || "unknown"} is not OPEN`);
 
-  const outcome = (market.outcomes || []).find((o) => TEAM_PATTERN.test(o.name));
-  if (!outcome?.onChainId || !outcome.bestAsk?.price) throw new Error("Could not find a live STL ask");
+  const outcome = (market.outcomes || []).find((o) => TEAM_PATTERN.test(o.name || ""));
+  if (!outcome?.onChainId || !outcome.bestAsk?.price) throw new Error("Could not find a live KC ask");
 
   const price = Number(outcome.bestAsk.price);
+  const availableShares = Number(outcome.bestAsk.size ?? 0);
   if (!Number.isFinite(price) || price <= 0 || price > maxPrice) {
-    throw new Error(`Current STL ask ${price} exceeds --max-price ${maxPrice}`);
+    throw new Error(`Current KC ask ${price} exceeds --max-price ${maxPrice}`);
   }
 
   const shares = fixedShares ?? Number((spendUsd / price).toFixed(6));
   if (shares < 2) throw new Error(`predict.fun minimum order is 2 shares; $${spendUsd} buys only ${shares}`);
-
-  const provider = new ethers.JsonRpcProvider(process.env.BNB_RPC_URL || "https://bsc-dataseed.binance.org");
-  const signer = new ethers.Wallet(walletKey, provider);
-  const builder = await OrderBuilder.make(ChainId.BnbMainnet, signer, { predictAccount });
+  if (availableShares > 0 && shares > availableShares) {
+    throw new Error(`Only ${availableShares} KC shares are available at the current ask; requested ${shares}`);
+  }
 
   const balance = Number(ethers.formatUnits(await builder.balanceOf(), 18));
   const maxCost = Number((price * shares).toFixed(6));
-  if (balance < maxCost) throw new Error(`Insufficient USDT: balance ${balance}, needed ${maxCost}`);
+  if (balance < maxCost) throw new Error(`Insufficient predict.fun USDT: balance ${balance}, needed ${maxCost}`);
 
-  const book = await orderbook(apiKey, MARKET_ID);
+  const book = await orderbook(apiKey, market.id);
   const amounts = builder.getMarketOrderAmounts(
     {
       side: Side.BUY,
@@ -148,7 +192,7 @@ async function main() {
   );
   const lastPrice = Number(ethers.formatUnits(amounts.lastPrice, 18));
   if (!Number.isFinite(lastPrice) || lastPrice > maxPrice) {
-    throw new Error(`Current STL ask ladder ends at ${lastPrice}; exceeds --max-price ${maxPrice}`);
+    throw new Error(`Current KC ask ladder ends at ${lastPrice}; exceeds --max-price ${maxPrice}`);
   }
 
   const order = builder.buildOrder("MARKET", {
@@ -167,11 +211,14 @@ async function main() {
   const hash = builder.buildTypedDataHash(typed);
   const jwt = await predictJwt(apiKey, signer, predictAccount, builder);
 
-  console.log("predict.fun Cardinals buy");
+  console.log("predict.fun Kansas City Royals moneyline buy");
   console.log(`mode: ${executeLive ? "LIVE SUBMIT" : "DRY RUN - not submitted"}`);
-  console.log(`market: ${market.title} (${MARKET_ID})`);
+  console.log(`signer: ${signer.address}`);
+  console.log(`predict account: ${predictAccount || signer.address}`);
+  console.log(`market: ${market.title} (${market.id})`);
   console.log(`outcome: ${outcome.name}`);
   console.log(`limit price: ${price}`);
+  console.log(`available shares at ask: ${availableShares}`);
   console.log(`shares: ${shares}`);
   console.log(`max cost: $${maxCost.toFixed(6)} USDT`);
   console.log(`account balance: $${balance.toFixed(6)} USDT`);

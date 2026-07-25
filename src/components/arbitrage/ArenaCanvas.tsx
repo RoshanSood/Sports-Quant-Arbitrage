@@ -12,9 +12,11 @@ import ActivityFeed, { type ScoreEvent } from "./ActivityFeed";
 // is needed.
 const DEFAULT_LAYOUT: Record<string, { fx: number; fy: number }> = {
   home: { fx: 0.5, fy: 0.62 },
-  polymarket: { fx: 0.46, fy: 0.34 },
-  kalshi: { fx: 0.38, fy: 0.58 },
-  sxbet: { fx: 0.6, fy: 0.55 },
+  kalshi: { fx: 0.24, fy: 0.58 },
+  polymarket: { fx: 0.38, fy: 0.28 },
+  sxbet: { fx: 0.68, fy: 0.30 },
+  predictfun: { fx: 0.78, fy: 0.58 },
+  cloudbet: { fx: 0.18, fy: 0.34 },
   sportmarket: { fx: 0.5, fy: 0.16 },
 };
 
@@ -39,6 +41,7 @@ export default function ArenaCanvas({
   agentName,
   agentTrade,
   marketsLive = false,
+  scanning = false,
   onSelectVenue,
 }: {
   venues: Venue[];
@@ -48,6 +51,7 @@ export default function ArenaCanvas({
   agentName: string;
   agentTrade: AgentTrade | null;
   marketsLive?: boolean;
+  scanning?: boolean;
   onSelectVenue: (id: string) => void;
 }) {
   const canvasRef = useRef<HTMLDivElement>(null);
@@ -274,13 +278,13 @@ export default function ArenaCanvas({
         <span
           className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded font-semibold"
           style={{
-            background: marketsLive ? "#0d1a0f" : "#1a160e",
-            color: marketsLive ? "#4ade80" : "#fbbf24",
-            border: `1px solid ${marketsLive ? "#14532d" : "#3f2d10"}`,
+            background: marketsLive ? "#0d1a0f" : scanning ? "#1a160e" : "#11141a",
+            color: marketsLive ? "#4ade80" : scanning ? "#fbbf24" : "#9ca3af",
+            border: `1px solid ${marketsLive ? "#14532d" : scanning ? "#3f2d10" : "#2a2f3e"}`,
           }}
         >
-          <span className="w-1.5 h-1.5 rounded-full" style={{ background: marketsLive ? "#22c55e" : "#f59e0b" }} />
-          {marketsLive ? "LIVE MARKETS" : "SCANNING…"}
+          <span className="w-1.5 h-1.5 rounded-full" style={{ background: marketsLive ? "#22c55e" : scanning ? "#f59e0b" : "#6b7280" }} />
+          {marketsLive ? "LIVE MARKETS" : scanning ? "SCANNING..." : "IDLE"}
         </span>
         <span>Drag nodes · click for details</span>
       </div>

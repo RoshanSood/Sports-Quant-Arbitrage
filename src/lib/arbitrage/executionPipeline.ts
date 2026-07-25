@@ -30,7 +30,7 @@ import { DEFAULT_AGENT } from "./seed";
 import { centsToDollars } from "./arbMath";
 import { computeFees, feeFractionOfStake } from "./feeEngine";
 import { getVenues } from "./venueStore";
-import { filterMarketsToEnabledVenues } from "./venueFilters";
+import { filterMarketsForAgent } from "./venueFilters";
 
 export type ExecutionOutcome = {
   result: ArbResult | "halted";
@@ -109,7 +109,7 @@ export type PrepareResult =
 // Run the deterministic pre-execution checks + final quote refresh. On any failure it
 // writes the halt log and returns a halt; on success it returns the prepared context.
 // Shared by paper and live so both enforce the exact same safety gates.
-export async function prepareExecution(opportunityId: string, date: string): Promise<PrepareResult> {
+export async function prepareExecution(opportunityId: string, date: string, requestedMode: "dry_run" | "live" = "dry_run"): Promise<PrepareResult> {
   const agent = (await getAgent(DEFAULT_AGENT.id)) ?? DEFAULT_AGENT;
   const risk: RiskSettings = await getRiskSettings();
   const configuredVenues = await getVenues();
@@ -122,9 +122,9 @@ export async function prepareExecution(opportunityId: string, date: string): Pro
 
   // Load stored markets → matched events → opportunities, and locate this one.
   const detect = async () => {
-    const markets = filterMarketsToEnabledVenues(await getMarkets(date), configuredVenues);
+    const markets = filterMarketsForAgent(await getMarkets(date), configuredVenues, agent);
     const { matched } = matchMarkets(markets);
-    const { opportunities } = detectArbs(matched, agent, risk);
+    const { opportunities } = detectArbs(matched, agent, risk.minLiquidityUsd);
     return { markets, opp: opportunities.find((o) => o.id === opportunityId) };
   };
   // Age (ms) of the oldest quote backing the opportunity's legs.
@@ -163,17 +163,28 @@ export async function prepareExecution(opportunityId: string, date: string): Pro
   addStep("stale_quote", "Quote freshness", oldestMs <= risk.staleQuoteMs ? "pass" : "halt", `${oldestMs}ms oldest quote`);
   if (oldestMs > risk.staleQuoteMs) return asHalt("stale_quote", `Quote age ${oldestMs}ms exceeds ${risk.staleQuoteMs}ms (venue feed not refreshing)`, opp.matchup, venues, opp.netEdge, { oldestMs });
 
-  // Position cap PER opportunity (match + line + market). risk.maxOpenPositions is the
-  // number of concurrent open positions allowed on the same arb; <= 0 means unlimited, so
-  // you can re-enter as long as the edge/depth checks above still pass on fresh quotes.
+  // Real-money position cap PER opportunity (match + line + market). Paper tracking is
+  // deliberately separate and never blocks live execution.
   const todays = await getTradesByDate(date);
-  const openForEvent = todays.filter(
-    (t) => t.opportunityId === opp.id && (t.status === "open" || t.status === "partial" || t.status === "naked")
-  );
   const maxPer = risk.maxOpenPositions;
-  addStep("position_dedup", "Position dedup", maxPer > 0 && openForEvent.length >= maxPer ? "halt" : "pass", `${openForEvent.length}/${Math.max(maxPer, 0)} open for this opportunity`);
-  if (maxPer > 0 && openForEvent.length >= maxPer) {
-    return asHalt("position_dedup", `Already at ${openForEvent.length}/${maxPer} open positions for this match + line`, opp.matchup, venues, opp.netEdge, { openCount: openForEvent.length, maxPer });
+  const openForEvent = requestedMode === "live"
+    ? todays.filter(
+        (t) =>
+          t.mode === "live" &&
+          t.opportunityId === opp.id &&
+          (t.status === "open" || t.status === "partial" || t.status === "naked")
+      )
+    : [];
+  addStep(
+    "position_dedup",
+    "Position dedup",
+    requestedMode === "live" && maxPer > 0 && openForEvent.length >= maxPer ? "halt" : "pass",
+    requestedMode === "live"
+      ? `${openForEvent.length}/${Math.max(maxPer, 0)} live open for this opportunity`
+      : "Paper tracking does not count toward the live cap"
+  );
+  if (requestedMode === "live" && maxPer > 0 && openForEvent.length >= maxPer) {
+    return asHalt("position_dedup", `Already at ${openForEvent.length}/${maxPer} live open positions for this match + line`, opp.matchup, venues, opp.netEdge, { openCount: openForEvent.length, maxPer, countedMode: "live" });
   }
 
   const openExposure = todays
@@ -260,9 +271,9 @@ export async function verifyPostFill(opportunityId: string, date: string, entryN
     const agent = (await getAgent(DEFAULT_AGENT.id)) ?? DEFAULT_AGENT;
     const risk = await getRiskSettings();
     const configuredVenues = await getVenues();
-    const markets = filterMarketsToEnabledVenues(await getMarkets(date), configuredVenues);
+    const markets = filterMarketsForAgent(await getMarkets(date), configuredVenues, agent);
     const { matched } = matchMarkets(markets);
-    const { opportunities } = detectArbs(matched, agent, risk);
+    const { opportunities } = detectArbs(matched, agent, risk.minLiquidityUsd);
     const same = opportunities.find((o) => o.id === opportunityId);
     if (!same) {
       return {
@@ -295,7 +306,7 @@ export async function verifyPostFill(opportunityId: string, date: string, entryN
 // Legacy simulated executor (paper). Kept for compatibility; the trades route now
 // runs execution/executor.ts (which handles both dry-run and live via adapters).
 export async function runPaperExecution(opportunityId: string, date: string): Promise<ExecutionOutcome> {
-  const prep = await prepareExecution(opportunityId, date);
+  const prep = await prepareExecution(opportunityId, date, "dry_run");
   if (prep.kind === "halt") return prep.outcome;
   const { agent, opportunityId: oppId, opportunityMatchup, venues, executedLegs, fees, totalStake, expectedProfit, netAfter } = prep.ctx;
 

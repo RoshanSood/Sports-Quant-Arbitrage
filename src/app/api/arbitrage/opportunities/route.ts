@@ -6,7 +6,7 @@ import { getAgent } from "@/lib/arbitrage/agentStore";
 import { getRiskSettings } from "@/lib/arbitrage/riskStore";
 import { DEFAULT_AGENT } from "@/lib/arbitrage/seed";
 import { getVenues } from "@/lib/arbitrage/venueStore";
-import { filterMarketsToEnabledVenues } from "@/lib/arbitrage/venueFilters";
+import { filterMarketsForAgent } from "@/lib/arbitrage/venueFilters";
 
 function todayDateStr(): string {
   const d = new Date();
@@ -27,7 +27,7 @@ export async function GET(request: NextRequest) {
       getVenues(),
     ]);
 
-    const activeMarkets = filterMarketsToEnabledVenues(markets, venues);
+    const activeMarkets = filterMarketsForAgent(markets, venues, agent);
     const { matched } = matchMarkets(activeMarkets);
     const { opportunities, rejects, watch } = detectArbs(matched, agent, risk.minLiquidityUsd);
 

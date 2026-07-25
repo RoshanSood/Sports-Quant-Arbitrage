@@ -246,8 +246,8 @@ export default function RiskPanel({
       <div className="rounded-lg border px-3 py-2.5 mb-4" style={{ borderColor: "#1e2130", background: "#0e1014" }}>
         <div className="flex items-center justify-between gap-2">
           <div>
-            <div className="text-xs font-semibold text-gray-200">Max open per match</div>
-            <div className="text-[10px] text-gray-500">Concurrent positions on the same arb (line). Each re-entry still re-checks edge + depth.</div>
+            <div className="text-xs font-semibold text-gray-200">Max open real per match</div>
+            <div className="text-[10px] text-gray-500">Counts real-money positions only. Paper tracking will not block a live re-entry.</div>
           </div>
           <div className="flex items-center gap-1.5 shrink-0">
             <button

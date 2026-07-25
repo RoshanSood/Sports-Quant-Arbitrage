@@ -46,9 +46,9 @@ export type ExecResponse = {
 // states) â€” never mock fixtures. Venues start from the seed so the arena has nodes.
 const USE_MOCK = false;
 
-// Floor gap between back-to-back scans (each scan re-ingests all venues; the natural
-// pace is however long a scan takes, this just prevents a busy-loop if one returns fast).
-const SCAN_MIN_GAP_MS = 150;
+// Floor gap between completed scans. Each scan re-ingests all venues, so the effective
+// cadence is "scan duration + 1s" and never overlaps a still-running ingestion.
+const SCAN_MIN_GAP_MS = 1000;
 const INGEST_POLL_MS = 120;
 const AUTO_BATCH_LIMIT = 4;
 
@@ -78,7 +78,7 @@ export default function ArbitrageClient() {
   const [openVenueId, setOpenVenueId] = useState<string | null>(null);
   const [playOpp, setPlayOpp] = useState<ArbOpportunity | null>(null);
 
-  const [scanning, setScanning] = useState(true);
+  const [scanning, setScanning] = useState(false);
   const [soundOn, setSoundOn] = useState(false);
   const [killSwitch, setKillSwitch] = useState(false);
   const [agentTrade, setAgentTrade] = useState<AgentTrade | null>(null);
@@ -254,9 +254,9 @@ export default function ArbitrageClient() {
         applyMarkets(first.markets, first.venueCounts ?? {});
         return;
       }
-      // Nothing cached yet â€” the GET above auto-triggers ingestion server-side
-      // (no admin password), so just poll for results.
-      if (!cancelled) setTimeout(poll, 500);
+      // Plain GETs are read-only. Only poll if a scan was already running; otherwise
+      // wait for the user to click Start Arena.
+      if (!cancelled && first?.running) setTimeout(poll, 500);
     })();
 
     return () => {
@@ -524,6 +524,7 @@ export default function ArbitrageClient() {
           agentName={agent.name}
           agentTrade={agentTrade}
           marketsLive={marketsLive}
+          scanning={scanning && !killSwitch}
           onSelectVenue={(id) => setOpenVenueId(id)}
         />
 

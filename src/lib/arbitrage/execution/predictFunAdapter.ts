@@ -1,7 +1,7 @@
 // predict.fun live order adapter. Balance verification authenticates the Predict Account
 // and reads the SDK's protocol USDT balance; order signing uses the official SDK's
 // BNB-native CLOB flow.
-// Signs a marketable LIMIT BUY with the OFFICIAL @predictdotfun/sdk (ethers v6) and posts it to
+// Signs a MARKET BUY with the OFFICIAL @predictdotfun/sdk (ethers v6) and posts it to
 // POST /v1/orders with the x-api-key. The leg's nativeMarketId is the predict.fun market
 // id and nativeSide is the outcome's on-chain token id. Credentials come from env
 // (PREDICTFUN_API_KEY + PREDICTFUN_WALLET_KEY); the wallet key never leaves the process.
@@ -11,7 +11,7 @@
 // the SDK's documented path. Before trading, run the SDK's setApprovals() once (ERC-1155
 // CTF + ERC-20 USDT to the exchanges) — the wallet also needs a little BNB for that gas.
 
-import { ChainId, OrderBuilder, Side } from "@predictdotfun/sdk";
+import { ChainId, OrderBuilder, Side, type Book } from "@predictdotfun/sdk";
 import { JsonRpcProvider, Wallet, formatUnits, parseUnits } from "ethers";
 import { BNB_USDT_DECIMALS, bnbRpcUrl } from "./chains";
 import type { PredictFunCreds } from "./onchainCreds";
@@ -35,6 +35,7 @@ export function pfAccount(c?: PredictFunCreds): string | undefined {
 
 type PfMarketFlags = { feeRateBps: number; isNegRisk: boolean; isYieldBearing: boolean };
 type JsonRecord = Record<string, unknown>;
+type PfBook = Omit<Book, "marketId"> & { marketId?: number };
 
 async function marketFlags(marketId: string, apiKey: string): Promise<PfMarketFlags> {
   try {
@@ -48,6 +49,35 @@ async function marketFlags(marketId: string, apiKey: string): Promise<PfMarketFl
   } catch {
     return { feeRateBps: 200, isNegRisk: false, isYieldBearing: true };
   }
+}
+
+function normalizeBook(marketId: string, body: unknown): PfBook | null {
+  const data = asRecord(asRecord(body)?.data) ?? asRecord(body);
+  const asks = data?.asks;
+  const bids = data?.bids;
+  if (!Array.isArray(asks) || !Array.isArray(bids)) return null;
+
+  const toLevels = (levels: unknown[]) =>
+    levels.flatMap((level) => {
+      if (!Array.isArray(level) || level.length < 2) return [];
+      const price = Number(level[0]);
+      const qty = Number(level[1]);
+      return Number.isFinite(price) && Number.isFinite(qty) && price > 0 && qty > 0 ? ([[price, qty]] as [number, number][]) : [];
+    });
+
+  return {
+    marketId: Number(marketId),
+    updateTimestampMs: Number(data?.updateTimestampMs ?? Date.now()),
+    asks: toLevels(asks).sort((a, b) => a[0] - b[0]),
+    bids: toLevels(bids).sort((a, b) => b[0] - a[0]),
+  };
+}
+
+async function orderbook(marketId: string, apiKey: string): Promise<PfBook> {
+  const body = await fetchJson(`${API}/v1/markets/${marketId}/orderbook`, { headers: { "x-api-key": apiKey, Accept: "application/json" } });
+  const book = normalizeBook(marketId, body);
+  if (!book || book.asks.length === 0) throw new Error("predict.fun orderbook has no ask liquidity");
+  return book;
 }
 
 function asRecord(v: unknown): JsonRecord | null {
@@ -245,13 +275,19 @@ export class PredictFunExecutionAdapter implements ExecutionAdapter {
       // Pass the smart account as the order maker when trading a ZeroDev/proxy account.
       const builder = await OrderBuilder.make(ChainId.BnbMainnet, signer, account ? { predictAccount: account } : undefined);
 
-      // Marketable LIMIT BUY at our max price.
-      const amounts = builder.getLimitOrderAmounts({
-        side: Side.BUY,
-        pricePerShareWei: parseUnits((req.limitPriceCents / 100).toFixed(6), 18),
-        quantityWei: parseUnits(String(req.sizeContracts), 18),
-      });
-      const order = builder.buildOrder("LIMIT", {
+      const book = await orderbook(marketId, apiKey);
+      const amounts = builder.getMarketOrderAmounts(
+        {
+          side: Side.BUY,
+          quantityWei: parseUnits(String(req.sizeContracts), 18),
+        },
+        book
+      );
+      const lastPriceCents = Number(formatUnits(amounts.lastPrice, 18)) * 100;
+      if (!Number.isFinite(lastPriceCents) || lastPriceCents > req.limitPriceCents) {
+        return reject(req, `predict.fun ask moved above limit (${lastPriceCents.toFixed(2)}c > ${req.limitPriceCents.toFixed(2)}c)`);
+      }
+      const order = builder.buildOrder("MARKET", {
         side: Side.BUY,
         tokenId,
         makerAmount: amounts.makerAmount,
@@ -270,8 +306,9 @@ export class PredictFunExecutionAdapter implements ExecutionAdapter {
           data: {
             order: { ...signed, hash },
             pricePerShare: amounts.pricePerShare.toString(),
-            strategy: "LIMIT",
+            strategy: "MARKET",
             isFillOrKill: true,
+            slippageBps: Number(amounts.slippageBps),
           },
         }),
       });
@@ -287,12 +324,13 @@ export class PredictFunExecutionAdapter implements ExecutionAdapter {
       // Response envelope unvalidated — treat an accepted order as filled unless it
       // reports a smaller size; reconciliation/naked detection covers the rest.
       const filled = Number(body.data?.filledSize);
-      const filledContracts = Number.isFinite(filled) && filled > 0 ? filled : req.sizeContracts;
+      const expectedContracts = Number(formatUnits(amounts.amount, 18));
+      const filledContracts = Number.isFinite(filled) && filled > 0 ? filled : expectedContracts || req.sizeContracts;
       return {
         ok: true,
         orderId: body.data?.orderId ?? hash,
         filledContracts,
-        avgPriceCents: req.limitPriceCents,
+        avgPriceCents: Number(formatUnits(amounts.pricePerShare, 18)) * 100 || req.limitPriceCents,
         status: filledContracts >= req.sizeContracts ? "filled" : "partial",
         raw: body,
       };

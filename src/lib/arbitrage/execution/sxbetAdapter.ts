@@ -21,6 +21,7 @@ import type { ExecutionAdapter, FillConfirmation, OrderRequest, OrderResult } fr
 import { deriveEoa, signerFor, walletKey } from "./wallet";
 
 const SX_FILL_URL = "https://api.sx.bet/orders/fill/v2";
+const SX_ORDERS_URL = "https://api.sx.bet/orders";
 const SX_TRADES_URL = "https://api.sx.bet/trades";
 
 // USDC risked (in 6-decimal wei) to buy `sizeContracts` at `limitPriceCents`:
@@ -118,6 +119,50 @@ async function signFill(wallet: Wallet, params: FillSignParams): Promise<string>
 }
 
 type SxFillResponse = { status?: string; message?: string; data?: { fillHash?: string; totalFilled?: string } };
+type SxBookOrder = {
+  percentageOdds?: string;
+  totalBetSize?: string;
+  fillAmount?: string;
+  isMakerBettingOutcomeOne?: boolean;
+};
+
+export async function checkSxFillability(req: OrderRequest): Promise<{ ok: boolean; reason?: string }> {
+  const marketHash = req.nativeMarketId;
+  const side = (req.nativeSide ?? "").toLowerCase();
+  if (!marketHash || (side !== "one" && side !== "two")) {
+    return { ok: false, reason: "missing SX.bet marketHash/outcome side" };
+  }
+
+  try {
+    const res = await fetch(`${SX_ORDERS_URL}?marketHashes=${encodeURIComponent(marketHash)}`, {
+      cache: "no-store",
+      headers: { Accept: "application/json" },
+    });
+    if (!res.ok) return { ok: false, reason: `SX.bet order book unavailable (HTTP ${res.status})` };
+
+    const json = (await res.json()) as { data?: SxBookOrder[] };
+    const wantsOutcomeOne = side === "one";
+    const requiredStakeUsd = (req.sizeContracts * req.limitPriceCents) / 100;
+
+    for (const order of json.data ?? []) {
+      const availableUsd = (Number(order.totalBetSize) - Number(order.fillAmount)) / 1_000_000;
+      if (!Number.isFinite(availableUsd) || availableUsd < requiredStakeUsd) continue;
+
+      const makerProbability = Number(order.percentageOdds) / 1e20;
+      if (!Number.isFinite(makerProbability) || makerProbability <= 0 || makerProbability >= 1) continue;
+
+      const makerBettingOne = Boolean(order.isMakerBettingOutcomeOne);
+      if (wantsOutcomeOne === makerBettingOne) continue;
+
+      const takerPriceCents = (1 - makerProbability) * 100;
+      if (takerPriceCents <= req.limitPriceCents) return { ok: true };
+    }
+
+    return { ok: false, reason: "SX.bet has no maker liquidity at or below the limit price" };
+  } catch (e) {
+    return { ok: false, reason: `SX.bet order book check failed: ${String(e).slice(0, 120)}` };
+  }
+}
 
 export class SxBetExecutionAdapter implements ExecutionAdapter {
   id = "sxbet";

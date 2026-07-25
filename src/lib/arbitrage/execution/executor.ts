@@ -35,18 +35,29 @@ export async function liveSxFillabilityBlockers(requests: OrderRequest[]): Promi
   return checks.filter((b): b is string => Boolean(b));
 }
 
+function venueLabel(venueId: string): string {
+  if (venueId === "sxbet") return "SX.bet";
+  if (venueId === "predictfun") return "Predict.fun";
+  if (venueId === "polymarket") return "Polymarket";
+  if (venueId === "kalshi") return "Kalshi";
+  return venueId;
+}
+
 export function fragileVenueFirstOrder(requests: OrderRequest[]): number[] {
   const hasSx = requests.some((r) => r.venueId === "sxbet");
+  const hasPredictFun = requests.some((r) => r.venueId === "predictfun");
   const hasPolymarket = requests.some((r) => r.venueId === "polymarket");
   const hasKalshi = requests.some((r) => r.venueId === "kalshi");
   const indexes = requests.map((_, i) => i);
-  if (!hasPolymarket || (!hasSx && !hasKalshi)) return indexes;
+  if (!hasPredictFun && (!hasPolymarket || (!hasSx && !hasKalshi))) return indexes;
   return indexes.sort((a, b) => {
     const av = requests[a].venueId;
     const bv = requests[b].venueId;
+    if (av === "predictfun" && bv !== "predictfun") return -1;
+    if (av !== "predictfun" && bv === "predictfun") return 1;
     if (av === "sxbet" && bv !== "sxbet") return -1;
     if (av !== "sxbet" && bv === "sxbet") return 1;
-    if (!hasSx) {
+    if (!hasSx && !hasPredictFun) {
       if (av === "polymarket" && bv !== "polymarket") return -1;
       if (av !== "polymarket" && bv === "polymarket") return 1;
     }
@@ -55,10 +66,11 @@ export function fragileVenueFirstOrder(requests: OrderRequest[]): number[] {
 }
 
 export function shouldSequenceFragileVenuePair(requests: OrderRequest[]): boolean {
+  const hasPredictFun = requests.some((r) => r.venueId === "predictfun");
   const hasPolymarket = requests.some((r) => r.venueId === "polymarket");
   const hasSx = requests.some((r) => r.venueId === "sxbet");
   const hasKalshi = requests.some((r) => r.venueId === "kalshi");
-  return hasPolymarket && (hasSx || hasKalshi);
+  return (hasPredictFun && requests.length > 1) || (hasPolymarket && (hasSx || hasKalshi));
 }
 
 function skippedBecausePriorLegFailed(req: OrderRequest, error: string): OrderResult {
@@ -71,7 +83,7 @@ export async function runExecution(
   requestedMode: ExecMode,
   creds?: ExecCreds
 ): Promise<ExecutionOutcome & { mode: ExecMode; blockers: string[] }> {
-  const prep = await prepareExecution(opportunityId, date);
+  const prep = await prepareExecution(opportunityId, date, requestedMode);
   if (prep.kind === "halt") return { ...prep.outcome, mode: "dry_run", blockers: [] };
   const ctx = prep.ctx;
 
@@ -186,7 +198,7 @@ export async function runExecution(
     const [first, ...rest] = sequencingOrder;
     placed[first] = await adapters[first].placeOrder(requests[first]);
     if (!placed[first].ok || placed[first].filledContracts <= 0) {
-      const firstVenue = requests[first].venueId === "sxbet" ? "SX.bet" : "Polymarket";
+      const firstVenue = venueLabel(requests[first].venueId);
       const error = `not submitted because ${firstVenue} hedge leg failed first: ${placed[first].error ?? placed[first].status}`;
       for (const i of rest) placed[i] = skippedBecausePriorLegFailed(requests[i], error);
     } else {
@@ -207,7 +219,7 @@ export async function runExecution(
   let results = placed;
   if (mode === "live") {
     reconciliation = await reconcileLegs(adapters, requests, placed);
-    results = applyReconciliation(placed, reconciliation, requests);
+    results = applyReconciliation(placed, reconciliation);
   }
 
   // ── Derive position status from per-leg fills ───────────────────────────────

@@ -145,6 +145,8 @@ export const DEFAULT_RISK: RiskSettings = {
   pauseOnNaked: true,
   staleQuoteMs: 300000, // see DEFAULT_AGENT note — fits the polling/cache cadence
   minLiquidityUsd: 20, // filter thin/tail lines with little executable size
+  minExpectedProfitUsd: 0,
+  liquidityStakeBufferMultiple: 1,
   maxLiveStakeUsd: DEFAULT_MAX_LIVE_STAKE_USD, // per-trade live cap; raise in the Risk panel after validating
   perVenueCap: {},
 };

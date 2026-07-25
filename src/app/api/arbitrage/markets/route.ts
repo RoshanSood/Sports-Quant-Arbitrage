@@ -16,10 +16,9 @@ export async function GET(request: NextRequest) {
     let markets = await getMarkets(date);
     let running = isRunning(date);
 
-    // Auto-trigger ingestion server-side when there's no cached data yet (or when a
-    // refresh is requested) — no admin password needed, so live markets load in
-    // production and can be re-scanned (mirrors props/bootstrap).
-    if ((markets.length === 0 || refresh) && !running) {
+    // Trigger ingestion only when refresh=1 is explicitly requested. Plain GETs are
+    // read-only so opening/reloading the page does not start scanning.
+    if (refresh && !running) {
       runIngestion(date).catch((e) => console.error(`[arbitrage/markets] ${date} ingestion failed:`, e));
       running = true;
     }

@@ -6,6 +6,33 @@ import type { ReasonCode, TradeStatus, VenueStatus } from "@/types/arbitrage";
 
 export { centsToDollars };
 
+type VenueStyle = { color: string; text: string };
+
+const VENUE_DISPLAY: Record<string, { name: string } & VenueStyle> = {
+  kalshi: { name: "Kalshi", color: "#3b82f6", text: "#93c5fd" },
+  polymarket: { name: "Polymarket", color: "#8b5cf6", text: "#c4b5fd" },
+  sxbet: { name: "SX.bet", color: "#a855f7", text: "#d8b4fe" },
+  predictfun: { name: "predict.fun", color: "#f472b6", text: "#fbcfe8" },
+  cloudbet: { name: "Cloudbet", color: "#16a34a", text: "#86efac" },
+  sportmarket: { name: "Sportmarket", color: "#7c3aed", text: "#c4b5fd" },
+};
+
+function titleCaseVenueId(venueId: string): string {
+  return venueId
+    .split(/[-_]/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+export function venueDisplayName(venueId: string): string {
+  return VENUE_DISPLAY[venueId]?.name ?? titleCaseVenueId(venueId);
+}
+
+export function venueStyle(venueId: string): VenueStyle {
+  return VENUE_DISPLAY[venueId] ?? { color: "#64748b", text: "#cbd5e1" };
+}
+
 export function formatCents(cents: number): string {
   return `${Math.round(cents)}¢`;
 }

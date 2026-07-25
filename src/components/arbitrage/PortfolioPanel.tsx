@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment, useState } from "react";
-import { ChevronDown, ChevronRight } from "lucide-react";
+import { ChevronDown, ChevronRight, Download } from "lucide-react";
 import type { ArbLeg, Trade, TradeMode } from "@/types/arbitrage";
 import { FloatingPanel, StatCard, Pill } from "./ui";
 import { centsToDollars, formatClock, formatDollars, formatEdgePct, formatSignedDollars, timeAgo, tradeStatusColor, venueDisplayName, venueStyle } from "./arbFormat";
@@ -34,6 +34,85 @@ function execDate(iso: string): string {
   return new Date(iso).toLocaleDateString("en-US");
 }
 
+function csvCell(value: unknown): string {
+  if (value == null) return "";
+  const text = typeof value === "string" || typeof value === "number" || typeof value === "boolean" ? String(value) : JSON.stringify(value);
+  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+function tradeMarketType(t: Trade): string {
+  return parseMarket(t.legs[0]?.marketId ?? "").type;
+}
+
+function tradeLine(t: Trade): string | null {
+  return parseMarket(t.legs[0]?.marketId ?? "").line;
+}
+
+function downloadTradesCsv(filename: string, rows: Trade[]) {
+  const headers = [
+    "id",
+    "date",
+    "mode",
+    "status",
+    "fillStatus",
+    "matchup",
+    "marketType",
+    "line",
+    "agentId",
+    "opportunityId",
+    "openedAt",
+    "closedAt",
+    "totalCost",
+    "expectedProfit",
+    "realizedPnl",
+    "netEdge",
+    "clvDrift",
+    "venues",
+    "legsJson",
+    "orderIdsJson",
+    "finalScoreJson",
+    "postFillJson",
+    "executionStepsJson",
+    "nakedLegIndex",
+  ];
+  const body = rows.map((t) => [
+    t.id,
+    t.date,
+    t.mode,
+    t.status,
+    t.fillStatus,
+    t.matchup,
+    tradeMarketType(t),
+    tradeLine(t),
+    t.agentId,
+    t.opportunityId,
+    t.openedAt,
+    t.closedAt,
+    t.totalCost,
+    t.expectedProfit,
+    t.realizedPnl,
+    t.netEdge,
+    t.clvDrift,
+    [...new Set(t.legs.map((l) => l.venueId))].join("|"),
+    t.legs,
+    t.orderIds,
+    t.finalScore ?? null,
+    t.postFill ?? null,
+    t.executionSteps ?? [],
+    t.nakedLegIndex ?? null,
+  ]);
+  const csv = [headers, ...body].map((row) => row.map(csvCell).join(",")).join("\n");
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 export default function PortfolioPanel({
   trades,
   live = false,
@@ -45,7 +124,7 @@ export default function PortfolioPanel({
   onSettle?: (trade: Trade) => void;
   onClose: () => void;
 }) {
-  const [mode, setMode] = useState<TradeMode>("paper");
+  const [mode, setMode] = useState<TradeMode>("live");
   const [expandedTradeId, setExpandedTradeId] = useState<string | null>(null);
   const rows = trades.filter((t) => t.mode === mode);
 
@@ -67,6 +146,7 @@ export default function PortfolioPanel({
   ];
   const visibleRows =
     statusFilter === "open" ? open : statusFilter === "closed" ? closed : statusFilter === "failed" ? failed : rows;
+  const exportName = `arbitrage-${mode}-trades-${new Date().toISOString().slice(0, 10)}.csv`;
 
   return (
     <FloatingPanel title="Portfolio" onClose={onClose} width="max-w-5xl">
@@ -83,8 +163,9 @@ export default function PortfolioPanel({
           {live ? "LIVE PAPER POSITIONS" : "SCANNING…"}
         </span>
       </div>
-      <div className="flex items-center gap-1 mb-4">
-        {(["paper", "live"] as TradeMode[]).map((m) => (
+      <div className="flex items-center justify-between gap-3 mb-4">
+        <div className="flex items-center gap-1">
+        {(["live", "paper"] as TradeMode[]).map((m) => (
           <button
             key={m}
             onClick={() => setMode(m)}
@@ -95,6 +176,16 @@ export default function PortfolioPanel({
             {m === "live" ? "⚠ Real" : "Paper"}
           </button>
         ))}
+        </div>
+        <button
+          onClick={() => downloadTradesCsv(exportName, rows)}
+          disabled={rows.length === 0}
+          className="inline-flex items-center gap-1.5 px-3 py-1 rounded text-xs font-semibold text-gray-200 border disabled:opacity-40 disabled:cursor-not-allowed hover:text-white"
+          style={{ borderColor: "#2a2f3e", background: "#11141a" }}
+        >
+          <Download className="w-3.5 h-3.5" />
+          Download CSV
+        </button>
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-6 gap-3 mb-4">
