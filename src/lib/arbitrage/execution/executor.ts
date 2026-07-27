@@ -9,6 +9,7 @@ import { prepareExecution, verifyPostFill, writeLog, type ExecutionOutcome } fro
 import { resolveExecutionMode, type ExecMode } from "./config";
 import { getAdapter, venueSupportsLive, type ExecCreds } from "./registry";
 import { applyReconciliation, reconcileLegs, type LegReconciliation } from "./reconcile";
+import { checkKalshiFillability } from "./kalshiAdapter";
 import { checkSxFillability } from "./sxbetAdapter";
 import type { ExecutionAdapter, OrderRequest, OrderResult } from "./types";
 
@@ -35,6 +36,17 @@ export async function liveSxFillabilityBlockers(requests: OrderRequest[]): Promi
   return checks.filter((b): b is string => Boolean(b));
 }
 
+export async function liveKalshiFillabilityBlockers(requests: OrderRequest[], creds?: ExecCreds): Promise<string[]> {
+  const checks = await Promise.all(
+    requests.map(async (req) => {
+      if (req.venueId !== "kalshi") return null;
+      const result = await checkKalshiFillability(req, creds?.kalshiCreds);
+      return result.ok ? null : result.reason ?? "Kalshi has no fillable top-of-book liquidity for this leg";
+    })
+  );
+  return checks.filter((b): b is string => Boolean(b));
+}
+
 function venueLabel(venueId: string): string {
   if (venueId === "sxbet") return "SX.bet";
   if (venueId === "predictfun") return "Predict.fun";
@@ -49,12 +61,16 @@ export function fragileVenueFirstOrder(requests: OrderRequest[]): number[] {
   const hasPolymarket = requests.some((r) => r.venueId === "polymarket");
   const hasKalshi = requests.some((r) => r.venueId === "kalshi");
   const indexes = requests.map((_, i) => i);
-  if (!hasPredictFun && (!hasPolymarket || (!hasSx && !hasKalshi))) return indexes;
+  if (!hasPredictFun && !(hasSx && hasKalshi) && (!hasPolymarket || (!hasSx && !hasKalshi))) return indexes;
   return indexes.sort((a, b) => {
     const av = requests[a].venueId;
     const bv = requests[b].venueId;
     if (av === "predictfun" && bv !== "predictfun") return -1;
     if (av !== "predictfun" && bv === "predictfun") return 1;
+    if (hasSx && hasKalshi) {
+      if (av === "kalshi" && bv !== "kalshi") return -1;
+      if (av !== "kalshi" && bv === "kalshi") return 1;
+    }
     if (av === "sxbet" && bv !== "sxbet") return -1;
     if (av !== "sxbet" && bv === "sxbet") return 1;
     if (!hasSx && !hasPredictFun) {
@@ -70,7 +86,7 @@ export function shouldSequenceFragileVenuePair(requests: OrderRequest[]): boolea
   const hasPolymarket = requests.some((r) => r.venueId === "polymarket");
   const hasSx = requests.some((r) => r.venueId === "sxbet");
   const hasKalshi = requests.some((r) => r.venueId === "kalshi");
-  return (hasPredictFun && requests.length > 1) || (hasPolymarket && (hasSx || hasKalshi));
+  return (hasPredictFun && requests.length > 1) || (hasSx && hasKalshi) || (hasPolymarket && (hasSx || hasKalshi));
 }
 
 function skippedBecausePriorLegFailed(req: OrderRequest, error: string): OrderResult {
@@ -171,7 +187,11 @@ export async function runExecution(
   }));
 
   if (mode === "live") {
-    const fillabilityBlockers = await liveSxFillabilityBlockers(requests);
+    const [sxBlockers, kalshiBlockers] = await Promise.all([
+      liveSxFillabilityBlockers(requests),
+      liveKalshiFillabilityBlockers(requests, creds),
+    ]);
+    const fillabilityBlockers = [...sxBlockers, ...kalshiBlockers];
     if (fillabilityBlockers.length) {
       const reason = `Live execution blocked - ${fillabilityBlockers.join("; ")}`;
       await writeLog(

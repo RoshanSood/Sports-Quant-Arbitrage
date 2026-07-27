@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Check, KeyRound, X } from "lucide-react";
-import type { ArbLog, Venue } from "@/types/arbitrage";
+import type { ArbLog, ArbOpportunity, Trade, Venue } from "@/types/arbitrage";
 import { venueStatusColor } from "./arbFormat";
 import { CREDS_CHANGED_EVENT, hasVenueCreds } from "./venueCreds";
 import ActivityFeed, { type ScoreEvent } from "./ActivityFeed";
@@ -36,6 +36,8 @@ export type AgentTrade = {
 export default function ArenaCanvas({
   venues,
   logs,
+  opportunities = [],
+  trades = [],
   scores = [],
   edges,
   agentName,
@@ -46,6 +48,8 @@ export default function ArenaCanvas({
 }: {
   venues: Venue[];
   logs: ArbLog[];
+  opportunities?: ArbOpportunity[];
+  trades?: Trade[];
   scores?: ScoreEvent[];
   edges: BookEdge[];
   agentName: string;
@@ -271,7 +275,7 @@ export default function ArenaCanvas({
 
       {/* Docked activity feed */}
       <div className="absolute bottom-3 left-3 w-80 rounded-lg border shadow-xl" style={{ background: "#0e1014", borderColor: "#1e2130" }}>
-        <ActivityFeed logs={logs} scores={scores} compact />
+        <ActivityFeed logs={logs} opportunities={opportunities} trades={trades} scores={scores} compact />
       </div>
 
       <div className="absolute top-3 right-4 flex items-center gap-2 text-[10px] text-gray-600">

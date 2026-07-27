@@ -23,6 +23,57 @@ type KalshiV2OrderResp = {
   ts_ms?: number;
 };
 
+type KalshiMarketSnapshot = {
+  market?: {
+    yes_bid?: number;
+    yes_ask?: number;
+    yes_bid_dollars?: string | number;
+    yes_ask_dollars?: string | number;
+    yes_bid_size_fp?: number | string;
+    yes_ask_size_fp?: number | string;
+    status?: string;
+  };
+};
+
+function centsFromMaybeDollars(cents?: number, dollars?: string | number): number | null {
+  const d = Number(dollars);
+  if (Number.isFinite(d) && d > 0 && d < 1) return Math.round(d * 100);
+  if (typeof cents === "number" && Number.isFinite(cents) && cents > 0 && cents < 100) return Math.round(cents);
+  return null;
+}
+
+export async function checkKalshiFillability(req: OrderRequest, creds?: KalshiCreds): Promise<{ ok: boolean; reason?: string }> {
+  const ticker = req.nativeMarketId;
+  const yesNo = (req.nativeSide ?? "").toLowerCase();
+  if (!ticker || (yesNo !== "yes" && yesNo !== "no")) {
+    return { ok: false, reason: "missing Kalshi native ticker/side" };
+  }
+
+  try {
+    const snapshot = await kalshiGet<KalshiMarketSnapshot>(`/markets/${encodeURIComponent(ticker)}`, {}, creds);
+    const market = snapshot.market;
+    if (!market) return { ok: false, reason: "Kalshi market snapshot unavailable" };
+    if (market.status && !["open", "active"].includes(market.status)) {
+      return { ok: false, reason: `Kalshi market is ${market.status}` };
+    }
+
+    const yesAsk = centsFromMaybeDollars(market.yes_ask, market.yes_ask_dollars);
+    const yesBid = centsFromMaybeDollars(market.yes_bid, market.yes_bid_dollars);
+    const priceCents = yesNo === "yes" ? yesAsk : yesBid == null ? null : 100 - yesBid;
+    const availableContracts = Number(yesNo === "yes" ? market.yes_ask_size_fp : market.yes_bid_size_fp);
+    if (priceCents == null) return { ok: false, reason: "Kalshi top-of-book price unavailable" };
+    if (priceCents > req.limitPriceCents) {
+      return { ok: false, reason: `Kalshi top-of-book moved above limit (${priceCents}c > ${req.limitPriceCents}c)` };
+    }
+    if (!Number.isFinite(availableContracts) || availableContracts < req.sizeContracts) {
+      return { ok: false, reason: `Kalshi top-of-book size ${Number.isFinite(availableContracts) ? availableContracts.toFixed(2) : "unknown"} < ${req.sizeContracts}` };
+    }
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, reason: `Kalshi market check failed: ${String(e).slice(0, 120)}` };
+  }
+}
+
 export class KalshiExecutionAdapter implements ExecutionAdapter {
   id = "kalshi";
   constructor(private creds?: KalshiCreds) {}

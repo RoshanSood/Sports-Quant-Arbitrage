@@ -150,10 +150,13 @@ export function detectArbs(
   const watch: MainLineWatch[] = [];
   const now = new Date().toISOString();
 
-  // Totals: one main line per game. Moneyline: the single market per game.
+  // Evaluate every matched total line. Live games can produce real, short-lived
+  // cross-venue gaps on alternate totals; the stale-divergence gate below still
+  // rejects lines where venues plainly disagree on the same side.
   const totals = matched.filter((e) => e.marketType === "total");
   const others = matched.filter((e) => e.marketType !== "total");
-  const candidates = [...pickMainLines(totals), ...others];
+  const mainTotalKeys = new Set(pickMainLines(totals).map((e) => `${e.eventKey}:${e.line}`));
+  const candidates = [...totals, ...others];
 
   for (const ev of candidates) {
     const isTotal = ev.marketType === "total";
@@ -194,7 +197,7 @@ export function detectArbs(
     else status = "no_edge";
 
     // Watch board is the per-game main total monitor (totals only).
-    if (isTotal) {
+    if (isTotal && mainTotalKeys.has(`${ev.eventKey}:${ev.line}`)) {
       const overByVenue = new Map<string, number>();
       const underByVenue = new Map<string, number>();
       for (const l of ev.legs) {

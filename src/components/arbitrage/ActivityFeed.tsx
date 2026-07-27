@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import type { ArbLog } from "@/types/arbitrage";
+import type { ArbLog, ArbOpportunity, Trade } from "@/types/arbitrage";
 import { formatClock, formatEdgePct } from "./arbFormat";
 
 type FeedFilter = "ALL" | "TRADES" | "SCORES" | "SYSTEM";
@@ -18,7 +18,51 @@ type FeedItem = {
   result?: ArbLog["result"];
 };
 
-function buildFeed(logs: ArbLog[], scores: ScoreEvent[]): FeedItem[] {
+function opportunityLogId(log: ArbLog): string | null {
+  const id = log.detailsJson?.opportunityId;
+  return typeof id === "string" ? id : null;
+}
+
+function arbStatusText(opp: ArbOpportunity, logs: ArbLog[], trades: Trade[]): { text: string; result?: ArbLog["result"]; time: string } {
+  const latestLog = logs
+    .filter((l) => opportunityLogId(l) === opp.id)
+    .sort((a, b) => b.time.localeCompare(a.time))[0];
+  const latestTrade = trades
+    .filter((t) => t.opportunityId === opp.id)
+    .sort((a, b) => b.openedAt.localeCompare(a.openedAt))[0];
+
+  if (latestLog) {
+    const status =
+      latestLog.result === "executed"
+        ? "successful"
+        : latestLog.result === "naked"
+          ? "unhedged"
+          : latestLog.result === "partial"
+            ? "partial"
+            : "failed";
+    return {
+      time: latestLog.time,
+      result: latestLog.result,
+      text: `${opp.matchup} ${opp.marketType}${opp.line != null ? ` ${opp.line}` : ""} — ${status}: ${latestLog.reason}`,
+    };
+  }
+
+  if (latestTrade) {
+    const result = latestTrade.status === "open" ? "executed" : latestTrade.status === "naked" ? "naked" : latestTrade.status === "failed" ? "halted" : "partial";
+    return {
+      time: latestTrade.openedAt,
+      result,
+      text: `${opp.matchup} ${opp.marketType}${opp.line != null ? ` ${opp.line}` : ""} — ${latestTrade.status}`,
+    };
+  }
+
+  return {
+    time: opp.detectedAt,
+    text: `${opp.matchup} ${opp.marketType}${opp.line != null ? ` ${opp.line}` : ""} — detected, not played yet`,
+  };
+}
+
+function buildFeed(logs: ArbLog[], scores: ScoreEvent[], opportunities: ArbOpportunity[], trades: Trade[]): FeedItem[] {
   const tradeItems: FeedItem[] = logs.map((l) => ({
     id: l.id,
     time: l.time,
@@ -27,21 +71,36 @@ function buildFeed(logs: ArbLog[], scores: ScoreEvent[]): FeedItem[] {
     edge: l.edge,
     result: l.result,
   }));
+  const arbStatusItems: FeedItem[] = opportunities.map((opp) => {
+    const status = arbStatusText(opp, logs, trades);
+    return {
+      id: `arb-status-${opp.id}`,
+      time: status.time,
+      kind: "SYSTEM",
+      text: status.text,
+      edge: opp.netEdge,
+      result: status.result,
+    };
+  });
   const scoreItems: FeedItem[] = scores.map((s) => ({ id: s.id, time: s.time, kind: "SCORES", text: s.text }));
-  return [...tradeItems, ...scoreItems].sort((a, b) => b.time.localeCompare(a.time));
+  return [...arbStatusItems, ...tradeItems, ...scoreItems].sort((a, b) => b.time.localeCompare(a.time));
 }
 
 export default function ActivityFeed({
   logs,
   scores = [],
+  opportunities = [],
+  trades = [],
   compact = false,
 }: {
   logs: ArbLog[];
   scores?: ScoreEvent[];
+  opportunities?: ArbOpportunity[];
+  trades?: Trade[];
   compact?: boolean;
 }) {
   const [filter, setFilter] = useState<FeedFilter>("ALL");
-  const feed = buildFeed(logs, scores);
+  const feed = buildFeed(logs, scores, opportunities, trades);
   const shown = filter === "ALL" ? feed : feed.filter((f) => f.kind === filter);
 
   return (
@@ -74,7 +133,13 @@ export default function ActivityFeed({
                 item.kind === "SCORES"
                   ? "text-yellow-300 font-semibold"
                   : item.kind === "SYSTEM"
-                    ? "text-amber-400"
+                    ? item.result === "executed"
+                      ? "text-green-400"
+                      : item.result === "naked"
+                        ? "text-red-400"
+                        : item.result === "halted" || item.result === "failed"
+                          ? "text-orange-400"
+                          : "text-amber-400"
                     : item.result === "executed"
                       ? "text-green-400"
                       : item.result === "naked"

@@ -82,6 +82,7 @@ export default function ArbitrageClient() {
   const [soundOn, setSoundOn] = useState(false);
   const [killSwitch, setKillSwitch] = useState(false);
   const [agentTrade, setAgentTrade] = useState<AgentTrade | null>(null);
+  const [executingOppIds, setExecutingOppIds] = useState<Set<string>>(() => new Set());
   const tradeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const autoFiredRef = useRef<Set<string>>(new Set());
   const autoInFlightRef = useRef<Set<string>>(new Set());
@@ -352,6 +353,7 @@ export default function ArbitrageClient() {
       const legA = opp.legs[0]?.venueId ?? "kalshi";
       const legB = opp.legs[1]?.venueId ?? "polymarket";
       if (tradeTimer.current) clearTimeout(tradeTimer.current);
+      setExecutingOppIds((prev) => new Set(prev).add(opp.id));
       setAgentTrade({ legA, legB, status: "pending" });
 
       let res: ExecResponse = null;
@@ -367,6 +369,12 @@ export default function ArbitrageClient() {
         }).then((r) => r.json());
       } catch (e) {
         console.error(e);
+      } finally {
+        setExecutingOppIds((prev) => {
+          const next = new Set(prev);
+          next.delete(opp.id);
+          return next;
+        });
       }
 
       const ok = res?.result === "executed" || res?.result === "partial";
@@ -519,6 +527,8 @@ export default function ArbitrageClient() {
         <ArenaCanvas
           venues={venues}
           logs={logs}
+          opportunities={opportunities}
+          trades={trades}
           scores={scoreFeed}
           edges={scanning && !killSwitch ? edges : []}
           agentName={agent.name}
@@ -532,7 +542,9 @@ export default function ArbitrageClient() {
           <ArbsPanel
             opportunities={opportunities}
             trades={trades}
+            logs={logs}
             watch={watch}
+            executingIds={executingOppIds}
             agentName={agent.name}
             live={oppsLive}
             refreshing={refreshing}

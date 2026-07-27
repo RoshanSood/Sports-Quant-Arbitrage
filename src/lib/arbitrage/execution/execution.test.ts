@@ -94,4 +94,10 @@ describe("live execution sequencing", () => {
     expect(shouldSequenceFragileVenuePair(requests)).toBe(true);
     expect(fragileVenueFirstOrder(requests)).toEqual([1, 0]);
   });
+
+  it("places kalshi before sx.bet so a kalshi IOC miss cannot leave an sx-only fill", () => {
+    const requests = [req("sxbet"), req("kalshi")];
+    expect(shouldSequenceFragileVenuePair(requests)).toBe(true);
+    expect(fragileVenueFirstOrder(requests)).toEqual([1, 0]);
+  });
 });

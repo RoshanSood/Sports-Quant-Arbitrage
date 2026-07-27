@@ -1,14 +1,16 @@
 "use client";
 
 import { Play, RefreshCw } from "lucide-react";
-import type { ArbOpportunity, MainLineWatch, Trade } from "@/types/arbitrage";
+import type { ArbLog, ArbOpportunity, MainLineWatch, Trade } from "@/types/arbitrage";
 import { FloatingPanel, Pill } from "./ui";
 import { formatCents, formatClock, formatDollars, formatEdgePct, formatOdds, timeAgo } from "./arbFormat";
 
 export default function ArbsPanel({
   opportunities,
   trades = [],
+  logs = [],
   watch = [],
+  executingIds = new Set<string>(),
   agentName,
   live = false,
   refreshing = false,
@@ -18,7 +20,9 @@ export default function ArbsPanel({
 }: {
   opportunities: ArbOpportunity[];
   trades?: Trade[];
+  logs?: ArbLog[];
   watch?: MainLineWatch[];
+  executingIds?: Set<string>;
   agentName: string;
   live?: boolean;
   refreshing?: boolean;
@@ -32,6 +36,18 @@ export default function ArbsPanel({
   for (const t of trades) {
     const prev = execByOpp.get(t.opportunityId);
     if (!prev || new Date(t.openedAt) > new Date(prev)) execByOpp.set(t.opportunityId, t.openedAt);
+  }
+  const logsByOpp = new Map<string, ArbLog>();
+  for (const log of logs) {
+    const id = typeof log.detailsJson?.opportunityId === "string" ? log.detailsJson.opportunityId : null;
+    if (!id) continue;
+    const prev = logsByOpp.get(id);
+    if (!prev || log.time > prev.time) logsByOpp.set(id, log);
+  }
+  const tradesByOpp = new Map<string, Trade>();
+  for (const trade of trades) {
+    const prev = tradesByOpp.get(trade.opportunityId);
+    if (!prev || trade.openedAt > prev.openedAt) tradesByOpp.set(trade.opportunityId, trade);
   }
   return (
     <FloatingPanel title="Arbs" subtitle={`Arbs: ${opportunities.length}`} onClose={onClose} width="max-w-5xl">
@@ -75,6 +91,7 @@ export default function ArbsPanel({
               <th className="py-2 pr-3">Net</th>
               <th className="py-2 pr-3">Sizes</th>
               <th className="py-2 pr-3">Executed</th>
+              <th className="py-2 pr-3">Status</th>
               <th className="py-2 pr-3">Open</th>
             </tr>
           </thead>
@@ -82,6 +99,7 @@ export default function ArbsPanel({
             {opportunities.map((opp) => {
               const [a, b] = opp.legs;
               const execAt = execByOpp.get(opp.id);
+              const rowStatus = arbRowStatus(opp, logsByOpp.get(opp.id), tradesByOpp.get(opp.id), executingIds.has(opp.id));
               return (
                 <tr key={opp.id} className="border-b align-top" style={{ borderColor: "#15171e" }}>
                   <td className="py-3 pr-3">
@@ -123,12 +141,17 @@ export default function ArbsPanel({
                     )}
                   </td>
                   <td className="py-3 pr-3">
+                    <StatusPill status={rowStatus} />
+                    {rowStatus.reason && <div className="mt-1 max-w-40 truncate text-[10px] text-gray-600" title={rowStatus.reason}>{rowStatus.reason}</div>}
+                  </td>
+                  <td className="py-3 pr-3">
                     <button
                       onClick={() => onPlay(opp)}
+                      disabled={rowStatus.kind === "executing"}
                       className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold text-white"
-                      style={{ background: "#d946ef" }}
+                      style={{ background: rowStatus.kind === "executing" ? "#4b5563" : "#d946ef" }}
                     >
-                      <Play className="w-3 h-3" /> Play
+                      <Play className="w-3 h-3" /> {rowStatus.kind === "executing" ? "Running" : "Play"}
                     </button>
                   </td>
                 </tr>
@@ -136,7 +159,7 @@ export default function ArbsPanel({
             })}
             {opportunities.length === 0 && (
               <tr>
-                <td colSpan={10} className="py-8 text-center text-gray-500">
+                <td colSpan={11} className="py-8 text-center text-gray-500">
                   {live
                     ? "No guaranteed arbs on the current slate above the agent's min edge after fees."
                     : "No opportunities detected yet."}
@@ -155,6 +178,44 @@ export default function ArbsPanel({
 // Live monitoring of each game's MAIN total line — even when there's no tradeable
 // arb. Lets you watch the engine lock onto ~7.5-9.5 and spot an edge the moment
 // the two venues diverge on the main line.
+type RowStatus = {
+  kind: "detected" | "executing" | "successful" | "failed" | "unhedged" | "partial" | "open";
+  label: string;
+  reason?: string;
+};
+
+function arbRowStatus(opp: ArbOpportunity, log: ArbLog | undefined, trade: Trade | undefined, executing: boolean): RowStatus {
+  if (executing) return { kind: "executing", label: "Executing" };
+  if (log) {
+    if (log.result === "executed") return { kind: "successful", label: "Successful", reason: log.reason };
+    if (log.result === "naked") return { kind: "unhedged", label: "Unhedged", reason: log.reason };
+    if (log.result === "partial") return { kind: "partial", label: "Partial", reason: log.reason };
+    return { kind: "failed", label: "Failed", reason: log.reason };
+  }
+  if (trade) {
+    if (trade.status === "open") return { kind: "open", label: "Open" };
+    if (trade.status === "naked") return { kind: "unhedged", label: "Unhedged" };
+    if (trade.status === "partial") return { kind: "partial", label: "Partial" };
+    if (trade.status === "failed") return { kind: "failed", label: "Failed" };
+    if (trade.status === "settled") return { kind: "successful", label: "Settled" };
+  }
+  return { kind: "detected", label: `Detected ${timeAgo(opp.detectedAt)}` };
+}
+
+function StatusPill({ status }: { status: RowStatus }) {
+  const colors = {
+    detected: { color: "#3b4252", text: "#cbd5e1" },
+    executing: { color: "#075985", text: "#7dd3fc" },
+    successful: { color: "#14532d", text: "#86efac" },
+    failed: { color: "#7c2d12", text: "#fdba74" },
+    unhedged: { color: "#7f1d1d", text: "#fca5a5" },
+    partial: { color: "#713f12", text: "#fde68a" },
+    open: { color: "#064e3b", text: "#6ee7b7" },
+  } as const;
+  const c = colors[status.kind];
+  return <Pill color={c.color} text={c.text}>{status.label}</Pill>;
+}
+
 function WatchBoard({ watch }: { watch: MainLineWatch[] }) {
   if (watch.length === 0) return null;
   const statusStyle = {
