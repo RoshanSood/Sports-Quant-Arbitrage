@@ -16,6 +16,10 @@ type PolymarketMarket = {
   liquidityNum?: number; // $ liquidity resting in the CLOB book (Gamma)
   tokens?: Array<{ token_id: string; outcome: string; price?: number }>;
   clobTokenIds?: string; // JSON array of ERC-1155 token ids, parallel to `outcomes`
+  slug?: string;
+  gameStartTime?: string;
+  startDate?: string;
+  endDate?: string;
 };
 
 type PolymarketEvent = {
@@ -26,6 +30,8 @@ type PolymarketEvent = {
   volume?: string;
   startDate?: string;
   endDate?: string;
+  eventDate?: string;
+  startTime?: string;
 };
 
 // Fetch all open game-level events from Polymarket for a tag (mlb, wnba, …).
@@ -49,7 +55,7 @@ async function fetchMLBEvents(tag: string = "mlb"): Promise<PolymarketEvent[]> {
     }
     const data = await res.json();
     const events: PolymarketEvent[] = Array.isArray(data) ? data : data.events || [];
-    return events.filter((ev) => /vs\.?/i.test(ev.title));
+    return events;
   } catch (err) {
     console.error("[Polymarket] fetch error:", err);
     return [];
@@ -65,17 +71,36 @@ async function fetchMLBEvents(tag: string = "mlb"): Promise<PolymarketEvent[]> {
 //
 // Fix: score events by number of distinct market types (moneyline/spread/total), prefer
 // the most complete event, and break ties by most recent startDate.
+function dateOnly(value: string | undefined): string | null {
+  if (!value) return null;
+  return value.match(/^(\d{4}-\d{2}-\d{2})/)?.[1] ?? null;
+}
+
+function slugDate(slug: string | undefined): string | null {
+  return slug?.match(/(\d{4}-\d{2}-\d{2})(?:$|-)/)?.[1] ?? null;
+}
+
+function polymarketGameDate(ev: PolymarketEvent): string | null {
+  return (
+    dateOnly(ev.eventDate) ??
+    dateOnly(ev.startTime) ??
+    slugDate(ev.slug) ??
+    (ev.markets ?? []).map((m) => dateOnly(m.gameStartTime)).find(Boolean) ??
+    (ev.markets ?? []).map((m) => slugDate(m.slug)).find(Boolean) ??
+    null
+  );
+}
+
+function eventDateMatches(ev: PolymarketEvent, gameDate: string): boolean {
+  return polymarketGameDate(ev) === gameDate;
+}
+
 function pickBestEvent(
   matched: PolymarketEvent[],
   gameDate: string // YYYY-MM-DD
-): PolymarketEvent {
-  const inWindow = matched.filter((ev) => {
-    const start = (ev.startDate ?? "").slice(0, 10);
-    const end = (ev.endDate ?? "").slice(0, 10);
-    return (!start || start <= gameDate) && (!end || end >= gameDate);
-  });
-
-  const pool = inWindow.length > 0 ? inWindow : matched;
+): PolymarketEvent | null {
+  const pool = matched.filter((ev) => eventDateMatches(ev, gameDate));
+  if (pool.length === 0) return null;
   const livePool = pool.filter(eventHasLivePrices);
   const sortPool = livePool.length > 0 ? livePool : pool;
 
@@ -318,6 +343,7 @@ export async function fetchPolymarketData(
     // Pick the event whose date window best matches the game date
     const gameDate = game.date; // YYYY-MM-DD from ESPN
     const matchedEvent = pickBestEvent(matchedEvents, gameDate);
+    if (!matchedEvent) continue;
 
     const gameMarket: GameMarket = {
       moneyline: [],
@@ -385,6 +411,7 @@ export async function fetchPolymarketTotalsByGame(
     const matchedEvents = events.filter((ev) => gameMatchesEvent(game, ev));
     if (matchedEvents.length === 0) continue;
     const event = pickBestEvent(matchedEvents, game.date);
+    if (!event) continue;
 
     const byLine = new Map<
       number,
@@ -449,6 +476,7 @@ export async function fetchPolymarketTotalsByGame(
     }
 
     if (byLine.size === 0) continue;
+    const sourceStartTime = polymarketGameDate(event) ?? game.date;
     result.set(
       game.id,
       [...byLine.entries()].map(([line, q]) => ({
@@ -460,6 +488,7 @@ export async function fetchPolymarketTotalsByGame(
         marketId: q.id,
         overTokenId: q.overTokenId,
         underTokenId: q.underTokenId,
+        sourceStartTime,
       }))
     );
   }
@@ -481,6 +510,7 @@ export async function fetchPolymarketMoneylineByGame(
     const matched = events.filter((ev) => gameMatchesEvent(game, ev));
     if (matched.length === 0) continue;
     const event = pickBestEvent(matched, game.date);
+    if (!event) continue;
 
     const ml = (event.markets ?? []).find((m) => classifyMarket(m) === "moneyline");
     if (!ml) continue;
@@ -524,6 +554,7 @@ export async function fetchPolymarketMoneylineByGame(
       marketId: ml.id,
       homeTokenId,
       awayTokenId,
+      sourceStartTime: polymarketGameDate(event) ?? game.date,
     });
   }
 
@@ -558,7 +589,11 @@ export async function fetchPolymarketWinnerByGame(
     teamMatchesTitle(t.name, t.shortName, t.abbreviation, q);
 
   for (const game of games) {
-    const markets = events.filter((ev) => gameMatchesEvent(game, ev)).flatMap((ev) => ev.markets ?? []);
+    const matchedEvents = events.filter((ev) => gameMatchesEvent(game, ev));
+    if (matchedEvents.length === 0) continue;
+    const event = pickBestEvent(matchedEvents, game.date);
+    if (!event) continue;
+    const markets = event.markets ?? [];
     if (!markets.length) continue;
 
     // The per-outcome "win" markets name exactly one team; the draw market says draw/tie.
@@ -585,6 +620,7 @@ export async function fetchPolymarketWinnerByGame(
       marketId: homeM.id,
       homeTokenId: yesToken(homeM),
       awayTokenId: yesToken(awayM),
+      sourceStartTime: polymarketGameDate(event) ?? game.date,
       ...drawFields,
     });
   }
@@ -606,6 +642,7 @@ export async function fetchPolymarketSpreadByGame(
     const matched = events.filter((ev) => gameMatchesEvent(game, ev));
     if (matched.length === 0) continue;
     const event = pickBestEvent(matched, game.date);
+    if (!event) continue;
 
     const sp = (event.markets ?? []).find((m) => classifyMarket(m) === "spread");
     if (!sp) continue;
@@ -656,6 +693,7 @@ export async function fetchPolymarketSpreadByGame(
       marketId: sp.id,
       homeTokenId,
       awayTokenId,
+      sourceStartTime: polymarketGameDate(event) ?? game.date,
     });
   }
 

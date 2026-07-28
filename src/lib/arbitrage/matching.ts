@@ -110,6 +110,7 @@ function toLeg(m: NormalizedMarket): MatchedLeg {
     marketId: m.marketId,
     nativeMarketId: m.nativeMarketId,
     nativeSide: m.nativeSide,
+    sourceStartTime: m.sourceStartTime,
     outcome: m.outcome,
     line: m.line ?? 0,
     priceCents: m.priceCents,

@@ -111,6 +111,7 @@ export type ArbLeg = {
   // which case live execution refuses to fire.
   nativeMarketId?: string;
   nativeSide?: string;
+  sourceStartTime?: string;
 };
 
 export type StakePlan = {
@@ -152,6 +153,7 @@ export type NormalizedMarket = {
   // real execution can place a correct order rather than parse the synthetic marketId.
   nativeMarketId?: string;
   nativeSide?: string;
+  sourceStartTime?: string;
   sport: Sport;
   league: string;
   startTime: string; // ISO timestamp
@@ -197,6 +199,7 @@ export type MatchedLeg = {
   marketId: string;
   nativeMarketId?: string;
   nativeSide?: string;
+  sourceStartTime?: string;
   outcome: Outcome; // OVER/UNDER for totals, HOME/AWAY for moneyline
   line: number;
   priceCents: number;

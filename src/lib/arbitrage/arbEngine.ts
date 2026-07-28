@@ -45,6 +45,12 @@ export type ArbDetectionResult = {
   watch: MainLineWatch[];
 };
 
+export type ArbRiskFilters = {
+  minLiquidityUsd?: number;
+  minExpectedProfitUsd?: number;
+  liquidityStakeBufferMultiple?: number;
+};
+
 // Cross-venue over-price divergence beyond which a main-line quote is treated as
 // stale (venues agree closely on the actively-traded main total; a big gap means
 // one side is stale/mispriced, which is what fabricates tail-line phantom arbs).
@@ -129,6 +135,7 @@ function buildLeg(m: MatchedLeg, size: number): ArbLeg {
     marketId: m.marketId,
     nativeMarketId: m.nativeMarketId,
     nativeSide: m.nativeSide,
+    sourceStartTime: m.sourceStartTime,
     outcome: m.outcome,
     priceCents: m.priceCents,
     decimalOdds: decimalOddsFromCents(m.priceCents),
@@ -143,8 +150,12 @@ function buildLeg(m: MatchedLeg, size: number): ArbLeg {
 export function detectArbs(
   matched: MatchedEvent[],
   agent: Agent,
-  minLiquidityUsd = 0
+  riskFilters: number | ArbRiskFilters = 0
 ): ArbDetectionResult {
+  const minLiquidityUsd = typeof riskFilters === "number" ? riskFilters : riskFilters.minLiquidityUsd ?? 0;
+  const minExpectedProfitUsd = typeof riskFilters === "number" ? 0 : riskFilters.minExpectedProfitUsd ?? 0;
+  const liquidityStakeBufferMultiple =
+    typeof riskFilters === "number" ? 1 : Math.max(1, riskFilters.liquidityStakeBufferMultiple ?? 1);
   const opportunities: ArbOpportunity[] = [];
   const rejects: ArbReject[] = [];
   const watch: MainLineWatch[] = [];
@@ -189,10 +200,17 @@ export function detectArbs(
     const net = round(gross - feeFrac - SLIPPAGE_RESERVE, 6);
     const totalFeeDollars = fees.reduce((s, f) => s + f.feeCents / 100, 0);
     const expectedProfit = round(plan.guaranteedPayout - plan.totalStake - totalFeeDollars, 2);
+    const requiredLiquidityUsd = Math.max(minLiquidityUsd, plan.totalStake * liquidityStakeBufferMultiple);
 
     let status: MainLineWatch["status"];
     if (divergence > STALE_DIVERGENCE_CENTS) status = "stale";
-    else if (totalCost < 100 && pairLiquidity >= minLiquidityUsd && net >= agent.minEdge && net <= agent.maxEdge)
+    else if (
+      totalCost < 100 &&
+      pairLiquidity >= requiredLiquidityUsd &&
+      expectedProfit >= minExpectedProfitUsd &&
+      net >= agent.minEdge &&
+      net <= agent.maxEdge
+    )
       status = "arb";
     else status = "no_edge";
 
@@ -244,8 +262,10 @@ export function detectArbs(
       });
     } else if (status === "stale") {
       rejects.push({ eventKey: ev.eventKey, matchup: ev.matchup, line: ev.line, reason: "stale_quote", netEdge: net, detail: `venues disagree ${divergence}c — likely stale` });
-    } else if (totalCost < 100 && pairLiquidity < minLiquidityUsd) {
-      rejects.push({ eventKey: ev.eventKey, matchup: ev.matchup, line: ev.line, reason: "insufficient_depth", netEdge: net, detail: `executable $${Math.round(pairLiquidity)} < min $${minLiquidityUsd}` });
+    } else if (totalCost < 100 && pairLiquidity < requiredLiquidityUsd) {
+      rejects.push({ eventKey: ev.eventKey, matchup: ev.matchup, line: ev.line, reason: "insufficient_depth", netEdge: net, detail: `executable $${Math.round(pairLiquidity)} < required $${Math.round(requiredLiquidityUsd)} (${liquidityStakeBufferMultiple}x stake buffer)` });
+    } else if (totalCost < 100 && expectedProfit < minExpectedProfitUsd) {
+      rejects.push({ eventKey: ev.eventKey, matchup: ev.matchup, line: ev.line, reason: "edge_below_min", netEdge: net, detail: `expected profit $${expectedProfit.toFixed(2)} < min $${minExpectedProfitUsd.toFixed(2)}` });
     } else if (net > agent.maxEdge) {
       rejects.push({ eventKey: ev.eventKey, matchup: ev.matchup, line: ev.line, reason: "edge_above_max", netEdge: net, detail: `net ${(net * 100).toFixed(2)}% > max` });
     } else if (totalCost < 100 && net < agent.minEdge) {

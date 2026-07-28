@@ -21,7 +21,7 @@ import { fetchPolymarketUsMLBMarkets, type PolymarketUsMarkets } from "@/lib/pol
 import { polymarketRegion } from "@/lib/polymarketRegion";
 import { fetchPredictFunMoneylineByGame } from "@/lib/predictFun";
 import { fetchCloudbetMoneylineByGame } from "@/lib/cloudbet";
-import { fetchSxBetMLBMarkets, fetchSxBetMoneylineByGame, type SxBetMarkets } from "@/lib/sxbet";
+import { fetchSxBetMLBMarkets, fetchSxBetMoneylineByGame, fetchSxBetTotalsByGame, type SxBetMarkets } from "@/lib/sxbet";
 import type { NormalizedMarket, Outcome, Sport, VenueId } from "@/types/arbitrage";
 import { decimalOddsFromCents, impliedProbFromCents } from "./arbMath";
 import { buildEventKey } from "./matching";
@@ -58,7 +58,7 @@ function nativeSideFor(
   if (venueId === "kalshi") return ids.kalshiYesNo;
   if (venueId === "polymarket") return polymarketRegion() === "us" ? ids.kalshiYesNo : ids.polyTokenId;
   if (venueId === "predictfun") return ids.polyTokenId; // on-chain outcome token id
-  if (venueId === "cloudbet") return ids.polyTokenId; // Cloudbet market URL (marketKey/outcome)
+  if (venueId === "cloudbet") return ids.polyTokenId; // CloudBet market URL (marketKey/outcome)
   if (venueId === "sxbet") {
     // Dynamic SX 1X2 soccer markets are modeled as separate "X vs Not X" markets.
     // The per-outcome hash rides in polyTokenId, and backing that result is always
@@ -93,6 +93,7 @@ function normalizeVenueTotals(
         // Kalshi totals: buying OVER = buy YES, UNDER = buy NO, on the line's ticker.
         nativeMarketId: l.marketId,
         nativeSide: nativeSideFor(venueId, { kalshiYesNo: outcome === "over" ? "yes" : "no", polyTokenId: tokenId, sxIsOne }),
+        sourceStartTime: l.sourceStartTime,
         sport,
         league,
         startTime: game.date,
@@ -149,6 +150,7 @@ function normalizeVenueTwoWay(
         polyTokenId: tokenId,
         sxIsOne,
       }),
+      sourceStartTime: q.sourceStartTime,
       sport,
       league,
       startTime: game.date,
@@ -292,9 +294,9 @@ export async function ingestTotals(date: string): Promise<IngestResult> {
           pTot = pm.totals; pML = pm.moneyline; pSp = pm.spread;
         } else {
           const tag = cfg.polyTag;
-          // Soccer/tennis on Polymarket are per-outcome Yes/No "winner" markets (1X2 for
-          // soccer), not a single 2-outcome moneyline — use the winner parser for those.
-          const winnerSport = cfg.sport === "soccer" || cfg.sport === "tennis";
+          // Soccer on Polymarket is per-outcome Yes/No "winner" markets (1X2).
+          // Tennis match winners are single 2-outcome markets, so use the ML parser.
+          const winnerSport = cfg.sport === "soccer";
           [pTot, pML, pSp] = await Promise.all([
             cfg.markets.totals ? fetchPolymarketTotalsByGame(games, tag).catch(emptyTot) : Promise.resolve(emptyTot()),
             cfg.markets.moneyline
@@ -312,7 +314,11 @@ export async function ingestTotals(date: string): Promise<IngestResult> {
       // the dynamic moneyline reader (enumerated leagues; soccer 1X2, tennis 2-way).
       const sx = cfg.sxLeagueId != null ? await fetchSxBetMLBMarkets(games, cfg.sxLeagueId).catch(() => EMPTY_SX) : EMPTY_SX;
       const sxDynML = cfg.sxDynamic ? await fetchSxBetMoneylineByGame(games, cfg.sxDynamic).catch(emptyTwo) : emptyTwo();
-      // predict.fun (MLB moneyline) + Cloudbet (moneyline; 2-way, or 3-way soccer 1X2).
+      const sxDynTotals =
+        cfg.sxDynamic?.totals && cfg.markets.totals
+          ? await fetchSxBetTotalsByGame(games, cfg.sxDynamic).catch(emptyTot)
+          : emptyTot();
+      // predict.fun (MLB moneyline) + CloudBet (moneyline; 2-way, or 3-way soccer 1X2).
       const pfML = cfg.predictfun ? await fetchPredictFunMoneylineByGame(games).catch(emptyTwo) : emptyTwo();
       const cbML = cfg.cloudbet ? await fetchCloudbetMoneylineByGame(games, cfg.cloudbet).catch(emptyTwo) : emptyTwo();
 
@@ -330,11 +336,11 @@ export async function ingestTotals(date: string): Promise<IngestResult> {
         ];
         const sxMoneyline = cfg.sxDynamic ? sxDynML.get(game.id) : sx.moneyline.get(game.id);
         const sRows = [
-          ...normalizeVenueTotals("sxbet", game, sx.totals.get(game.id), cfg.sport, cfg.league, now),
+          ...normalizeVenueTotals("sxbet", game, cfg.sxDynamic?.totals ? sxDynTotals.get(game.id) : sx.totals.get(game.id), cfg.sport, cfg.league, now),
           ...normalizeVenueTwoWay("sxbet", game, sxMoneyline, "moneyline", cfg.sport, cfg.league, now),
           ...normalizeVenueTwoWay("sxbet", game, sx.spread.get(game.id), "spread", cfg.sport, cfg.league, now),
         ];
-        // predict.fun + Cloudbet: moneyline only.
+        // predict.fun + CloudBet: moneyline only.
         const pfRows = normalizeVenueTwoWay("predictfun", game, pfML.get(game.id), "moneyline", cfg.sport, cfg.league, now);
         const cbRows = normalizeVenueTwoWay("cloudbet", game, cbML.get(game.id), "moneyline", cfg.sport, cfg.league, now);
         venueCounts.kalshi += kRows.length;
@@ -401,7 +407,7 @@ export async function runIngestion(date: string): Promise<void> {
     const r = await ingestTotals(date);
     console.log(
       `[arbitrage/ingest] ${date}: ${r.gameCount} games, ` +
-        `${r.venueCounts.kalshi} Kalshi + ${r.venueCounts.polymarket} Polymarket + ${r.venueCounts.sxbet} SX.bet + ${r.venueCounts.predictfun} predict.fun + ${r.venueCounts.cloudbet} Cloudbet quotes`
+        `${r.venueCounts.kalshi} Kalshi + ${r.venueCounts.polymarket} Polymarket + ${r.venueCounts.sxbet} SX.bet + ${r.venueCounts.predictfun} predict.fun + ${r.venueCounts.cloudbet} CloudBet quotes`
     );
   } catch (e) {
     console.error(`[arbitrage/ingest] ${date} failed:`, e);

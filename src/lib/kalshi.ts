@@ -397,6 +397,7 @@ export type VenueTotalLine = {
   underTokenId?: string;
   // … and SX.bet's outcome-one mapping (which side "over" corresponds to).
   overIsOutcomeOne?: boolean;
+  sourceStartTime?: string;
 };
 
 // A two-way market (moneyline) priced from each venue at the executable ask.
@@ -419,6 +420,7 @@ export type VenueTwoWay = {
   drawCents?: number;
   drawLiquidityUsd?: number;
   drawTokenId?: string; // native side id for the draw (Cloudbet market URL / SX outcome id)
+  sourceStartTime?: string;
 };
 
 // Kalshi MLB moneyline per game (home/away buy costs at the ask). Reuses the same

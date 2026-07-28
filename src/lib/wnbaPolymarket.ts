@@ -11,15 +11,20 @@ type PolymarketMarket = {
   outcomes?: string;
   outcomePrices?: string;
   tokens?: Array<{ token_id: string; outcome: string; price?: number }>;
+  gameStartTime?: string;
+  slug?: string;
 };
 
 type PolymarketEvent = {
   id: string;
   title: string;
+  slug?: string;
   markets: PolymarketMarket[];
   volume?: string;
   startDate?: string;
   endDate?: string;
+  eventDate?: string;
+  startTime?: string;
 };
 
 async function fetchWNBAEvents(): Promise<PolymarketEvent[]> {
@@ -188,13 +193,33 @@ function eventHasLivePrices(event: PolymarketEvent): boolean {
 // Pick the event with the most complete market set (moneyline+spread+total), breaking
 // ties by most recent startDate. Newer low-volume events often only have a moneyline
 // and would leave spread/total blank if picked solely by recency.
-function pickBestEvent(matched: PolymarketEvent[], gameDate: string): PolymarketEvent {
-  const inWindow = matched.filter((ev) => {
-    const start = (ev.startDate ?? "").slice(0, 10);
-    const end = (ev.endDate ?? "").slice(0, 10);
-    return (!start || start <= gameDate) && (!end || end >= gameDate);
-  });
-  const pool = inWindow.length > 0 ? inWindow : matched;
+function dateOnly(value: string | undefined): string | null {
+  if (!value) return null;
+  return value.match(/^(\d{4}-\d{2}-\d{2})/)?.[1] ?? null;
+}
+
+function slugDate(slug: string | undefined): string | null {
+  return slug?.match(/(\d{4}-\d{2}-\d{2})(?:$|-)/)?.[1] ?? null;
+}
+
+function polymarketGameDate(ev: PolymarketEvent): string | null {
+  return (
+    dateOnly(ev.eventDate) ??
+    dateOnly(ev.startTime) ??
+    slugDate(ev.slug) ??
+    (ev.markets ?? []).map((m) => dateOnly(m.gameStartTime)).find(Boolean) ??
+    (ev.markets ?? []).map((m) => slugDate(m.slug)).find(Boolean) ??
+    null
+  );
+}
+
+function eventDateMatches(ev: PolymarketEvent, gameDate: string): boolean {
+  return polymarketGameDate(ev) === gameDate;
+}
+
+function pickBestEvent(matched: PolymarketEvent[], gameDate: string): PolymarketEvent | null {
+  const pool = matched.filter((ev) => eventDateMatches(ev, gameDate));
+  if (pool.length === 0) return null;
   const livePool = pool.filter(eventHasLivePrices);
   const sortPool = livePool.length > 0 ? livePool : pool;
 
@@ -221,6 +246,7 @@ export async function fetchWNBAPolymarketData(games: WNBAGame[]): Promise<Map<st
     if (matchedEvents.length === 0) continue;
 
     const matchedEvent = pickBestEvent(matchedEvents, game.date);
+    if (!matchedEvent) continue;
 
     const gameMarket: GameMarket = {
       moneyline: [],

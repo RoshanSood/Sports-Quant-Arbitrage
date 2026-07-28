@@ -31,6 +31,7 @@ import { centsToDollars } from "./arbMath";
 import { computeFees, feeFractionOfStake } from "./feeEngine";
 import { getVenues } from "./venueStore";
 import { filterMarketsForAgent } from "./venueFilters";
+import { dateParamToIsoDate } from "./date";
 
 export type ExecutionOutcome = {
   result: ArbResult | "halted";
@@ -49,6 +50,18 @@ function nowIso() {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function opportunityStartDate(opportunityId: string): string | null {
+  const parts = opportunityId.split(":");
+  if (parts.length < 2) return null;
+  const maybeIso = parts[parts.length - 3];
+  return /^\d{4}-\d{2}-\d{2}T/.test(maybeIso) ? maybeIso.slice(0, 10) : null;
+}
+
+function sourceStartDate(value: string | undefined): string | null {
+  if (!value) return null;
+  return value.match(/^(\d{4}-\d{2}-\d{2})/)?.[1] ?? null;
 }
 
 export async function writeLog(
@@ -125,6 +138,8 @@ export async function prepareExecution(opportunityId: string, date: string, requ
   };
 
   const priorMatchup = opportunityId.split(":")[2] ?? opportunityId;
+  const requestedSlateDate = dateParamToIsoDate(date);
+  const oppDate = opportunityStartDate(opportunityId);
 
   // Load stored markets → matched events → opportunities, and locate this one.
   const detect = async () => {
@@ -166,10 +181,35 @@ export async function prepareExecution(opportunityId: string, date: string, requ
   if (!agent.enabled || agent.strategy !== "arbitrage") return asHalt("agent_disabled", "Agent is off or not an arbitrage agent", priorMatchup, [], 0, { opportunityId });
   addStep("kill_switch", "Kill switch", "pass", "Risk kill switch is clear");
   if (risk.killSwitch) return asHalt("kill_switch", "Risk kill switch is active", priorMatchup, [], 0, { opportunityId });
+  addStep("slate_date", "Slate date", oppDate == null || oppDate === requestedSlateDate ? "pass" : "halt", oppDate == null ? `requested ${requestedSlateDate}` : `opportunity ${oppDate} / requested ${requestedSlateDate}`);
+  if (oppDate != null && oppDate !== requestedSlateDate) {
+    return asHalt("final_refresh_failed", `Opportunity is for ${oppDate}, not requested slate ${requestedSlateDate}`, priorMatchup, [], 0, { opportunityId, opportunityDate: oppDate, requestedSlateDate });
+  }
   addStep("final_refresh", "Final quote refresh", opp ? "pass" : "halt", opp ? "Opportunity survived refresh" : "Opportunity disappeared");
   if (!opp) return asHalt("final_refresh_failed", "Opportunity no longer exists after quote refresh", priorMatchup, [], 0, { opportunityId });
 
   const venues = [...new Set(opp.legs.map((l) => l.venueId))];
+  const sourceDateMismatches = opp.legs
+    .map((l) => ({ ...l, sourceDate: sourceStartDate(l.sourceStartTime) }))
+    .filter((l) => l.sourceDate != null && l.sourceDate !== requestedSlateDate);
+  addStep(
+    "venue_source_date",
+    "Venue source date",
+    sourceDateMismatches.length === 0 ? "pass" : "halt",
+    sourceDateMismatches.length === 0
+      ? `all venue-native dates match ${requestedSlateDate}`
+      : sourceDateMismatches.map((l) => `${l.venueId} ${l.sourceDate}`).join(", ")
+  );
+  if (sourceDateMismatches.length > 0) {
+    return asHalt("final_refresh_failed", "Venue-native market date does not match requested slate", opp.matchup, venues, opp.netEdge, {
+      requestedSlateDate,
+      mismatches: sourceDateMismatches.map((l) => ({
+        venueId: l.venueId,
+        marketId: l.marketId,
+        sourceStartTime: l.sourceStartTime,
+      })),
+    });
+  }
 
   // Live execution trusts the targeted final refresh: if the refreshed opportunity is
   // still an arb, continue with its updated prices. Paper still uses the wider stale
