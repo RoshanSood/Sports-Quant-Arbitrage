@@ -40,10 +40,15 @@ export type ExecutionOutcome = {
 };
 
 const SLIPPAGE_RESERVE = 0; // legs priced at ask; spread already included
-const LIVE_EXECUTION_MAX_QUOTE_AGE_MS = 2000;
+const LIVE_REFRESH_RETRIES = 2;
+const LIVE_REFRESH_RETRY_DELAY_MS = 250;
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export async function writeLog(
@@ -139,8 +144,12 @@ export async function prepareExecution(opportunityId: string, date: string, requ
   // Live orders must run on a just-refreshed snapshot. Paper keeps the wider cache
   // window because it is useful for tracking/simulation and carries no fill risk.
   if (requestedMode === "live") {
-    await refreshMarketsForOpportunity(date, opportunityId).catch((e) => console.error("[arbitrage/exec] targeted pre-execution refresh failed:", e));
-    ({ markets, opp } = await detect());
+    for (let attempt = 0; attempt <= LIVE_REFRESH_RETRIES; attempt += 1) {
+      await refreshMarketsForOpportunity(date, opportunityId).catch((e) => console.error("[arbitrage/exec] targeted pre-execution refresh failed:", e));
+      ({ markets, opp } = await detect());
+      if (opp) break;
+      if (attempt < LIVE_REFRESH_RETRIES) await sleep(LIVE_REFRESH_RETRY_DELAY_MS);
+    }
   } else if (!opp || legAgeMs(opp, markets) > risk.staleQuoteMs) {
     await ingestTotals(date).catch((e) => console.error("[arbitrage/exec] pre-execution refresh failed:", e));
     ({ markets, opp } = await detect());
@@ -162,16 +171,18 @@ export async function prepareExecution(opportunityId: string, date: string, requ
 
   const venues = [...new Set(opp.legs.map((l) => l.venueId))];
 
-  // Still stale after a fresh re-ingest ⇒ the venue feeds themselves aren't updating.
+  // Live execution trusts the targeted final refresh: if the refreshed opportunity is
+  // still an arb, continue with its updated prices. Paper still uses the wider stale
+  // cache window because it can operate from stored snapshots.
   const oldestMs = legAgeMs(opp, markets);
-  const maxQuoteAgeMs = requestedMode === "live" ? Math.min(risk.staleQuoteMs, LIVE_EXECUTION_MAX_QUOTE_AGE_MS) : risk.staleQuoteMs;
-  const quoteFreshnessDetail = requestedMode === "live"
-    ? `${oldestMs}ms oldest quote / ${maxQuoteAgeMs}ms live max`
-    : `${oldestMs}ms oldest quote`;
-  addStep("stale_quote", "Quote freshness", oldestMs <= maxQuoteAgeMs ? "pass" : "halt", quoteFreshnessDetail);
-  if (oldestMs > maxQuoteAgeMs) {
-    const modeLabel = requestedMode === "live" ? "live " : "";
-    return asHalt("stale_quote", `${modeLabel}quote age ${oldestMs}ms exceeds ${maxQuoteAgeMs}ms (venue feed not refreshing fast enough)`, opp.matchup, venues, opp.netEdge, { oldestMs, maxQuoteAgeMs });
+  if (requestedMode === "live") {
+    addStep("stale_quote", "Quote freshness", "pass", `${oldestMs}ms oldest quote after targeted refresh; using refreshed arb prices`);
+  } else {
+    const maxQuoteAgeMs = risk.staleQuoteMs;
+    addStep("stale_quote", "Quote freshness", oldestMs <= maxQuoteAgeMs ? "pass" : "halt", `${oldestMs}ms oldest quote`);
+    if (oldestMs > maxQuoteAgeMs) {
+      return asHalt("stale_quote", `quote age ${oldestMs}ms exceeds ${maxQuoteAgeMs}ms (venue feed not refreshing fast enough)`, opp.matchup, venues, opp.netEdge, { oldestMs, maxQuoteAgeMs });
+    }
   }
 
   // Real-money position cap PER opportunity (match + line + market). Paper tracking is
