@@ -18,6 +18,7 @@ import type { Sport } from "@/types/arbitrage";
 export type ArbGame = {
   id: string;
   date: string;
+  startTimeIso?: string;
   awayTeam: { name: string; shortName: string; abbreviation: string };
   homeTeam: { name: string; shortName: string; abbreviation: string };
 };
