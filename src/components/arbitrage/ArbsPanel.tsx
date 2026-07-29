@@ -1,9 +1,12 @@
 "use client";
 
+import { useEffect, useMemo, useState } from "react";
 import { Play, RefreshCw } from "lucide-react";
 import type { ArbLog, ArbOpportunity, MainLineWatch, Trade } from "@/types/arbitrage";
 import { FloatingPanel, Pill } from "./ui";
-import { formatCents, formatClock, formatDollars, formatEdgePct, formatOdds, timeAgo } from "./arbFormat";
+import { formatCents, formatClock, formatDollars, formatEdgePct, formatOdds, timeAgo, venueDisplayName, venueStyle } from "./arbFormat";
+
+const TERMINAL_ARB_VISIBILITY_MS = 60_000;
 
 export default function ArbsPanel({
   opportunities,
@@ -30,27 +33,47 @@ export default function ArbsPanel({
   onClose: () => void;
   onPlay: (opp: ArbOpportunity) => void;
 }) {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+
+  useEffect(() => {
+    const id = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
   // Most-recent execution time per opportunity, so a played arb shows when the
   // trade was executed (vs. just when the opportunity was detected).
-  const execByOpp = new Map<string, string>();
-  for (const t of trades) {
-    const prev = execByOpp.get(t.opportunityId);
-    if (!prev || new Date(t.openedAt) > new Date(prev)) execByOpp.set(t.opportunityId, t.openedAt);
-  }
-  const logsByOpp = new Map<string, ArbLog>();
-  for (const log of logs) {
-    const id = typeof log.detailsJson?.opportunityId === "string" ? log.detailsJson.opportunityId : null;
-    if (!id) continue;
-    const prev = logsByOpp.get(id);
-    if (!prev || log.time > prev.time) logsByOpp.set(id, log);
-  }
-  const tradesByOpp = new Map<string, Trade>();
-  for (const trade of trades) {
-    const prev = tradesByOpp.get(trade.opportunityId);
-    if (!prev || trade.openedAt > prev.openedAt) tradesByOpp.set(trade.opportunityId, trade);
-  }
+  const { execByOpp, logsByOpp, tradesByOpp } = useMemo(() => {
+    const exec = new Map<string, string>();
+    for (const t of trades) {
+      const prev = exec.get(t.opportunityId);
+      if (!prev || new Date(t.openedAt) > new Date(prev)) exec.set(t.opportunityId, t.openedAt);
+    }
+    const latestLogs = new Map<string, ArbLog>();
+    for (const log of logs) {
+      const id = typeof log.detailsJson?.opportunityId === "string" ? log.detailsJson.opportunityId : null;
+      if (!id) continue;
+      const prev = latestLogs.get(id);
+      if (!prev || log.time > prev.time) latestLogs.set(id, log);
+    }
+    const latestTrades = new Map<string, Trade>();
+    for (const trade of trades) {
+      const prev = latestTrades.get(trade.opportunityId);
+      if (!prev || trade.openedAt > prev.openedAt) latestTrades.set(trade.opportunityId, trade);
+    }
+    return { execByOpp: exec, logsByOpp: latestLogs, tradesByOpp: latestTrades };
+  }, [logs, trades]);
+
+  const visibleOpportunities = useMemo(
+    () =>
+      opportunities.filter((opp) => {
+        const status = arbRowStatus(opp, logsByOpp.get(opp.id), tradesByOpp.get(opp.id), executingIds.has(opp.id));
+        return !terminalRowExpired(status, nowMs);
+      }),
+    [executingIds, logsByOpp, nowMs, opportunities, tradesByOpp]
+  );
+
   return (
-    <FloatingPanel title="Arbs" subtitle={`Arbs: ${opportunities.length}`} onClose={onClose} width="max-w-5xl">
+    <FloatingPanel title="Arbs" subtitle={`Arbs: ${visibleOpportunities.length}`} onClose={onClose} width="max-w-5xl">
       <div className="mb-3 flex items-center gap-2 text-[11px]">
         <span
           className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded font-semibold"
@@ -96,7 +119,7 @@ export default function ArbsPanel({
             </tr>
           </thead>
           <tbody>
-            {opportunities.map((opp) => {
+            {visibleOpportunities.map((opp) => {
               const [a, b] = opp.legs;
               const execAt = execByOpp.get(opp.id);
               const rowStatus = arbRowStatus(opp, logsByOpp.get(opp.id), tradesByOpp.get(opp.id), executingIds.has(opp.id));
@@ -157,7 +180,7 @@ export default function ArbsPanel({
                 </tr>
               );
             })}
-            {opportunities.length === 0 && (
+            {visibleOpportunities.length === 0 && (
               <tr>
                 <td colSpan={11} className="py-8 text-center text-gray-500">
                   {live
@@ -182,24 +205,37 @@ type RowStatus = {
   kind: "detected" | "executing" | "successful" | "failed" | "unhedged" | "partial" | "open";
   label: string;
   reason?: string;
+  terminalAt?: string;
 };
 
 function arbRowStatus(opp: ArbOpportunity, log: ArbLog | undefined, trade: Trade | undefined, executing: boolean): RowStatus {
   if (executing) return { kind: "executing", label: "Executing" };
   if (log) {
-    if (log.result === "executed") return { kind: "successful", label: "Successful", reason: log.reason };
-    if (log.result === "naked") return { kind: "unhedged", label: "Unhedged", reason: log.reason };
+    if (log.result === "executed") return { kind: "successful", label: "Successful", reason: log.reason, terminalAt: log.time };
+    if (log.result === "naked") return { kind: "unhedged", label: "Unhedged", reason: log.reason, terminalAt: log.time };
     if (log.result === "partial") return { kind: "partial", label: "Partial", reason: log.reason };
-    return { kind: "failed", label: "Failed", reason: log.reason };
+    return { kind: "failed", label: "Failed", reason: log.reason, terminalAt: log.time };
   }
   if (trade) {
-    if (trade.status === "open") return { kind: "open", label: "Open" };
-    if (trade.status === "naked") return { kind: "unhedged", label: "Unhedged" };
+    if (trade.status === "open") return { kind: "open", label: "Open", terminalAt: trade.openedAt };
+    if (trade.status === "naked") return { kind: "unhedged", label: "Unhedged", terminalAt: trade.openedAt };
     if (trade.status === "partial") return { kind: "partial", label: "Partial" };
-    if (trade.status === "failed") return { kind: "failed", label: "Failed" };
-    if (trade.status === "settled") return { kind: "successful", label: "Settled" };
+    if (trade.status === "failed") return { kind: "failed", label: "Failed", terminalAt: trade.openedAt };
+    if (trade.status === "settled") return { kind: "successful", label: "Settled", terminalAt: trade.openedAt };
   }
-  return { kind: "detected", label: `Detected ${timeAgo(opp.detectedAt)}` };
+  return { kind: "detected", label: `Detected ${timeAgo(opp.detectedAt)}`, terminalAt: opp.detectedAt };
+}
+
+function terminalRowExpired(status: RowStatus, nowMs: number): boolean {
+  const removable =
+    status.kind === "detected" ||
+    status.kind === "successful" ||
+    status.kind === "failed" ||
+    status.kind === "unhedged" ||
+    status.kind === "open";
+  if (!removable || !status.terminalAt) return false;
+  const terminalMs = Date.parse(status.terminalAt);
+  return Number.isFinite(terminalMs) && nowMs - terminalMs >= TERMINAL_ARB_VISIBILITY_MS;
 }
 
 function StatusPill({ status }: { status: RowStatus }) {
@@ -235,7 +271,7 @@ function WatchBoard({ watch }: { watch: MainLineWatch[] }) {
             <th className="py-2 pr-3">Match</th>
             <th className="py-2 pr-3">Total</th>
             <th className="py-2 pr-3">Kalshi (O / U)</th>
-            <th className="py-2 pr-3">Poly (O / U)</th>
+            <th className="py-2 pr-3">P (O / U)</th>
             <th className="py-2 pr-3">Best cost</th>
             <th className="py-2 pr-3">Net edge</th>
             <th className="py-2 pr-3">Status</th>
@@ -277,16 +313,12 @@ function cents(c: number | null | undefined): string {
 }
 
 function LegCell({ leg }: { leg: ArbOpportunity["legs"][number] }) {
-  const venueColor = leg.venueId.includes("kalshi")
-    ? "#60a5fa"
-    : leg.venueId.includes("sx")
-    ? "#d8b4fe"
-    : "#c4b5fd";
+  const venueColor = venueStyle(leg.venueId).text;
   const liq = leg.liquidityUsd;
   return (
     <td className="py-3 pr-3">
-      <div className="font-semibold capitalize" style={{ color: venueColor }}>
-        {leg.venueId}
+      <div className="font-semibold" style={{ color: venueColor }}>
+        {venueDisplayName(leg.venueId)}
       </div>
       <div className="text-gray-300">{leg.label}</div>
       <div className="text-[10px] text-gray-500">

@@ -61,22 +61,24 @@ export function fragileVenueFirstOrder(requests: OrderRequest[]): number[] {
   const hasPolymarket = requests.some((r) => r.venueId === "polymarket");
   const hasKalshi = requests.some((r) => r.venueId === "kalshi");
   const indexes = requests.map((_, i) => i);
-  if (!hasPredictFun && !(hasSx && hasKalshi) && (!hasPolymarket || (!hasSx && !hasKalshi))) return indexes;
+  if (!hasPredictFun && !(hasSx && hasKalshi) && (!hasPolymarket || requests.length < 2)) return indexes;
   return indexes.sort((a, b) => {
     const av = requests[a].venueId;
     const bv = requests[b].venueId;
-    if (av === "predictfun" && bv !== "predictfun") return -1;
-    if (av !== "predictfun" && bv === "predictfun") return 1;
+    if (hasPolymarket) {
+      if (av === "polymarket" && bv !== "polymarket") return -1;
+      if (av !== "polymarket" && bv === "polymarket") return 1;
+    }
+    if (!hasPolymarket) {
+      if (av === "predictfun" && bv !== "predictfun") return -1;
+      if (av !== "predictfun" && bv === "predictfun") return 1;
+    }
     if (hasSx && hasKalshi) {
       if (av === "kalshi" && bv !== "kalshi") return -1;
       if (av !== "kalshi" && bv === "kalshi") return 1;
     }
     if (av === "sxbet" && bv !== "sxbet") return -1;
     if (av !== "sxbet" && bv === "sxbet") return 1;
-    if (!hasSx && !hasPredictFun) {
-      if (av === "polymarket" && bv !== "polymarket") return -1;
-      if (av !== "polymarket" && bv === "polymarket") return 1;
-    }
     return a - b;
   });
 }
@@ -86,7 +88,7 @@ export function shouldSequenceFragileVenuePair(requests: OrderRequest[]): boolea
   const hasPolymarket = requests.some((r) => r.venueId === "polymarket");
   const hasSx = requests.some((r) => r.venueId === "sxbet");
   const hasKalshi = requests.some((r) => r.venueId === "kalshi");
-  return (hasPredictFun && requests.length > 1) || (hasSx && hasKalshi) || (hasPolymarket && (hasSx || hasKalshi));
+  return (hasPolymarket && requests.length > 1) || (hasPredictFun && requests.length > 1) || (hasSx && hasKalshi);
 }
 
 function skippedBecausePriorLegFailed(req: OrderRequest, error: string): OrderResult {
@@ -217,9 +219,9 @@ export async function runExecution(
     placed = new Array<OrderResult>(requests.length);
     const [first, ...rest] = sequencingOrder;
     placed[first] = await adapters[first].placeOrder(requests[first]);
-    if (!placed[first].ok || placed[first].filledContracts <= 0) {
+    if (!placed[first].ok || placed[first].filledContracts < requests[first].sizeContracts) {
       const firstVenue = venueLabel(requests[first].venueId);
-      const error = `not submitted because ${firstVenue} hedge leg failed first: ${placed[first].error ?? placed[first].status}`;
+      const error = `not submitted because ${firstVenue} anchor leg did not fully fill: ${placed[first].error ?? placed[first].status}`;
       for (const i of rest) placed[i] = skippedBecausePriorLegFailed(requests[i], error);
     } else {
       const restResults = await Promise.all(rest.map((i) => adapters[i].placeOrder(requests[i])));

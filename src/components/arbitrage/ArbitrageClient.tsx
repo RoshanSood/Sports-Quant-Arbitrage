@@ -27,6 +27,7 @@ import VenueDrawer from "./VenueDrawer";
 import PlayModal from "./PlayModal";
 import AnalyticsPanel from "./AnalyticsPanel";
 import { allAuthHeaders } from "./venueCreds";
+import { pacificTodayDateStr } from "@/lib/arbitrage/date";
 
 export type PanelKey = "arbs" | "portfolio" | "risk" | "log" | "matchmap" | "analytics";
 
@@ -51,11 +52,6 @@ const USE_MOCK = false;
 const SCAN_MIN_GAP_MS = 1000;
 const INGEST_POLL_MS = 120;
 const AUTO_BATCH_LIMIT = 4;
-
-function todayDateStr(): string {
-  const d = new Date();
-  return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
-}
 
 export default function ArbitrageClient() {
   const [venues, setVenues] = useState<Venue[]>(DEFAULT_VENUES);
@@ -164,7 +160,7 @@ export default function ArbitrageClient() {
   // Live-data path (enabled once Phase-2 routes are wired). No-op while USE_MOCK.
   useEffect(() => {
     if (USE_MOCK) return;
-    const date = todayDateStr();
+    const date = pacificTodayDateStr();
     (async () => {
       try {
         const [v, a, o, tr, lg, rk] = await Promise.all([
@@ -193,7 +189,7 @@ export default function ArbitrageClient() {
   // ingestion yields nothing (e.g. no Kalshi creds + Polymarket offseason), the
   // mock markets remain so the UI never goes blank.
   useEffect(() => {
-    const date = todayDateStr();
+    const date = pacificTodayDateStr();
     let cancelled = false;
     let polls = 0;
 
@@ -365,7 +361,7 @@ export default function ArbitrageClient() {
         res = await fetch("/api/arbitrage/trades", {
           method: "POST",
           headers,
-          body: JSON.stringify({ opportunityId: opp.id, date: todayDateStr(), mode }),
+          body: JSON.stringify({ opportunityId: opp.id, date: pacificTodayDateStr(), mode }),
         }).then((r) => r.json());
       } catch (e) {
         console.error(e);
@@ -404,29 +400,29 @@ export default function ArbitrageClient() {
 
   const fireAutoBatch = useCallback(
     async (nextOpps: ArbOpportunity[]) => {
-      if (!agent.autoTrade || !scanning || killSwitch) return;
+      if (!agent.autoTrade || killSwitch) return;
       const batch = nextOpps
         .filter((o) => !autoFiredRef.current.has(o.id) && !autoInFlightRef.current.has(o.id))
         .slice(0, AUTO_BATCH_LIMIT);
       if (batch.length === 0) return;
 
-      for (const opp of batch) {
-        autoFiredRef.current.add(opp.id);
-        autoInFlightRef.current.add(opp.id);
-      }
+      for (const opp of batch) autoInFlightRef.current.add(opp.id);
 
       const mode = agent.live ? "live" : "paper";
-      await Promise.allSettled(batch.map((opp) => executeOpportunity(opp, mode, { refreshAfter: false })));
+      const results = await Promise.allSettled(batch.map((opp) => executeOpportunity(opp, mode, { refreshAfter: false })));
+      results.forEach((result, i) => {
+        if (result.status === "fulfilled" && result.value?.result) autoFiredRef.current.add(batch[i].id);
+      });
       for (const opp of batch) autoInFlightRef.current.delete(opp.id);
       await refreshPortfolio();
     },
-    [agent.autoTrade, agent.live, scanning, killSwitch, executeOpportunity, refreshPortfolio]
+    [agent.autoTrade, agent.live, killSwitch, executeOpportunity, refreshPortfolio]
   );
 
   // Re-run the scan: re-ingest fresh quotes, then re-derive match map + opportunities
   // + the main-line watch board. Lets the user refresh the live prices on demand.
   const refreshScan = useCallback(async () => {
-    const date = todayDateStr();
+    const date = pacificTodayDateStr();
     setRefreshing(true);
     try {
       // GET with refresh=1 re-triggers ingestion server-side (no admin password).
@@ -456,13 +452,13 @@ export default function ArbitrageClient() {
     }
   }, [fireAutoBatch]);
 
-  // Auto-execute: when auto-trade is on and scanning is live, fire each qualifying
+  // Auto-execute: when auto-trade is on, fire each qualifying
   // opportunity once (dedup via a fired-set). Mode is LIVE when the agent's Live toggle is
   // on; otherwise paper. A live fire still passes the
   // server gate (agent.live, kill switch, stake cap, per-venue creds); if it can't fire it
   // is reported FAILED with the blocking reasons â€” never run as paper. Kill switch / Stop halts it.
   useEffect(() => {
-    if (!agent.autoTrade || !scanning || killSwitch) return;
+    if (!agent.autoTrade || killSwitch) return;
     const pending = opportunities.filter((o) => !autoFiredRef.current.has(o.id) && !autoInFlightRef.current.has(o.id));
     if (pending.length === 0) return;
     let cancelled = false;
@@ -472,7 +468,7 @@ export default function ArbitrageClient() {
     return () => {
       cancelled = true;
     };
-  }, [opportunities, agent.autoTrade, scanning, killSwitch, fireAutoBatch]);
+  }, [opportunities, agent.autoTrade, killSwitch, fireAutoBatch]);
 
   // Auto-scan: while Scanning is on, re-ingest fresh quotes back-to-back (a new scan
   // starts as soon as the previous finishes) so prices â€” and auto-execution â€” stay as

@@ -95,6 +95,12 @@ describe("live execution sequencing", () => {
     expect(fragileVenueFirstOrder(requests)).toEqual([1, 0]);
   });
 
+  it("places Polymarket before predict.fun so a Polymarket FOK miss kills the trade first", () => {
+    const requests = [req("predictfun"), req("polymarket")];
+    expect(shouldSequenceFragileVenuePair(requests)).toBe(true);
+    expect(fragileVenueFirstOrder(requests)).toEqual([1, 0]);
+  });
+
   it("places kalshi before sx.bet so a kalshi IOC miss cannot leave an sx-only fill", () => {
     const requests = [req("sxbet"), req("kalshi")];
     expect(shouldSequenceFragileVenuePair(requests)).toBe(true);

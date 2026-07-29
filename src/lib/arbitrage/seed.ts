@@ -128,7 +128,7 @@ export const DEFAULT_AGENT: Agent = {
   maxEdge: 0.25, // 25%
   sizingMethod: "equal_profit",
   maxStake: 50,
-  venues: ["kalshi", "polymarket"],
+  venues: ["kalshi", "polymarket", "sxbet", "predictfun", "cloudbet"],
   // Polling/cache MVP refreshes quotes per ingestion run, not per tick — a 5-minute
   // freshness window fits that cadence. Real-time WebSocket streaming (later phase)
   // would tighten this back to seconds.
