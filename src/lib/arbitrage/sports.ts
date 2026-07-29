@@ -6,8 +6,8 @@
 //
 // Market coverage by sport:
 //   • baseball/basketball (MLB/WNBA): totals + moneyline + spread across Kalshi/Poly/SX
-//   • soccer (MLS/UCL): 3-way 1X2 moneyline (home/draw/away) — Cloudbet + others
-//   • tennis (WTA): 2-way moneyline — Cloudbet + others
+//   • soccer (MLS/UCL): 3-way 1X2 moneyline (home/draw/away) — CloudBet + others
+//   • tennis (WTA): 2-way moneyline — CloudBet + others
 
 import { fetchESPNGames } from "@/lib/espn";
 import { fetchWNBAGames } from "@/lib/wnbaEspn";
@@ -22,7 +22,7 @@ export type ArbGame = {
   homeTeam: { name: string; shortName: string; abbreviation: string };
 };
 
-// Cloudbet feed identifiers for a sport: the moneyline/1X2 market key, plus EITHER a fixed
+// CloudBet feed identifiers for a sport: the moneyline/1X2 market key, plus EITHER a fixed
 // competition key (MLS, UCL) OR a live enumeration (sport + key regex) for sports whose
 // competitions are per-tournament (WTA). `threeWay` marks a 1X2 (home/draw/away) market so
 // the reader emits the draw leg.
@@ -48,7 +48,7 @@ export type SportConfig = {
   sxLeagueId?: number; // fixed SX league (MLB/WNBA totals+ml+spread)
   // SX moneyline for sports whose leagues are ephemeral/per-tournament (soccer, tennis):
   // enumerate active leagues live by sportId + label. threeWay = soccer 1X2.
-  sxDynamic?: { sportId: number; leagueMatch: RegExp; threeWay?: boolean };
+  sxDynamic?: { sportId: number; leagueMatch: RegExp; threeWay?: boolean; totals?: boolean };
   cloudbet?: CloudbetSportCfg;
   predictfun?: boolean; // predict.fun currently lists MLB moneyline only
   // Fixed run-line for the spread market (MLB = 1.5). Undefined = variable point spread.
@@ -81,9 +81,9 @@ export const SPORTS: SportConfig[] = [
     spreadFixedLine: undefined, // variable point spread
   },
   // ── Soccer (3-way 1X2 moneyline) ────────────────────────────────────────────
-  // Cloudbet competition/market keys are best-effort against Cloudbet's documented
+  // CloudBet competition/market keys are best-effort against CloudBet's documented
   // `{sport}-{category}-{competition}` + `soccer.match_odds` (1X2) scheme; verify once
-  // the Cloudbet key is active. Polymarket/SX ids likewise carry these where present.
+  // the CloudBet key is active. Polymarket/SX ids likewise carry these where present.
   {
     sport: "soccer",
     league: "mls",
@@ -104,7 +104,25 @@ export const SPORTS: SportConfig[] = [
     sxDynamic: { sportId: 5, leagueMatch: /champions league/i, threeWay: true }, // SX league 30
     cloudbet: { competition: "soccer-international-clubs-uefa-champions-league", moneyline: "soccer.match_odds", threeWay: true },
   },
+  {
+    sport: "soccer",
+    league: "bra1",
+    fetchGames: espnTeamGamesFetcher("soccer/bra.1"),
+    espnScorePath: "soccer/bra.1",
+    markets: { totals: true, moneyline: true },
+    polyTag: "soccer",
+    sxDynamic: { sportId: 5, leagueMatch: /brazil|brasil|s[ée]rie a|serie a|campeonato brasileiro/i, threeWay: true, totals: true },
+  },
   // ── Tennis (2-way moneyline) ─────────────────────────────────────────────────
+  {
+    sport: "tennis",
+    league: "atp",
+    fetchGames: espnTennisGamesFetcher("tennis/atp"),
+    markets: { moneyline: true },
+    polyTag: "tennis",
+    sxDynamic: { sportId: 6, leagueMatch: /atp/i }, // all active ATP tournament leagues (2-way)
+    cloudbet: { sport: "tennis", competitionMatch: /tennis-atp-/i, moneyline: "tennis.winner" },
+  },
   {
     sport: "tennis",
     league: "wta",
@@ -112,7 +130,7 @@ export const SPORTS: SportConfig[] = [
     markets: { moneyline: true },
     polyTag: "tennis",
     sxDynamic: { sportId: 6, leagueMatch: /wta/i }, // all active WTA tournament leagues (2-way)
-    // Cloudbet WTA is per-tournament (tennis-wta-*); enumerate + read the 2-way winner.
+    // CloudBet WTA is per-tournament (tennis-wta-*); enumerate + read the 2-way winner.
     cloudbet: { sport: "tennis", competitionMatch: /tennis-wta-/i, moneyline: "tennis.winner" },
   },
 ];
