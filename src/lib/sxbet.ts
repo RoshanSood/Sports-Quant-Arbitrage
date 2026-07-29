@@ -126,6 +126,18 @@ function teamHit(name: string, team: { name: string; abbreviation: string }): bo
   return teamsMatch(name, team.name) || name.toLowerCase().includes(team.abbreviation.toLowerCase());
 }
 
+function sxGameDate(m: SxMarket): string | null {
+  if (!Number.isFinite(m.gameTime)) return null;
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Los_Angeles",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date(m.gameTime * 1000));
+  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
+  return `${get("year")}-${get("month")}-${get("day")}`;
+}
+
 // A market matches a game when its two teams equal the game's away/home in either order.
 function marketMatchesGame(m: SxMarket, game: ArbGame): boolean {
   const { awayTeam: a, homeTeam: h } = game;
@@ -135,11 +147,44 @@ function marketMatchesGame(m: SxMarket, game: ArbGame): boolean {
   );
 }
 
+function marketMatchesGameDate(m: SxMarket, game: ArbGame): boolean {
+  return marketMatchesGame(m, game) && sxGameDate(m) === game.date;
+}
+
 export type SxBetMarkets = {
   moneyline: Map<string, VenueTwoWay>;
   spread: Map<string, VenueSpread>;
   totals: Map<string, VenueTotalLine[]>;
 };
+
+function collectTotalsByGame(
+  games: ArbGame[],
+  markets: SxMarket[],
+  books: Map<string, SxOrder[]>
+): Map<string, VenueTotalLine[]> {
+  const out = new Map<string, VenueTotalLine[]>();
+  for (const game of games) {
+    const totalRows: VenueTotalLine[] = [];
+    for (const t of markets.filter((m) => m.type === TYPE_TOTAL && marketMatchesGameDate(m, game))) {
+      const bp = bestPrices(books.get(t.marketHash));
+      if (!bp || t.line == null) continue;
+      const overIsOne = t.outcomeOneName.toLowerCase().startsWith("over");
+      const sourceStartTime = sxGameDate(t) ?? game.date;
+      totalRows.push({
+        line: t.line,
+        overCents: overIsOne ? bp.o1Cents : bp.o2Cents,
+        underCents: overIsOne ? bp.o2Cents : bp.o1Cents,
+        overLiquidityUsd: overIsOne ? bp.o1LiqUsd : bp.o2LiqUsd,
+        underLiquidityUsd: overIsOne ? bp.o2LiqUsd : bp.o1LiqUsd,
+        marketId: t.marketHash,
+        overIsOutcomeOne: overIsOne,
+        sourceStartTime,
+      });
+    }
+    if (totalRows.length) out.set(game.id, totalRows);
+  }
+  return out;
+}
 
 // Fetch + normalize all SX.bet markets for the given league + ESPN games.
 export async function fetchSxBetMLBMarkets(games: ArbGame[], leagueId: number = 171): Promise<SxBetMarkets> {
@@ -153,7 +198,7 @@ export async function fetchSxBetMLBMarkets(games: ArbGame[], leagueId: number = 
   const books = await fetchOrders(relevant.map((m) => m.marketHash));
 
   for (const game of games) {
-    const gm = relevant.filter((m) => marketMatchesGame(m, game));
+    const gm = relevant.filter((m) => marketMatchesGameDate(m, game));
     if (!gm.length) continue;
 
     // Moneyline (226): team names → home/away.
@@ -169,6 +214,7 @@ export async function fetchSxBetMLBMarkets(games: ArbGame[], leagueId: number = 
           homeLiquidityUsd: oneIsAway ? bp.o2LiqUsd : bp.o1LiqUsd,
           marketId: ml.marketHash,
           homeIsOutcomeOne: !oneIsAway,
+          sourceStartTime: sxGameDate(ml) ?? game.date,
         });
       }
     }
@@ -189,6 +235,7 @@ export async function fetchSxBetMLBMarkets(games: ArbGame[], leagueId: number = 
           homeSignedLine,
           marketId: sp.marketHash,
           homeIsOutcomeOne: oneIsHome,
+          sourceStartTime: sxGameDate(sp) ?? game.date,
         });
       }
     }
@@ -196,22 +243,8 @@ export async function fetchSxBetMLBMarkets(games: ArbGame[], leagueId: number = 
     // Totals (28): "Over N / Under N". SX often uses integer lines (push on exact),
     // which won't match Kalshi/Polymarket .5 lines — that's fine, the matcher drops
     // non-equal lines. We still ingest them for completeness.
-    const totalRows: VenueTotalLine[] = [];
-    for (const t of gm.filter((m) => m.type === TYPE_TOTAL)) {
-      const bp = bestPrices(books.get(t.marketHash));
-      if (!bp || t.line == null) continue;
-      const overIsOne = t.outcomeOneName.toLowerCase().startsWith("over");
-      totalRows.push({
-        line: t.line,
-        overCents: overIsOne ? bp.o1Cents : bp.o2Cents,
-        underCents: overIsOne ? bp.o2Cents : bp.o1Cents,
-        overLiquidityUsd: overIsOne ? bp.o1LiqUsd : bp.o2LiqUsd,
-        underLiquidityUsd: overIsOne ? bp.o2LiqUsd : bp.o1LiqUsd,
-        marketId: t.marketHash,
-        overIsOutcomeOne: overIsOne,
-      });
-    }
-    if (totalRows.length) result.totals.set(game.id, totalRows);
+    const totalRows = collectTotalsByGame([game], gm, books).get(game.id);
+    if (totalRows?.length) result.totals.set(game.id, totalRows);
   }
 
   return result;
@@ -237,13 +270,13 @@ export async function fetchSxBetMoneylineByGame(
 
   // Fetch across the matched leagues (cap to bound the request count).
   const markets: SxMarket[] = [];
-  for (const id of leagueIds.slice(0, 16)) markets.push(...(await fetchActiveMarkets(id, false)));
+  for (const id of leagueIds.slice(0, 96)) markets.push(...(await fetchActiveMarkets(id, false)));
   if (!markets.length) return out;
 
   const books = await fetchOrders([...new Set(markets.map((m) => m.marketHash))]);
 
   for (const game of games) {
-    const gm = markets.filter((m) => marketMatchesGame(m, game));
+    const gm = markets.filter((m) => marketMatchesGameDate(m, game));
     if (!gm.length) continue;
 
     if (opts.threeWay) {
@@ -268,6 +301,7 @@ export async function fetchSxBetMoneylineByGame(
           homeTokenId: homeMkt.marketHash,
           awayTokenId: awayMkt.marketHash,
           drawTokenId: tieMkt.marketHash,
+          sourceStartTime: sxGameDate(homeMkt) ?? game.date,
         });
       }
       continue;
@@ -288,7 +322,31 @@ export async function fetchSxBetMoneylineByGame(
       homeLiquidityUsd: oneIsAway ? bp.o2LiqUsd : bp.o1LiqUsd,
       marketId: mw.marketHash,
       homeIsOutcomeOne: !oneIsAway,
+      sourceStartTime: sxGameDate(mw) ?? game.date,
     });
   }
   return out;
+}
+
+export async function fetchSxBetTotalsByGame(
+  games: ArbGame[],
+  opts: { sportId: number; leagueMatch: RegExp }
+): Promise<Map<string, VenueTotalLine[]>> {
+  if (!games.length) return new Map();
+
+  const leagues = await fetchLeagues();
+  const leagueIds = leagues
+    .filter((l) => l.active && l.sportId === opts.sportId && opts.leagueMatch.test(l.label))
+    .map((l) => l.leagueId);
+  if (!leagueIds.length) return new Map();
+
+  const markets: SxMarket[] = [];
+  for (const id of leagueIds.slice(0, 96)) {
+    markets.push(...(await fetchActiveMarkets(id, false)));
+  }
+  const relevant = markets.filter((m) => m.type === TYPE_TOTAL);
+  if (!relevant.length) return new Map();
+
+  const books = await fetchOrders([...new Set(relevant.map((m) => m.marketHash))]);
+  return collectTotalsByGame(games, relevant, books);
 }
