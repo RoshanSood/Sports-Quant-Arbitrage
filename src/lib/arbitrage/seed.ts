@@ -1,5 +1,5 @@
-// Default seed data for the arbitrage module. Single source of truth used by the
-// JSON stores (seed-on-miss) and referenced by mock data. No secrets — venues are
+﻿// Default seed data for the arbitrage module. Single source of truth used by the
+// JSON stores (seed-on-miss) and referenced by mock data. No secrets â€” venues are
 // created disconnected/credential_needed until the user configures credentials.
 
 import type { Agent, RiskSettings, Venue } from "@/types/arbitrage";
@@ -51,7 +51,7 @@ export const DEFAULT_VENUES: Venue[] = [
     currency: "USDC",
     status: "connected", // public read-only order-book feed
     enabled: true,
-    viewOnly: true, // read-only: scanned for edges, but no execution yet
+    viewOnly: false,
     supportsCancel: true,
     supportsPartialFill: true,
     isIrreversible: false,
@@ -80,10 +80,10 @@ export const DEFAULT_VENUES: Venue[] = [
   },
   {
     id: "cloudbet",
-    name: "Cloudbet",
+    name: "CloudBet",
     abbr: "CB",
     type: "sportsbook",
-    role: "sharp", // sharp crypto book — used as an executable venue, not just reference
+    role: "sharp", // sharp crypto book â€” used as an executable venue, not just reference
     currency: "USDC",
     status: "credential_needed", // read + orders need CLOUDBET_API_KEY (JWT)
     enabled: true,
@@ -124,15 +124,15 @@ export const DEFAULT_AGENT: Agent = {
   paper: true, // paper trading on by default
   live: false, // live execution locked until user enables
   autoTrade: false, // manual Play by default; user opts into hands-off paper fills
-  minEdge: 0.005, // 0.5%
+  minEdge: 0.02, // 2%
   maxEdge: 0.25, // 25%
   sizingMethod: "equal_profit",
   maxStake: 50,
   venues: ["kalshi", "polymarket", "sxbet", "predictfun", "cloudbet"],
-  // Polling/cache MVP refreshes quotes per ingestion run, not per tick — a 5-minute
+  // Polling/cache MVP refreshes quotes per ingestion run, not per tick â€” a 5-minute
   // freshness window fits that cadence. Real-time WebSocket streaming (later phase)
   // would tighten this back to seconds.
-  staleQuoteMs: 300000,
+  staleQuoteMs: 30000,
 };
 
 export const DEFAULT_RISK: RiskSettings = {
@@ -143,7 +143,7 @@ export const DEFAULT_RISK: RiskSettings = {
   dailyPnl: 0,
   maxOpenPositions: 1, // one position per physical match + strategy
   pauseOnNaked: true,
-  staleQuoteMs: 300000, // see DEFAULT_AGENT note — fits the polling/cache cadence
+  staleQuoteMs: 30000,
   minLiquidityUsd: 20, // filter thin/tail lines with little executable size
   minExpectedProfitUsd: 0,
   liquidityStakeBufferMultiple: 1,

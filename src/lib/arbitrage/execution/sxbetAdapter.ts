@@ -23,6 +23,7 @@ import { deriveEoa, signerFor, walletKey } from "./wallet";
 const SX_FILL_URL = "https://api.sx.bet/orders/fill/v2";
 const SX_ORDERS_URL = "https://api.sx.bet/orders";
 const SX_TRADES_URL = "https://api.sx.bet/trades";
+const USDC_DECIMALS = 1_000_000;
 
 // USDC risked (in 6-decimal wei) to buy `sizeContracts` at `limitPriceCents`:
 // cost = contracts × price. Each contract pays $1 on win, costs price/100 now.
@@ -119,18 +120,33 @@ async function signFill(wallet: Wallet, params: FillSignParams): Promise<string>
 }
 
 type SxFillResponse = { status?: string; message?: string; data?: { fillHash?: string; totalFilled?: string } };
-type SxBookOrder = {
+type SxOrderbookOrder = {
   percentageOdds?: string;
   totalBetSize?: string;
   fillAmount?: string;
   isMakerBettingOutcomeOne?: boolean;
 };
 
-export async function checkSxFillability(req: OrderRequest): Promise<{ ok: boolean; reason?: string }> {
+export type SxFillability = {
+  ok: boolean;
+  availableStakeUsd: number;
+  requiredStakeUsd: number;
+  bestPriceCents: number | null;
+  reason?: string;
+};
+
+export async function checkSxFillability(req: OrderRequest): Promise<SxFillability> {
   const marketHash = req.nativeMarketId;
   const side = (req.nativeSide ?? "").toLowerCase();
+  const requiredStakeUsd = (req.sizeContracts * req.limitPriceCents) / 100;
   if (!marketHash || (side !== "one" && side !== "two")) {
-    return { ok: false, reason: "missing SX.bet marketHash/outcome side" };
+    return {
+      ok: false,
+      availableStakeUsd: 0,
+      requiredStakeUsd,
+      bestPriceCents: null,
+      reason: "missing SX.bet marketHash/outcome side",
+    };
   }
 
   try {
@@ -138,29 +154,46 @@ export async function checkSxFillability(req: OrderRequest): Promise<{ ok: boole
       cache: "no-store",
       headers: { Accept: "application/json" },
     });
-    if (!res.ok) return { ok: false, reason: `SX.bet order book unavailable (HTTP ${res.status})` };
-
-    const json = (await res.json()) as { data?: SxBookOrder[] };
-    const wantsOutcomeOne = side === "one";
-    const requiredStakeUsd = (req.sizeContracts * req.limitPriceCents) / 100;
-
-    for (const order of json.data ?? []) {
-      const availableUsd = (Number(order.totalBetSize) - Number(order.fillAmount)) / 1_000_000;
-      if (!Number.isFinite(availableUsd) || availableUsd < requiredStakeUsd) continue;
-
-      const makerProbability = Number(order.percentageOdds) / 1e20;
-      if (!Number.isFinite(makerProbability) || makerProbability <= 0 || makerProbability >= 1) continue;
-
-      const makerBettingOne = Boolean(order.isMakerBettingOutcomeOne);
-      if (wantsOutcomeOne === makerBettingOne) continue;
-
-      const takerPriceCents = (1 - makerProbability) * 100;
-      if (takerPriceCents <= req.limitPriceCents) return { ok: true };
+    if (!res.ok) {
+      return { ok: false, availableStakeUsd: 0, requiredStakeUsd, bestPriceCents: null, reason: `SX.bet orderbook read failed (HTTP ${res.status})` };
     }
-
-    return { ok: false, reason: "SX.bet has no maker liquidity at or below the limit price" };
+    const json = (await res.json().catch(() => ({}))) as { data?: SxOrderbookOrder[] };
+    const takerWantsOne = side === "one";
+    let bestPriceCents: number | null = null;
+    let availableStakeUsd = 0;
+    for (const o of json.data ?? []) {
+      if (o.isMakerBettingOutcomeOne === takerWantsOne) continue;
+      const rawProb = Number(o.percentageOdds);
+      const total = Number(o.totalBetSize);
+      const filled = Number(o.fillAmount);
+      if (!Number.isFinite(rawProb) || !Number.isFinite(total) || !Number.isFinite(filled)) continue;
+      const availableMicroUsd = total - filled;
+      if (availableMicroUsd <= 0) continue;
+      const makerProb = rawProb / 1e20;
+      if (makerProb <= 0 || makerProb >= 1) continue;
+      const takerPriceCents = (1 - makerProb) * 100;
+      if (takerPriceCents > req.limitPriceCents) continue;
+      bestPriceCents = bestPriceCents == null ? takerPriceCents : Math.min(bestPriceCents, takerPriceCents);
+      availableStakeUsd += availableMicroUsd / USDC_DECIMALS;
+    }
+    const ok = availableStakeUsd + 1e-9 >= requiredStakeUsd;
+    return {
+      ok,
+      availableStakeUsd,
+      requiredStakeUsd,
+      bestPriceCents,
+      reason: ok
+        ? undefined
+        : `SX.bet ${side} fillable stake $${availableStakeUsd.toFixed(2)} below required $${requiredStakeUsd.toFixed(2)} at ${req.limitPriceCents.toFixed(2)}c or better`,
+    };
   } catch (e) {
-    return { ok: false, reason: `SX.bet order book check failed: ${String(e).slice(0, 120)}` };
+    return {
+      ok: false,
+      availableStakeUsd: 0,
+      requiredStakeUsd,
+      bestPriceCents: null,
+      reason: `SX.bet orderbook read failed: ${String(e).slice(0, 120)}`,
+    };
   }
 }
 

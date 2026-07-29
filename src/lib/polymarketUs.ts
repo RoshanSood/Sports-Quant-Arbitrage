@@ -18,6 +18,7 @@
 
 import type { VenueSpread, VenueTotalLine, VenueTwoWay } from "./kalshi";
 import type { ArbGame } from "./arbitrage/sports";
+import { dateParamToIsoDate, pacificTodayDateStr } from "./arbitrage/date";
 import { teamsMatch } from "./teamNormalization";
 
 const GATEWAY = "https://gateway.polymarket.us";
@@ -55,9 +56,10 @@ export type PolymarketUsMarkets = {
 };
 
 // ── Public gateway fetch (no auth) ─────────────────────────────────────────────
-async function fetchMlbEvents(): Promise<PmEvent[]> {
-  const today = new Date().toISOString().slice(0, 10);
-  const url = `${GATEWAY}/v1/events?tagSlug=mlb&startDateMin=${today}T00:00:00Z&limit=100`;
+async function fetchMlbEvents(games: ArbGame[]): Promise<PmEvent[]> {
+  const dates = games.map((g) => g.date).filter(Boolean).sort();
+  const minDate = dates[0] ?? dateParamToIsoDate(pacificTodayDateStr());
+  const url = `${GATEWAY}/v1/events?tagSlug=mlb&startDateMin=${minDate}T00:00:00Z&limit=100`;
   try {
     const r = await fetch(url, { cache: "no-store", headers: { Accept: "application/json" } });
     if (!r.ok) return [];
@@ -86,6 +88,9 @@ const cents = (a?: Amount): number | null => {
 };
 
 function eventMatchesGame(ev: PmEvent, game: ArbGame): boolean {
+  const eventDate = (ev.startTime ?? "").slice(0, 10);
+  if (eventDate && eventDate !== game.date) return false;
+
   // A head-to-head game event has EXACTLY two teams. Futures (e.g. "World Series
   // Champion") list many contenders and would spuriously match both sides.
   const teams = ev.teams ?? [];
@@ -118,7 +123,7 @@ export async function fetchPolymarketUsMLBMarkets(games: ArbGame[]): Promise<Pol
   const result: PolymarketUsMarkets = { moneyline: new Map(), spread: new Map(), totals: new Map() };
   if (!games.length) return result;
 
-  const events = await fetchMlbEvents();
+  const events = await fetchMlbEvents(games);
 
   // Collect every market we care about across all matched games, then fetch each unique
   // slug's BBO exactly once.

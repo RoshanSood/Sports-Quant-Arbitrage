@@ -15,7 +15,7 @@ import { ChainId, OrderBuilder, Side, type Book } from "@predictdotfun/sdk";
 import { JsonRpcProvider, Wallet, formatUnits, parseUnits } from "ethers";
 import { BNB_USDT_DECIMALS, bnbRpcUrl } from "./chains";
 import type { PredictFunCreds } from "./onchainCreds";
-import type { ExecutionAdapter, OrderRequest, OrderResult } from "./types";
+import type { ExecutionAdapter, FillConfirmation, OrderRequest, OrderResult } from "./types";
 
 const API = "https://api.predict.fun";
 
@@ -36,6 +36,30 @@ export function pfAccount(c?: PredictFunCreds): string | undefined {
 type PfMarketFlags = { feeRateBps: number; isNegRisk: boolean; isYieldBearing: boolean };
 type JsonRecord = Record<string, unknown>;
 type PfBook = Omit<Book, "marketId"> & { marketId?: number };
+type PfOrderData = {
+  id?: string | number;
+  orderId?: string | number;
+  orderHash?: string;
+  hash?: string;
+  amount?: string | number;
+  amountFilled?: string | number;
+  filledAmount?: string | number;
+  filledSize?: string | number;
+  filled?: string | number;
+  fillSize?: string | number;
+  matchedSize?: string | number;
+  status?: string;
+  marketId?: string | number;
+  order?: {
+    hash?: string;
+    tokenId?: string;
+  };
+};
+type PfOrderResponse = {
+  success?: boolean;
+  data?: PfOrderData;
+  message?: string;
+};
 
 async function marketFlags(marketId: string, apiKey: string): Promise<PfMarketFlags> {
   try {
@@ -93,6 +117,24 @@ function pickString(body: unknown, paths: string[][]): string | null {
   return null;
 }
 
+function pickNumber(body: unknown, paths: string[][]): number | null {
+  for (const path of paths) {
+    let cur: unknown = body;
+    for (const key of path) cur = asRecord(cur)?.[key];
+    const n = parseAmount(cur);
+    if (n != null) return n;
+  }
+  return null;
+}
+
+function parseAmount(v: unknown): number | null {
+  const n = typeof v === "number" || typeof v === "string" ? Number(v) : NaN;
+  if (!Number.isFinite(n)) return null;
+  // predict.fun API examples show decimal strings, but signed-order/on-chain-shaped
+  // payloads may surface 18-decimal wei amounts. Normalize both into share units.
+  return Math.abs(n) > 1_000_000_000_000 ? n / 1e18 : n;
+}
+
 function findBalanceLike(body: unknown): number | null {
   const seen = new Set<unknown>();
   function walk(v: unknown, key = ""): number | null {
@@ -121,6 +163,63 @@ function findBalanceLike(body: unknown): number | null {
     return null;
   }
   return walk(body);
+}
+
+export function parsePredictFunFilledContracts(body: unknown, requestedSize: number): { filled: number; status: OrderResult["status"] } {
+  const data = asRecord(body)?.data ?? body;
+  const filled =
+    pickNumber(data, [
+      ["amountFilled"],
+      ["filledAmount"],
+      ["filledSize"],
+      ["filled"],
+      ["fillSize"],
+      ["matchedSize"],
+    ]) ?? 0;
+  if (filled > 0) {
+    return { filled, status: filled >= requestedSize ? "filled" : "partial" };
+  }
+
+  const status = String(asRecord(data)?.status ?? "").toLowerCase();
+  if (["filled", "executed", "matched", "complete", "completed"].includes(status)) {
+    return { filled: requestedSize, status: "filled" };
+  }
+  if (["partial", "partially_filled", "partially-filled"].includes(status)) {
+    return { filled: 0, status: "partial" };
+  }
+  return { filled: 0, status: "unfilled" };
+}
+
+function orderData(body: unknown): PfOrderData | null {
+  const data = asRecord(body)?.data ?? body;
+  return asRecord(data) as PfOrderData | null;
+}
+
+function orderIdOf(data: PfOrderData | null): string | null {
+  if (!data) return null;
+  const v = data.orderId ?? data.id ?? data.orderHash ?? data.hash ?? data.order?.hash;
+  return typeof v === "string" || typeof v === "number" ? String(v) : null;
+}
+
+function orderMatches(data: PfOrderData, orderIdOrHash: string): boolean {
+  return [data.id, data.orderId, data.orderHash, data.hash, data.order?.hash].some((v) => v != null && String(v) === orderIdOrHash);
+}
+
+function listData(body: unknown): PfOrderData[] {
+  const data = asRecord(body)?.data;
+  return Array.isArray(data) ? data.filter((v): v is PfOrderData => Boolean(asRecord(v))) : [];
+}
+
+function positionAmountForOutcome(body: unknown, marketId: string, tokenId: string): number | null {
+  for (const item of listData(body)) {
+    const rec = asRecord(item);
+    const market = asRecord(rec?.market);
+    const outcome = asRecord(rec?.outcome);
+    const marketMatch = String(market?.id ?? rec?.marketId ?? "") === marketId;
+    const tokenMatch = String(outcome?.onChainId ?? outcome?.tokenId ?? "") === tokenId;
+    if (marketMatch && tokenMatch) return parseAmount(rec?.amount) ?? 0;
+  }
+  return null;
 }
 
 async function fetchJson(url: string, init: RequestInit): Promise<unknown> {
@@ -313,7 +412,7 @@ export class PredictFunExecutionAdapter implements ExecutionAdapter {
         }),
       });
       const text = await res.text();
-      let body: { success?: boolean; data?: { orderId?: string; filledSize?: string; status?: string }; message?: string } = {};
+      let body: PfOrderResponse = {};
       try {
         body = text ? JSON.parse(text) : {};
       } catch {
@@ -321,22 +420,64 @@ export class PredictFunExecutionAdapter implements ExecutionAdapter {
       }
       if (!res.ok || body.success === false) return reject(req, body.message || `order rejected (HTTP ${res.status})`);
 
-      // Response envelope unvalidated — treat an accepted order as filled unless it
-      // reports a smaller size; reconciliation/naked detection covers the rest.
-      const filled = Number(body.data?.filledSize);
-      const expectedContracts = Number(formatUnits(amounts.amount, 18));
-      const filledContracts = Number.isFinite(filled) && filled > 0 ? filled : expectedContracts || req.sizeContracts;
+      // Create-order usually acks with ids only. In live trading these accepted orders
+      // have been filling shortly after submit, so default to the requested size and let
+      // reconciliation correct it if the order query reports a smaller/failed fill.
+      const parsed = parsePredictFunFilledContracts(body, req.sizeContracts);
+      const filledContracts = parsed.filled > 0 ? parsed.filled : req.sizeContracts;
+      const status = parsed.filled > 0 ? parsed.status : "filled";
+      const data = orderData(body);
       return {
         ok: true,
-        orderId: body.data?.orderId ?? hash,
+        orderId: orderIdOf(data) ?? hash,
         filledContracts,
         avgPriceCents: Number(formatUnits(amounts.pricePerShare, 18)) * 100 || req.limitPriceCents,
-        status: filledContracts >= req.sizeContracts ? "filled" : "partial",
+        status,
         raw: body,
       };
     } catch (e) {
       return reject(req, String(e).slice(0, 200));
     }
+  }
+
+  async confirmFill(orderId: string, req: OrderRequest): Promise<FillConfirmation> {
+    const apiKey = pfApiKey(this.creds);
+    const walletKey = pfWalletKey(this.creds);
+    if (!apiKey || !walletKey) return { status: "unknown" };
+
+    const token = await pfJwt(apiKey, walletKey, pfAccount(this.creds));
+    const headers = { "x-api-key": apiKey, Authorization: `Bearer ${token}`, Accept: "application/json" };
+
+    const direct = await fetchJson(`${API}/v1/orders/${encodeURIComponent(orderId)}`, { headers }).catch(() => null);
+    let data = orderData(direct);
+
+    if (!data || !orderMatches(data, orderId)) {
+      const qs = new URLSearchParams({ first: "50" });
+      const orders = await fetchJson(`${API}/v1/orders?${qs.toString()}`, { headers }).catch(() => null);
+      data = listData(orders).find((o) => orderMatches(o, orderId)) ?? data;
+    }
+
+    if (data) {
+      const parsed = parsePredictFunFilledContracts({ data }, req.sizeContracts);
+      if (parsed.filled > 0) return { status: "settled", filledContracts: parsed.filled };
+      const status = String(data.status ?? "").toUpperCase();
+      if (["OPEN", "PENDING", "PARTIAL", "PARTIALLY_FILLED"].includes(status)) return { status: "pending", filledContracts: 0 };
+      if (["CANCELED", "CANCELLED", "EXPIRED", "FAILED", "REJECTED"].includes(status)) return { status: "failed", filledContracts: 0 };
+      if (["FILLED", "EXECUTED", "MATCHED", "COMPLETE", "COMPLETED"].includes(status)) {
+        return { status: "settled", filledContracts: req.sizeContracts };
+      }
+    }
+
+    if (req.nativeMarketId && req.nativeSide) {
+      const qs = new URLSearchParams({ first: "50", marketId: req.nativeMarketId });
+      const positions = await fetchJson(`${API}/v1/positions?${qs.toString()}`, { headers }).catch(() => null);
+      const amount = positionAmountForOutcome(positions, req.nativeMarketId, req.nativeSide);
+      if (amount != null && amount > 0) return { status: "settled", filledContracts: Math.min(amount, req.sizeContracts) };
+    }
+
+    // Accepted limit orders may rest before matching, so absence from the fill views is
+    // pending rather than a hard settlement failure.
+    return { status: "pending", filledContracts: 0 };
   }
 }
 

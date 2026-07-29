@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Check, KeyRound, X } from "lucide-react";
 import type { ArbLog, ArbOpportunity, Trade, Venue } from "@/types/arbitrage";
-import { venueStatusColor } from "./arbFormat";
+import { venueDisplayName, venueStatusColor } from "./arbFormat";
 import { CREDS_CHANGED_EVENT, hasVenueCreds } from "./venueCreds";
 import ActivityFeed, { type ScoreEvent } from "./ActivityFeed";
 
@@ -121,7 +121,7 @@ export default function ArenaCanvas({
     [onSelectVenue]
   );
 
-  const venueName = (id: string) => venues.find((v) => v.id === id)?.name ?? id;
+  const venueName = (id: string) => venues.find((v) => v.id === id)?.name ?? venueDisplayName(id);
   const home = px(posFor("home"));
 
   // Agent chip: rests just left of HOME BASE; during a trade it slides above legA.

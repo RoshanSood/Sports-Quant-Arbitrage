@@ -1,16 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getMarkets, isRunning } from "@/lib/arbitrage/marketStore";
 import { runIngestion } from "@/lib/arbitrage/ingest";
+import { pacificTodayDateStr } from "@/lib/arbitrage/date";
 import type { NormalizedMarket, VenueId } from "@/types/arbitrage";
-
-function todayDateStr(): string {
-  const d = new Date();
-  return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
-}
 
 export async function GET(request: NextRequest) {
   try {
-    const date = request.nextUrl.searchParams.get("date") ?? todayDateStr();
+    const date = request.nextUrl.searchParams.get("date") ?? pacificTodayDateStr();
     const venue = request.nextUrl.searchParams.get("venue");
     const refresh = request.nextUrl.searchParams.get("refresh") === "1";
     let markets = await getMarkets(date);

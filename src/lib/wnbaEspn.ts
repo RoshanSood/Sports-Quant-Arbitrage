@@ -31,6 +31,10 @@ function formatTime(dateStr: string): string {
   }
 }
 
+function slateDate(date: string): string {
+  return date.length === 8 ? `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6, 8)}` : date;
+}
+
 function parseCompetitor(competitor: ESPNCompetitor): Omit<WNBATeamInfo, "injuries"> {
   const team = (competitor.team as Record<string, unknown>) ?? {};
   const abbr = (team.abbreviation as string) ?? "??";
@@ -117,7 +121,7 @@ export async function fetchWNBAGames(date: string): Promise<WNBAGame[]> {
 
     return {
       id: event.id as string,
-      date: (event.date as string)?.split("T")[0] ?? date,
+      date: slateDate(date),
       startTime: formatTime(event.date as string),
       status,
       awayTeam: { ...awayBase, injuries: injuryMap.get(awayBase.id) ?? [] },

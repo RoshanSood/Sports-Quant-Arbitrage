@@ -4,6 +4,7 @@ import { useMemo, useState, type ReactNode } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import type { MatchedEvent, MatchMapData, MatchReject, MatchRejectReason, VenueId } from "@/types/arbitrage";
 import { FloatingPanel, Pill } from "./ui";
+import { venueDisplayName, venueStyle } from "./arbFormat";
 
 const REASON_LABEL: Record<MatchRejectReason, string> = {
   match_confidence_low: "confidence low",
@@ -12,14 +13,6 @@ const REASON_LABEL: Record<MatchRejectReason, string> = {
   self_edge: "self edge",
   start_time_window: "time window",
   identity_dedup: "identity dedup",
-};
-
-const VENUE_STYLE: Record<string, { color: string; text: string }> = {
-  kalshi: { color: "#3b82f6", text: "#93c5fd" },
-  polymarket: { color: "#8b5cf6", text: "#c4b5fd" },
-  sxbet: { color: "#a855f7", text: "#d8b4fe" },
-  predictfun: { color: "#f472b6", text: "#fbcfe8" },
-  cloudbet: { color: "#16a34a", text: "#86efac" },
 };
 
 type GameGroup = {
@@ -33,12 +26,35 @@ type GameGroup = {
   rejects: MatchReject[];
 };
 
+export type VenueDiagnosticRow = {
+  venueId: string;
+  fetched: number | null;
+  matchedDate: number | null;
+  priced: number | null;
+  normalized: number;
+  matched: number;
+  opportunities: number;
+  arbRejects: number;
+  notes: string[];
+};
+
+function venuePill(v: string) {
+  const s = venueStyle(v);
+  return (
+    <Pill key={v} color={s.color} text={s.text}>
+      {venueDisplayName(v)}
+    </Pill>
+  );
+}
+
 export default function MatchMapPanel({
   data,
+  diagnostics,
   live,
   onClose,
 }: {
   data: MatchMapData | null;
+  diagnostics?: VenueDiagnosticRow[];
   live: boolean;
   onClose: () => void;
 }) {
@@ -81,12 +97,50 @@ export default function MatchMapPanel({
           <span className="inline-flex gap-2 flex-wrap">
             {Object.entries(stats!.byVenuePair).map(([pair, n]) => (
               <Pill key={pair} color="#22c55e" text="#86efac">
-                {pair.split("+").map(venueLabel).join(" + ")} {n}
+                {pair.split("+").map(venueDisplayName).join(" + ")} {n}
               </Pill>
             ))}
           </span>
         </div>
       )}
+
+      {diagnostics?.length ? (
+        <div className="mb-4 rounded border overflow-hidden" style={{ borderColor: "#1e2130", background: "#0e1014" }}>
+          <div className="px-3 py-2 text-[10px] uppercase tracking-wide text-gray-500 border-b" style={{ borderColor: "#1e2130" }}>
+            Venue funnel
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-[11px]">
+              <thead>
+                <tr className="text-left text-[10px] uppercase tracking-wide text-gray-500 border-b" style={{ borderColor: "#1e2130" }}>
+                  <th className="px-3 py-2">Venue</th>
+                  <th className="px-3 py-2 text-right">Fetched</th>
+                  <th className="px-3 py-2 text-right">Slate</th>
+                  <th className="px-3 py-2 text-right">Priced</th>
+                  <th className="px-3 py-2 text-right">Rows</th>
+                  <th className="px-3 py-2 text-right">Matched</th>
+                  <th className="px-3 py-2 text-right">Arbs</th>
+                  <th className="px-3 py-2">Why</th>
+                </tr>
+              </thead>
+              <tbody>
+                {diagnostics.map((d) => (
+                  <tr key={d.venueId} className="border-b last:border-0" style={{ borderColor: "#15171e" }}>
+                    <td className="px-3 py-2">{venuePill(d.venueId)}</td>
+                    <td className="px-3 py-2 text-right text-gray-300">{metric(d.fetched)}</td>
+                    <td className="px-3 py-2 text-right text-gray-300">{metric(d.matchedDate)}</td>
+                    <td className="px-3 py-2 text-right text-gray-300">{metric(d.priced)}</td>
+                    <td className="px-3 py-2 text-right text-gray-300">{d.normalized}</td>
+                    <td className="px-3 py-2 text-right text-gray-300">{d.matched}</td>
+                    <td className="px-3 py-2 text-right text-gray-300">{d.opportunities}</td>
+                    <td className="px-3 py-2 text-gray-500 max-w-sm">{d.notes[0] ?? "Active in scanner."}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : null}
 
       <h3 className="text-[10px] uppercase tracking-wide text-gray-500 mb-2">
         Matched games ({grouped.length}) - markets ({matchedMarketCount})
@@ -254,8 +308,8 @@ function venueLegs(m: MatchedEvent): ReactNode[] {
       className="inline-flex items-center gap-1 rounded px-1.5 py-0.5"
       style={{ background: "#12151d", color: "#d1d5db", border: "1px solid #1e2130" }}
     >
-      <span className="font-semibold" style={{ color: VENUE_STYLE[leg.venueId]?.text ?? "#d1d5db" }}>
-        {venueLabel(leg.venueId)}
+      <span className="font-semibold" style={{ color: venueStyle(leg.venueId).text }}>
+        {venueDisplayName(leg.venueId)}
       </span>
       <span>{leg.label}</span>
       <span className="text-gray-500">{leg.priceCents}c</span>
@@ -263,27 +317,15 @@ function venueLegs(m: MatchedEvent): ReactNode[] {
   ));
 }
 
-function venueLabel(v: string): string {
-  if (v === "sxbet") return "SX.bet";
-  if (v === "predictfun") return "Predict.fun";
-  if (v === "cloudbet") return "Cloudbet";
-  return v.charAt(0).toUpperCase() + v.slice(1);
-}
-
-function venuePill(v: string) {
-  const s = VENUE_STYLE[v] ?? { color: "#6b7280", text: "#d1d5db" };
-  return (
-    <Pill key={v} color={s.color} text={s.text}>
-      {venueLabel(v)}
-    </Pill>
-  );
+function metric(n: number | null | undefined): string {
+  return n == null ? "-" : String(n);
 }
 
 function venuePillCount(v: string, n: number) {
-  const s = VENUE_STYLE[v] ?? { color: "#6b7280", text: "#d1d5db" };
+  const s = venueStyle(v);
   return (
     <Pill key={v} color={s.color} text={s.text}>
-      {venueLabel(v)} {n}
+      {venueDisplayName(v)} {n}
     </Pill>
   );
 }

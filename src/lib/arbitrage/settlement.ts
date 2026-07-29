@@ -15,9 +15,19 @@ import { getAllTrades, updateTrade } from "./tradeStore";
 const ESPN_BASES = [
   "https://site.api.espn.com/apis/site/v2/sports/baseball/mlb",
   "https://site.api.espn.com/apis/site/v2/sports/basketball/wnba",
+  "https://site.api.espn.com/apis/site/v2/sports/soccer/usa.1",
+  "https://site.api.espn.com/apis/site/v2/sports/soccer/uefa.champions",
+  "https://site.api.espn.com/apis/site/v2/sports/tennis/atp",
+  "https://site.api.espn.com/apis/site/v2/sports/tennis/wta",
 ];
 
 type GameResult = { final: boolean; away: number; home: number; total: number };
+type EspnCompetitor = { homeAway?: string; score?: string | number; winner?: boolean };
+type EspnCompetition = {
+  id?: string | number;
+  competitors?: EspnCompetitor[];
+  status?: { type?: { completed?: boolean; state?: string } };
+};
 
 function shiftDate(yyyymmdd: string, deltaDays: number): string {
   const y = Number(yyyymmdd.slice(0, 4));
@@ -33,21 +43,34 @@ async function fetchScoreboard(base: string, date: string, map: Map<string, Game
     const res = await fetch(`${base}/scoreboard?dates=${date}&limit=50`, { cache: "no-store" });
     if (!res.ok) return;
     const data = await res.json();
-    for (const ev of data.events ?? []) {
-      const comp = ev.competitions?.[0];
-      if (!comp) continue;
-      const st = comp.status?.type ?? {};
+    const ingestComp = (id: string, comp?: EspnCompetition, eventStatus?: EspnCompetition["status"]) => {
+      if (!comp) return;
+      const st = (comp.status?.type ?? eventStatus?.type ?? {}) as { completed?: boolean; state?: string };
       const final = st.completed === true || st.state === "post";
       const cs = comp.competitors ?? [];
-      const away = cs.find((c: { homeAway?: string }) => c.homeAway === "away");
-      const home = cs.find((c: { homeAway?: string }) => c.homeAway === "home");
-      const aScore = Number(away?.score ?? 0);
-      const hScore = Number(home?.score ?? 0);
-      map.set(String(ev.id), { final, away: aScore, home: hScore, total: aScore + hScore });
+      const away = cs.find((c) => c.homeAway === "away") ?? cs[0];
+      const home = cs.find((c) => c.homeAway === "home") ?? cs[1];
+      const aScore = scoreOrWinner(away);
+      const hScore = scoreOrWinner(home);
+      map.set(id, { final, away: aScore, home: hScore, total: aScore + hScore });
+    };
+    for (const ev of data.events ?? []) {
+      const eventId = String(ev.id ?? "");
+      const eventStatus = ev.status;
+      for (const comp of ev.competitions ?? []) ingestComp(eventId, comp, eventStatus);
+      for (const grp of ev.groupings ?? []) {
+        for (const comp of grp.competitions ?? []) ingestComp(String(comp.id ?? eventId), comp, eventStatus);
+      }
     }
   } catch (e) {
     console.error(`[arbitrage/settle] ESPN scoreboard ${base} ${date} failed:`, e);
   }
+}
+
+function scoreOrWinner(c?: EspnCompetitor): number {
+  const score = Number(c?.score);
+  if (Number.isFinite(score)) return score;
+  return c?.winner === true ? 1 : 0;
 }
 
 async function fetchDailyResults(date: string): Promise<Map<string, GameResult>> {

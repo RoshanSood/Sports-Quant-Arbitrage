@@ -322,6 +322,8 @@ export default function RiskPanel({
           <Cell label="Daily P&L" value={formatSignedDollars(risk.dailyPnl)} accent={risk.dailyPnl >= 0 ? "#34d399" : "#f87171"} />
           <Cell label="Max Daily Loss" value={formatDollars(risk.maxDailyLoss)} />
           <Cell label="Min Liquidity" value={`$${risk.minLiquidityUsd ?? 0}`} />
+          <Cell label="Min Profit" value={formatDollars(risk.minExpectedProfitUsd ?? 0)} />
+          <Cell label="Depth Buffer" value={`${risk.liquidityStakeBufferMultiple ?? 1}x stake`} />
           <Cell label="Pause on Naked" value={risk.pauseOnNaked ? "On" : "Off"} />
           <Cell label="Stale Quote Age" value={`${risk.staleQuoteMs} ms`} />
           <Cell label="Status" value={killSwitch ? "HALTED" : "OK"} accent={killSwitch ? "#f87171" : "#34d399"} />

@@ -8,16 +8,16 @@ function nm(
   venue: string,
   outcome: Outcome,
   priceCents: number,
-  opts: { line?: number; liquidityUsd?: number; marketType?: MarketType } = {}
+  opts: { line?: number; liquidityUsd?: number; marketType?: MarketType; sport?: Sport; league?: string; teams?: [string, string] } = {}
 ): NormalizedMarket {
-  const { line = 6.5, liquidityUsd = 100, marketType = "total" } = opts;
+  const { line = 6.5, liquidityUsd = 100, marketType = "total", sport = "baseball", league = "mlb", teams = ["Reds", "Phillies"] } = opts;
   return {
     venueId: venue,
     marketId: `${venue}:401:${marketType}:${line}:${outcome}`,
-    sport: "baseball",
-    league: "mlb",
+    sport,
+    league,
     startTime: "2026-07-10",
-    teams: ["Reds", "Phillies"],
+    teams,
     marketType,
     line,
     outcome,
@@ -84,6 +84,24 @@ describe("arbEngine — gates (manual §8/§13)", () => {
     ]);
     expect(opportunities).toHaveLength(0);
     expect(rejects.some((r) => r.reason === "insufficient_depth")).toBe(true);
+  });
+});
+
+describe("arbEngine - soccer total lines", () => {
+  it("evaluates every soccer total line instead of only the balanced main line", () => {
+    const soccer = { sport: "soccer" as const, league: "bra1", teams: ["Vitoria", "Botafogo"] as [string, string] };
+    const { opportunities } = detect([
+      nm("polymarket", "over", 87, { ...soccer, line: 0.5 }),
+      nm("polymarket", "under", 13, { ...soccer, line: 0.5 }),
+      nm("sxbet", "over", 94, { ...soccer, line: 0.5 }),
+      nm("sxbet", "under", 6, { ...soccer, line: 0.5 }),
+      nm("polymarket", "over", 50, { ...soccer, line: 2.5 }),
+      nm("polymarket", "under", 51, { ...soccer, line: 2.5 }),
+      nm("sxbet", "over", 51, { ...soccer, line: 2.5 }),
+      nm("sxbet", "under", 50, { ...soccer, line: 2.5 }),
+    ]);
+
+    expect(opportunities.some((o) => o.marketType === "total" && o.line === 0.5)).toBe(true);
   });
 });
 

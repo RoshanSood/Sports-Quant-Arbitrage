@@ -4,7 +4,7 @@ import { useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import type { Agent, ArbLog } from "@/types/arbitrage";
 import { Drawer, Toggle } from "./ui";
-import { formatClock, formatEdgePct, reasonCodeLabel } from "./arbFormat";
+import { formatClock, formatEdgePct, formatVenueList, reasonCodeLabel } from "./arbFormat";
 
 export default function AgentDrawer({
   agent,
@@ -115,7 +115,7 @@ export default function AgentDrawer({
               </div>
               <div className="text-xs text-white mt-0.5">{l.pair}</div>
               <div className="flex items-center justify-between text-[10px] mt-0.5">
-                <span className="text-blue-300">{l.venues.join(" → ")}</span>
+                <span className="text-blue-300">{formatVenueList(l.venues)}</span>
                 <span className="text-gray-400">{formatEdgePct(l.edge)}</span>
               </div>
               <div className="text-[10px] text-gray-500 mt-0.5">{reasonCodeLabel(l.reasonCode)}: {l.reason}</div>

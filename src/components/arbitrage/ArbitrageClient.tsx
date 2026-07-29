@@ -20,7 +20,7 @@ import type { GameScore } from "@/lib/espnSports";
 import ArbsPanel from "./ArbsPanel";
 import PortfolioPanel from "./PortfolioPanel";
 import RiskPanel from "./RiskPanel";
-import MatchMapPanel from "./MatchMapPanel";
+import MatchMapPanel, { type VenueDiagnosticRow } from "./MatchMapPanel";
 import ArbLogPanel from "./ArbLogPanel";
 import AgentDrawer from "./AgentDrawer";
 import VenueDrawer from "./VenueDrawer";
@@ -66,6 +66,7 @@ export default function ArbitrageClient() {
   const [oppsLive, setOppsLive] = useState(false);
   const [portfolioLive, setPortfolioLive] = useState(false);
   const [matchMap, setMatchMap] = useState<MatchMapData | null>(null);
+  const [venueDiagnostics, setVenueDiagnostics] = useState<VenueDiagnosticRow[]>([]);
   const [watch, setWatch] = useState<MainLineWatch[]>([]);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -210,6 +211,13 @@ export default function ArbitrageClient() {
         .then((r) => r.json())
         .then((mm) => {
           if (!cancelled && mm?.stats) setMatchMap({ matched: mm.matched, rejects: mm.rejects, stats: mm.stats });
+        })
+        .catch(() => null);
+
+      fetch(`/api/arbitrage/diagnostics?date=${date}&agent=${encodeURIComponent(agent.id)}`)
+        .then((r) => r.json())
+        .then((d) => {
+          if (!cancelled && Array.isArray(d?.diagnostics)) setVenueDiagnostics(d.diagnostics);
         })
         .catch(() => null);
 
@@ -565,7 +573,7 @@ export default function ArbitrageClient() {
             onClose={() => setPanel(null)}
           />
         )}
-        {panel === "matchmap" && <MatchMapPanel data={matchMap} live={marketsLive} onClose={() => setPanel(null)} />}
+        {panel === "matchmap" && <MatchMapPanel data={matchMap} diagnostics={venueDiagnostics} live={marketsLive} onClose={() => setPanel(null)} />}
         {panel === "log" && <ArbLogPanel logs={logs} live={portfolioLive} onClose={() => setPanel(null)} />}
         {panel === "analytics" && <AnalyticsPanel trades={trades} onClose={() => setPanel(null)} />}
 

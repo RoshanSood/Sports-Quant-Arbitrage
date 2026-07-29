@@ -27,6 +27,10 @@ function abbr(s: string): string {
   return s.replace(/[^A-Za-z]/g, "").slice(0, 3).toUpperCase() || "??";
 }
 
+function slateDate(date: string): string {
+  return date.length === 8 ? `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6, 8)}` : date;
+}
+
 function competitorInfo(c?: EspnCompetitor): ArbGame["homeTeam"] | null {
   if (!c) return null;
   if (c.team) {
@@ -64,7 +68,7 @@ function gameFromCompetition(comp: EspnCompetition, id: string, fallbackDate: st
   const a = competitorInfo(away);
   const h = competitorInfo(home);
   if (!a || !h) return null;
-  return { id, date: (comp.date || fallbackDate).split("T")[0], awayTeam: a, homeTeam: h };
+  return { id, date: slateDate(fallbackDate), awayTeam: a, homeTeam: h };
 }
 
 // Team-sport scoreboard (soccer: one match per event). `path` e.g. "soccer/usa.1".
@@ -76,7 +80,7 @@ export function espnTeamGamesFetcher(path: string): (date: string) => Promise<Ar
       for (const e of events) {
         if (!notCompleted(e.status)) continue;
         const comp = (e.competitions ?? [])[0];
-        const g = comp ? gameFromCompetition(comp, String(e.id ?? ""), e.date || date) : null;
+        const g = comp ? gameFromCompetition(comp, String(e.id ?? ""), date) : null;
         if (g) games.push(g);
       }
       return games;
@@ -150,7 +154,7 @@ export function espnTennisGamesFetcher(path: string): (date: string) => Promise<
       for (const e of events) {
         for (const grp of e.groupings ?? []) {
           for (const comp of grp.competitions ?? []) {
-            const g = gameFromCompetition(comp, String(comp.id ?? `${e.id}`), comp.date || e.date || date);
+            const g = gameFromCompetition(comp, String(comp.id ?? `${e.id}`), date);
             if (g) games.push(g);
           }
         }

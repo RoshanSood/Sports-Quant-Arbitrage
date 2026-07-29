@@ -55,7 +55,7 @@ export async function reconcileLegs(
 // forced to zero fill (so status derivation flips to naked/failed correctly); a leg
 // confirmed settled with a concrete count adopts it. Pending/unknown/no-confirm are
 // left untouched — placement stands.
-export function applyReconciliation(results: OrderResult[], recon: LegReconciliation[]): OrderResult[] {
+export function applyReconciliation(results: OrderResult[], recon: LegReconciliation[], requests: OrderRequest[] = []): OrderResult[] {
   return results.map((r, i) => {
     const c = recon[i]?.confirmation;
     if (!c) return r;
@@ -63,7 +63,9 @@ export function applyReconciliation(results: OrderResult[], recon: LegReconcilia
       return { ...r, ok: false, filledContracts: 0, status: "unfilled", error: r.error ?? "settlement failed on reconciliation" };
     }
     if (c.status === "settled" && typeof c.filledContracts === "number") {
-      return { ...r, filledContracts: c.filledContracts };
+      const requestedSize = requests[i]?.sizeContracts;
+      const status = c.filledContracts <= 0 ? "unfilled" : requestedSize != null && c.filledContracts < requestedSize ? "partial" : "filled";
+      return { ...r, ok: c.filledContracts > 0, filledContracts: c.filledContracts, status, error: c.filledContracts > 0 ? undefined : r.error };
     }
     return r;
   });

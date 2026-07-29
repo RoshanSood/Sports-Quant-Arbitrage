@@ -4,7 +4,7 @@ import { Fragment, useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import type { ArbLog, ArbResult } from "@/types/arbitrage";
 import { FloatingPanel, Pill } from "./ui";
-import { formatClock, formatEdgePct, reasonCodeLabel } from "./arbFormat";
+import { formatClock, formatEdgePct, reasonCodeLabel, venueAbbr, venueStyle } from "./arbFormat";
 
 const RESULT_COLOR: Record<ArbResult, string> = {
   executed: "#22c55e",
@@ -81,8 +81,8 @@ export default function ArbLogPanel({ logs, live = false, onClose }: { logs: Arb
                   <td className="py-2.5 pr-3">
                     <span className="flex gap-1">
                       {l.venues.map((v) => (
-                        <Pill key={v} color={v.includes("kalshi") ? "#3b82f6" : "#8b5cf6"} text={v.includes("kalshi") ? "#93c5fd" : "#c4b5fd"}>
-                          {v[0].toUpperCase()}
+                        <Pill key={v} color={venueStyle(v).color} text={venueStyle(v).text}>
+                          {venueAbbr(v)}
                         </Pill>
                       ))}
                     </span>

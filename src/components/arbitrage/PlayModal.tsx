@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { Play, Loader2, TriangleAlert } from "lucide-react";
 import type { ArbOpportunity } from "@/types/arbitrage";
-import { formatCents, formatDollars, formatEdgePct, formatOdds } from "./arbFormat";
+import { formatCents, formatDollars, formatEdgePct, formatOdds, venueDisplayName, venueStyle } from "./arbFormat";
 
 type ExecResponse = {
   result?: string;
@@ -83,8 +83,8 @@ export default function PlayModal({
           {opp.legs.map((leg, i) => (
             <div key={i} className="flex items-center justify-between rounded-lg border px-3 py-2" style={{ borderColor: "#1e2130", background: "#0e1014" }}>
               <div>
-                <div className="font-semibold capitalize" style={{ color: leg.venueId.includes("kalshi") ? "#60a5fa" : "#c4b5fd" }}>
-                  {leg.venueId}
+                <div className="font-semibold" style={{ color: venueStyle(leg.venueId).text }}>
+                  {venueDisplayName(leg.venueId)}
                 </div>
                 <div className="text-gray-400">{leg.label}</div>
               </div>

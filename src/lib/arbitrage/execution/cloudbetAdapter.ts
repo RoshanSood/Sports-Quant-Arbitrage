@@ -1,7 +1,7 @@
-// Cloudbet live order (bet) adapter. Cloudbet is a crypto SPORTSBOOK, not an exchange: a
+// CloudBet live order (bet) adapter. CloudBet is a crypto SPORTSBOOK, not an exchange: a
 // bet is a stake at decimal odds, all-or-nothing, and cannot be cancelled once matched.
 // We post a marketable BACK bet to POST /pub/v3/bets/place with the X-API-Key, mapping our
-// contract/limit model onto Cloudbet's stake/odds model:
+// contract/limit model onto CloudBet's stake/odds model:
 //   • decimal limit odds  = 100 / limitPriceCents               (min odds we'll accept)
 //   • stake (currency)     = sizeContracts * limitPriceCents/100 (cost at the limit)
 //   • acceptPriceChange    = BETTER  → fill only at that price or better (limit semantics)
@@ -17,13 +17,64 @@ import type { CloudbetCreds } from "./onchainCreds";
 import type { ExecutionAdapter, FillConfirmation, OrderRequest, OrderResult } from "./types";
 
 const API = "https://sports-api.cloudbet.com";
+const FEED = "https://sports-api.cloudbet.com/pub/v2/odds";
+
+// During a LIVE event Cloudbet suspends the full-game market between plays
+// (SELECTION_DISABLED, price 0) and only re-opens it in brief windows. A place request
+// that lands on a suspended market is rejected, which is why live legs never fill. To
+// place a live bet we must catch an enabled window: poll the single-event feed for our
+// outcome and return the first fresh enabled price. Pre-match markets are enabled
+// continuously, so this returns on the first poll (adds ~1 request, no real latency).
+// Returns null if the market never re-opens within timeoutMs.
+type CbFeedSel = { outcome?: string; params?: string; price?: number; status?: string; minStake?: number };
+export async function cbLiveEnabledPrice(
+  apiKey: string,
+  eventId: string,
+  marketUrl: string,
+  timeoutMs = 8000
+): Promise<{ price: number; minStake: number } | null> {
+  const base = marketUrl.split("?")[0]; // strip grouping params
+  const marketKey = base.split("/")[0]; // e.g. baseball.moneyline
+  const outcome = base.split("/")[1]; // home | away | draw
+  const expectedParams = new URLSearchParams(marketUrl.includes("?") ? marketUrl.split("?")[1] : "");
+  if (!marketKey || !outcome) return null;
+  const deadline = Date.now() + timeoutMs;
+  const url = `${FEED}/events/${encodeURIComponent(eventId)}?markets=${encodeURIComponent(marketKey)}`;
+  while (Date.now() < deadline) {
+    try {
+      const r = await fetch(url, { headers: { "X-API-Key": apiKey, Accept: "application/json" }, cache: "no-store" });
+      if (r.ok) {
+        const j = (await r.json()) as { markets?: Record<string, { submarkets?: Record<string, { selections?: CbFeedSel[] }> }> };
+        const subs = j.markets?.[marketKey]?.submarkets ?? {};
+        for (const sub of Object.values(subs)) {
+          const sel = (sub.selections ?? []).find((s) => s.outcome === outcome && paramsMatch(s, expectedParams));
+          if (sel && (!sel.status || sel.status === "SELECTION_ENABLED") && typeof sel.price === "number" && sel.price > 1) {
+            return { price: sel.price, minStake: typeof sel.minStake === "number" ? sel.minStake : 0 };
+          }
+        }
+      }
+    } catch {
+      // transient — keep polling until the deadline
+    }
+    if (Date.now() < deadline) await sleep(400);
+  }
+  return null;
+}
+
+function paramsMatch(sel: CbFeedSel, expected: URLSearchParams): boolean {
+  for (const [key, value] of expected.entries()) {
+    const actual = new URLSearchParams(sel.params ?? "").get(key);
+    if (actual !== value) return false;
+  }
+  return true;
+}
 
 // Creds come from the browser (per-request) or server env.
 export function cbApiKey(c?: CloudbetCreds): string | undefined {
   return c?.apiKey?.trim() || process.env.CLOUDBET_API_KEY?.trim() || undefined;
 }
 export function cbCurrency(c?: CloudbetCreds): string {
-  // Default to USDC (most Cloudbet crypto balances); override per-request or via
+  // Default to USDC (most CloudBet crypto balances); override per-request or via
   // CLOUDBET_CURRENCY for USDT/BTC/ETH/etc.
   return c?.currency?.trim() || process.env.CLOUDBET_CURRENCY?.trim() || "USDC";
 }
@@ -84,14 +135,27 @@ export class CloudbetExecutionAdapter implements ExecutionAdapter {
 
   async placeOrder(req: OrderRequest): Promise<OrderResult> {
     const apiKey = cbApiKey(this.creds);
-    if (!apiKey) return reject(req, "Cloudbet API key not configured");
+    if (!apiKey) return reject(req, "CloudBet API key not configured");
     const eventId = req.nativeMarketId;
     const marketUrl = req.nativeSide; // e.g. "baseball.moneyline/home"
-    if (!eventId || !marketUrl) return reject(req, "missing Cloudbet event/market — live bet not wired for this leg");
-    if (req.limitPriceCents <= 0 || req.limitPriceCents >= 100) return reject(req, "invalid Cloudbet limit price");
+    if (!eventId || !marketUrl) return reject(req, "missing CloudBet event/market — live bet not wired for this leg");
+    if (req.limitPriceCents <= 0 || req.limitPriceCents >= 100) return reject(req, "invalid CloudBet limit price");
 
     const decimalLimit = 100 / req.limitPriceCents; // min odds we'll accept
     const stake = (req.sizeContracts * req.limitPriceCents) / 100; // cost at the limit, in currency
+
+    // Chase an enabled price window. On a pre-match market this returns immediately; on a
+    // LIVE market that is suspended between plays it polls until the market re-opens (or
+    // times out). Without this, live legs almost always hit a suspended market and reject.
+    const live = await cbLiveEnabledPrice(apiKey, String(eventId), marketUrl, 8000);
+    if (!live) return reject(req, "CloudBet market suspended (live) — no enabled price in 8s; will retry next scan");
+    if (live.price < decimalLimit) {
+      return reject(req, `CloudBet live price ${live.price.toFixed(2)} worse than limit ${decimalLimit.toFixed(2)} — arb no longer holds`);
+    }
+    if (live.minStake > 0 && stake < live.minStake) {
+      return reject(req, `CloudBet stake ${stake.toFixed(4)} below live minStake ${live.minStake}`);
+    }
+
     const referenceId = crypto.randomUUID();
     const body = {
       referenceId,
@@ -118,9 +182,11 @@ export class CloudbetExecutionAdapter implements ExecutionAdapter {
       }
       let status = (b.status ?? "").toUpperCase();
 
-      // PENDING_ACCEPTANCE → the engine is still processing; poll the status endpoint.
-      for (let i = 0; status === "PENDING_ACCEPTANCE" && i < 4; i++) {
-        await sleep(600);
+      // PENDING_ACCEPTANCE → Cloudbet applies a live-bet acceptance delay while it
+      // re-checks the price; this can take several seconds and may resolve to
+      // MARKET_SUSPENDED if the market suspends mid-acceptance. Poll up to ~12s.
+      for (let i = 0; status === "PENDING_ACCEPTANCE" && i < 12; i++) {
+        await sleep(1000);
         const s = await this.betStatus(apiKey, referenceId);
         if (s?.status) status = s.status.toUpperCase();
         if (s?.price) b.price = s.price;
@@ -145,7 +211,7 @@ export class CloudbetExecutionAdapter implements ExecutionAdapter {
     }
   }
 
-  // Re-query the bet to confirm it was accepted (Cloudbet grades later; acceptance is the
+  // Re-query the bet to confirm it was accepted (CloudBet grades later; acceptance is the
   // "settled position" signal reconciliation needs).
   async confirmFill(orderId: string, req: OrderRequest): Promise<FillConfirmation> {
     const key = cbApiKey(this.creds);
@@ -163,8 +229,8 @@ export class CloudbetExecutionAdapter implements ExecutionAdapter {
 
   private async betStatus(apiKey: string, referenceId: string): Promise<CbBetResponse | null> {
     try {
+      // GET, not POST — POST /status returns HTTP 405 (this endpoint is read-only).
       const r = await fetch(`${API}/pub/v3/bets/${referenceId}/status`, {
-        method: "POST",
         headers: { "X-API-Key": apiKey, Accept: "application/json" },
       });
       if (!r.ok) return null;

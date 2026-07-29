@@ -110,15 +110,103 @@ export const TEAM_ALIASES: Record<string, string> = {
   "los angeles a": "los angeles angels",
   "chicago c": "chicago cubs",
   "chicago w": "chicago white sox",
+
+  // MLS
+  "atlanta united": "atlanta united fc",
+  "atlanta united fc": "atlanta united fc",
+  "austin": "austin fc",
+  "austin fc": "austin fc",
+  "cf montreal": "cf montreal",
+  "montreal": "cf montreal",
+  "charlotte": "charlotte fc",
+  "charlotte fc": "charlotte fc",
+  "chicago fire": "chicago fire fc",
+  "chicago fire fc": "chicago fire fc",
+  "colorado rapids": "colorado rapids",
+  "columbus": "columbus crew",
+  "columbus crew": "columbus crew",
+  "dc united": "dc united",
+  "d c united": "dc united",
+  "d.c. united": "dc united",
+  "fc cincinnati": "fc cincinnati",
+  "fc dallas": "fc dallas",
+  "dallas": "fc dallas",
+  "houston dynamo": "houston dynamo fc",
+  "houston dynamo fc": "houston dynamo fc",
+  "inter miami": "inter miami cf",
+  "inter miami cf": "inter miami cf",
+  "la galaxy": "la galaxy",
+  "los angeles galaxy": "la galaxy",
+  "lafc": "los angeles fc",
+  "los angeles fc": "los angeles fc",
+  "minnesota united": "minnesota united fc",
+  "minnesota united fc": "minnesota united fc",
+  "nashville": "nashville sc",
+  "nashville sc": "nashville sc",
+  "new england": "new england revolution",
+  "new england revolution": "new england revolution",
+  "new york city": "new york city fc",
+  "new york city fc": "new york city fc",
+  "nycfc": "new york city fc",
+  "new york red bulls": "new york red bulls",
+  "red bull new york": "new york red bulls",
+  "red bulls": "new york red bulls",
+  "orlando city": "orlando city sc",
+  "orlando city sc": "orlando city sc",
+  "philadelphia union": "philadelphia union",
+  "portland": "portland timbers",
+  "portland timbers": "portland timbers",
+  "real salt lake": "real salt lake",
+  "san diego fc": "san diego fc",
+  "san jose": "san jose earthquakes",
+  "san jose earthquakes": "san jose earthquakes",
+  "seattle sounders": "seattle sounders fc",
+  "seattle sounders fc": "seattle sounders fc",
+  "sporting kansas city": "sporting kansas city",
+  "st louis city": "st louis city sc",
+  "st. louis city": "st louis city sc",
+  "saint louis city": "st louis city sc",
+  "st louis city sc": "st louis city sc",
+  "toronto fc": "toronto fc",
+  "vancouver whitecaps": "vancouver whitecaps fc",
+  "vancouver whitecaps fc": "vancouver whitecaps fc",
+
+  // Brazil soccer
+  "botafogo": "botafogo",
+  "botafogo fr": "botafogo",
+  "botafogo rj": "botafogo",
+  "botafogo de futebol e regatas": "botafogo",
+  "vitoria": "vitoria",
+  "vitória": "vitoria",
+  "ec vitoria": "vitoria",
+  "ec vitória": "vitoria",
+  "esporte clube vitoria": "vitoria",
+  "esporte clube vitória": "vitoria",
+  "remo": "remo",
+  "clube do remo": "remo",
+  "corinthians": "corinthians",
+  "sport club corinthians paulista": "corinthians",
 };
+
+function cleanTeamText(name: string): string {
+  return name
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .replace(/\s+/g, " ");
+}
 
 // Returns the canonical full name for a SINGLE team name/abbreviation.
 // NEVER pass a full event title (e.g. "Angels vs. Blue Jays") — that will match the wrong team.
 export function normalizeTeamName(name: string): string {
-  const lower = name.toLowerCase().trim();
+  const lower = cleanTeamText(name);
   if (TEAM_ALIASES[lower]) return TEAM_ALIASES[lower];
   for (const [alias, canonical] of Object.entries(TEAM_ALIASES)) {
-    if (lower.includes(alias)) return canonical;
+    const cleanAlias = cleanTeamText(alias);
+    if (lower.includes(cleanAlias)) return canonical;
   }
   return lower;
 }
@@ -132,21 +220,21 @@ export function teamMatchesTitle(
   espnAbbr: string,
   title: string
 ): boolean {
-  const lower = title.toLowerCase();
+  const lower = cleanTeamText(title);
 
   // Direct substring: full ESPN name (e.g. "Los Angeles Angels")
-  if (lower.includes(espnName.toLowerCase())) return true;
+  if (lower.includes(cleanTeamText(espnName))) return true;
   // Short name (e.g. "Angels")
-  if (lower.includes(espnShortName.toLowerCase())) return true;
+  if (lower.includes(cleanTeamText(espnShortName))) return true;
 
   // All known aliases for this team's canonical name
   const canonical = normalizeTeamName(espnName);
   for (const [alias, can] of Object.entries(TEAM_ALIASES)) {
-    if (can === canonical && lower.includes(alias)) return true;
+    if (can === canonical && lower.includes(cleanTeamText(alias))) return true;
   }
 
   // Abbreviation check (3+ chars, e.g. "NYM", "LAD" in "NYM vs LAD" sub-titles)
-  if (espnAbbr.length >= 3 && lower.includes(espnAbbr.toLowerCase())) return true;
+  if (espnAbbr.length >= 3 && lower.includes(cleanTeamText(espnAbbr))) return true;
 
   return false;
 }

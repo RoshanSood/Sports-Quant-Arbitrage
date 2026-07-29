@@ -1,8 +1,8 @@
-"use client";
+﻿"use client";
 
 import { useState } from "react";
 import type { ArbLog, ArbOpportunity, Trade } from "@/types/arbitrage";
-import { formatClock, formatEdgePct } from "./arbFormat";
+import { formatClock, formatEdgePct, formatVenueList } from "./arbFormat";
 
 type FeedFilter = "ALL" | "TRADES" | "SCORES" | "SYSTEM";
 
@@ -67,7 +67,7 @@ function buildFeed(logs: ArbLog[], scores: ScoreEvent[], opportunities: ArbOppor
     id: l.id,
     time: l.time,
     kind: "TRADES",
-    text: `${l.pair} — ${l.reason}`,
+    text: `${l.pair} (${formatVenueList(l.venues)}) - ${l.reason}`,
     edge: l.edge,
     result: l.result,
   }));
@@ -122,7 +122,7 @@ export default function ActivityFeed({
           ))}
         </div>
       </div>
-      <p className="px-3 py-1 text-[10px] italic text-gray-600">Edge figures are net after fees · scores update live from ESPN.</p>
+      <p className="px-3 py-1 text-[10px] italic text-gray-600">Edge figures are net after fees | scores update live from ESPN.</p>
       <div className={`overflow-y-auto flex-1 ${compact ? "max-h-52" : ""}`}>
         {shown.length === 0 && <p className="px-3 py-4 text-[11px] text-gray-600 text-center">No activity yet.</p>}
         {shown.map((item) => (

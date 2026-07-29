@@ -1,0 +1,381 @@
+# Polymarket API Autotrading Setup
+
+This document is for another agent/operator setting up Polymarket live autotrading in this repo. It explains the working international Polymarket CLOB deposit-wallet flow, the public addresses currently verified for this project, the secrets required in `.env.local`, and how to find the correct USDC deposit/bridge address.
+
+Do not paste private keys or API secrets into logs, docs, GitHub issues, screenshots, or chat. This document names secret environment variables, but intentionally does not include secret values.
+
+## The Core Model
+
+Polymarket API trading in this project does not use a plain MetaMask EOA as the order maker. Direct EOA signing previously failed with:
+
+```text
+maker address not allowed, please use the deposit wallet flow
+```
+
+The working flow is:
+
+1. A MetaMask/self-custody EOA owns and signs.
+2. A deterministic Polymarket deposit wallet is the CLOB maker/funder.
+3. Orders use `POLYMARKET_SIG_TYPE=3`, also known as `POLY_1271`.
+4. The deposit wallet must hold pUSD/Polymarket collateral.
+5. Funds are deposited by sending supported tokens, usually USDC, to a Polymarket bridge deposit address generated for the deposit wallet.
+6. The Polymarket bridge converts/credits the deposit into pUSD on the deposit wallet.
+7. The CLOB API reads `getBalanceAllowance({ asset_type: COLLATERAL })` and places FOK market buys from that pUSD balance.
+
+Relevant Polymarket docs:
+
+- Deposit wallets: <https://docs.polymarket.com/trading/deposit-wallets>
+- Bridge deposits: <https://docs.polymarket.com/trading/bridge/deposit>
+- Orders: <https://docs.polymarket.com/trading/orders/create>
+- Gasless/relayer flow: <https://docs.polymarket.com/trading/gasless>
+
+## Current Verified Addresses
+
+These are public addresses for the setup that was verified locally.
+
+```text
+Owner / signer EOA:
+0x582323b8407FA91993fc40aaA22945E5d038E09a
+
+Derived Polymarket deposit wallet / CLOB funder:
+0xEc05F611d267D42847042d236AE6b5599619A6E8
+
+Polymarket bridge EVM deposit address for that funder:
+0xa149A08F77a70519Fe526b270556E06b6a1A04b7
+
+Builder address:
+0x6f67962542051bae494927afe82789762c620b90998c10a0fdb493a3d107dbda
+
+Builder code:
+0x6f67962542051bae494927afe82789762c620b90998c10a0fdb493a3d107dbda
+
+Relayer API key address:
+0x582323b8407FA91993fc40aaA22945E5d038E09a
+
+Polymarket relayer URL:
+https://relayer-v2.polymarket.com
+
+Polymarket CLOB host:
+https://clob.polymarket.com
+
+Polygon chain ID:
+137
+```
+
+The owner/signer EOA and the deposit wallet are different by design. The owner EOA signs. The deposit wallet is the maker/funder that needs pUSD.
+
+## Required Environment Variables
+
+The project expects these variables in `.env.local` for international Polymarket CLOB trading:
+
+```env
+POLYMARKET_SIG_TYPE=3
+POLYMARKET_FUNDER=0xEc05F611d267D42847042d236AE6b5599619A6E8
+POLYMARKET_DEPOSIT_WALLET=0xEc05F611d267D42847042d236AE6b5599619A6E8
+POLYMARKET_WALLET_KEY=<owner EOA private key; never log this>
+
+RELAYER_API_KEY=<relayer API key; never log this>
+RELAYER_API_KEY_ADDRESS=0x582323b8407FA91993fc40aaA22945E5d038E09a
+
+BUILDER_ADDRESS=0x6f67962542051bae494927afe82789762c620b90998c10a0fdb493a3d107dbda
+BUILDER_CODE=0x6f67962542051bae494927afe82789762c620b90998c10a0fdb493a3d107dbda
+```
+
+Optional overrides:
+
+```env
+POLYMARKET_CLOB_HOST=https://clob.polymarket.com
+POLYMARKET_RELAYER_URL=https://relayer-v2.polymarket.com
+POLYGON_RPC_URL=<preferred Polygon RPC>
+```
+
+Important:
+
+- `POLYMARKET_WALLET_KEY` is the private key for the owner/signer EOA, not the deposit wallet.
+- `POLYMARKET_FUNDER` is the deposit wallet address.
+- `POLYMARKET_SIG_TYPE=3` is required for the deposit-wallet/POLY_1271 flow.
+- `RELAYER_API_KEY` is secret. Do not print its value.
+- `RELAYER_API_KEY_ADDRESS` is public and should be the address associated with the relayer key.
+
+## How The Deposit Wallet Was Verified
+
+Run:
+
+```powershell
+node scripts\polymarket-deposit-wallet-status.cjs
+```
+
+Expected shape:
+
+```json
+{
+  "owner": "0x582323b8407FA91993fc40aaA22945E5d038E09a",
+  "chainId": 137,
+  "derivedDepositWallet": "0xEc05F611d267D42847042d236AE6b5599619A6E8",
+  "configuredDepositWallet": "0xEc05F611d267D42847042d236AE6b5599619A6E8",
+  "configuredMatchesDerived": true,
+  "deployed": true,
+  "hasRelayerKey": true
+}
+```
+
+If `configuredMatchesDerived` is false, do not trade. The configured funder does not match the owner key.
+
+If `deployed` is false, the deposit wallet needs deployment before use. The helper can deploy only when authenticated relayer credentials or builder credentials are present:
+
+```powershell
+node scripts\polymarket-deposit-wallet-status.cjs --deploy
+```
+
+## How To Find The USDC Deposit Address
+
+Do not guess the deposit address and do not assume the Polymarket UI address is for the bot. The UI may show a bridge address for a different browser account.
+
+The correct deposit address for API trading is generated by Polymarket's bridge API from the bot's deposit wallet/funder.
+
+For this setup, call:
+
+```powershell
+$body = @{ address = '0xEc05F611d267D42847042d236AE6b5599619A6E8' } | ConvertTo-Json
+Invoke-RestMethod `
+  -Uri 'https://bridge.polymarket.com/deposit' `
+  -Method Post `
+  -ContentType 'application/json' `
+  -Body $body |
+  ConvertTo-Json -Depth 8
+```
+
+Verified response:
+
+```json
+{
+  "address": {
+    "evm": "0xa149A08F77a70519Fe526b270556E06b6a1A04b7",
+    "svm": "8nbWi5cKSXwq1eEXLDNMvfdxfdLmYR1rnC4gqBkmPzkB",
+    "tron": "TYAgP3d5Jz5SYXRcWND4uUsqAWHeryhdrx",
+    "btc": "bc1qu70784lvaeqklngw8knfkl4v9qyym9fyltm9c3"
+  }
+}
+```
+
+For Polygon USDC deposits, use the `evm` address:
+
+```text
+0xa149A08F77a70519Fe526b270556E06b6a1A04b7
+```
+
+Deposit details used for the working test:
+
+```text
+Token: USDC
+Network: Polygon
+Destination: 0xa149A08F77a70519Fe526b270556E06b6a1A04b7
+Minimum: bridge endpoint showed Polygon USDC supported; use a small test amount first
+```
+
+After a deposit, check bridge status:
+
+```powershell
+Invoke-RestMethod `
+  -Uri 'https://bridge.polymarket.com/status/0xa149A08F77a70519Fe526b270556E06b6a1A04b7' `
+  -Method Get |
+  ConvertTo-Json -Depth 8
+```
+
+The verified bridge history showed completed Polygon deposits that credited the bot funder.
+
+## Balance Verification
+
+The bot funder should end up with pUSD, not raw USDC. In the working setup, a bridge deposit resulted in:
+
+```text
+Bot funder:
+0xEc05F611d267D42847042d236AE6b5599619A6E8
+
+pUSD balance:
+4.0
+
+Raw USDC.e balance:
+0.0
+
+Native Polygon USDC balance:
+0.0
+```
+
+The CLOB API also saw:
+
+```text
+balance: 4000000
+```
+
+`4000000` is 6-decimal base units, meaning `$4.00`.
+
+The code path for this is:
+
+- `src/lib/arbitrage/execution/verify.ts`
+- `src/lib/arbitrage/execution/polymarketAdapter.ts`
+- `polymarketBalanceAllowance(...)`
+- `client.getBalanceAllowance({ asset_type: AssetType.COLLATERAL })`
+
+The app should use CLOB pUSD balance/allowance as the source of truth for Polymarket API trading power.
+
+## Order Placement Requirements
+
+Manual and auto trading both need to use FOK market buys, not the older limit-order sizing path.
+
+The failure this avoids:
+
+```text
+invalid amounts, the market buy orders maker amount supports a max accuracy of 2 decimals, taker amount a max of 5 decimals
+```
+
+The working logic is:
+
+```ts
+const amount = roundTo(sizeContracts * (limitPriceCents / 100), 2);
+const signed = await client.createMarketOrder({
+  tokenID,
+  amount,
+  price,
+  side: Side.BUY,
+  orderType: OrderType.FOK,
+});
+const resp = await client.postOrder(signed, OrderType.FOK);
+```
+
+In this repo, the auto-trading implementation is in:
+
+```text
+src/lib/arbitrage/execution/polymarketAdapter.ts
+```
+
+The sizing helper is:
+
+```text
+polymarketFokBuyAmount(sizeContracts, limitPriceCents)
+```
+
+There is a unit test for this precision behavior:
+
+```text
+src/lib/arbitrage/execution/polymarketAdapter.test.ts
+```
+
+## Manual Validation Commands
+
+Check deposit wallet status:
+
+```powershell
+node scripts\polymarket-deposit-wallet-status.cjs
+```
+
+Dry-run a known Polymarket market:
+
+```powershell
+node scripts\polymarket-buy-white-sox.cjs --spend=2
+```
+
+Submit the live manual test only when the user explicitly approves:
+
+```powershell
+node scripts\polymarket-buy-white-sox.cjs --spend=2 --execute-live
+```
+
+Build and test:
+
+```powershell
+npm install
+npx tsc --noEmit
+npm test
+npm run build
+```
+
+## Common Failure Modes
+
+### `maker address not allowed, please use the deposit wallet flow`
+
+The order is using direct EOA mode or the wrong funder.
+
+Fix:
+
+```env
+POLYMARKET_SIG_TYPE=3
+POLYMARKET_FUNDER=<derived deposit wallet>
+POLYMARKET_DEPOSIT_WALLET=<derived deposit wallet>
+POLYMARKET_WALLET_KEY=<owner EOA private key>
+```
+
+Then verify:
+
+```powershell
+node scripts\polymarket-deposit-wallet-status.cjs
+```
+
+### `invalid amounts`
+
+The order was signed with a maker/taker amount that exceeds Polymarket precision.
+
+Fix: use `createMarketOrder` with a two-decimal pUSD `amount`, not `createOrder` with manually computed shares.
+
+### CLOB balance is zero after depositing
+
+Likely causes:
+
+- Deposit was sent to a bridge address for the wrong Polymarket account.
+- Deposit is not completed by the bridge yet.
+- `POLYMARKET_FUNDER` points to a different deposit wallet.
+
+Fix:
+
+1. Re-derive the deposit wallet from `POLYMARKET_WALLET_KEY`.
+2. Confirm `POLYMARKET_FUNDER` equals the derived deposit wallet.
+3. Query `https://bridge.polymarket.com/deposit` with that deposit wallet.
+4. Deposit only to the returned `address.evm`.
+5. Check bridge status for the returned `address.evm`.
+6. Check CLOB balance/allowance.
+
+### Next/Turbopack cannot resolve `viem`
+
+The Polymarket client imports `viem`. Ensure dependencies are installed:
+
+```powershell
+npm install
+Remove-Item -Recurse -Force .next
+npm run dev
+```
+
+Production build should pass:
+
+```powershell
+npm run build
+```
+
+## Do Not Do These
+
+- Do not use `POLYMARKET_SIG_TYPE=0` for this account after the deposit-wallet rejection.
+- Do not set `POLYMARKET_FUNDER` to the owner EOA.
+- Do not deposit based only on the Polymarket browser UI if the browser account is not known to be the same bot funder.
+- Do not paste `POLYMARKET_WALLET_KEY` or `RELAYER_API_KEY` into docs or logs.
+- Do not place live test orders from an agent/tool without explicit user permission.
+
+## Current Working Summary
+
+```text
+Owner EOA signs:
+0x582323b8407FA91993fc40aaA22945E5d038E09a
+
+Deposit wallet / CLOB funder trades:
+0xEc05F611d267D42847042d236AE6b5599619A6E8
+
+Bridge address to send Polygon USDC:
+0xa149A08F77a70519Fe526b270556E06b6a1A04b7
+
+Signature type:
+3 / POLY_1271
+
+Balance source of truth:
+CLOB collateral balance, pUSD, 6 decimals
+
+Order type:
+FOK market buy with two-decimal pUSD amount
+```

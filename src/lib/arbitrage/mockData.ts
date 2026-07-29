@@ -245,7 +245,7 @@ export const MOCK_MATCH_KEYS: MatchKey[] = [
 export const MOCK_LOGS: ArbLog[] = [
   {
     id: "log-1", time: "2026-07-07T23:52:45.000Z",
-    pair: "[CB:kalshi-mlb] Phillies v Reds", venues: ["kalshi", "polymarket"],
+    pair: "[AG:kalshi-mlb] Phillies v Reds", venues: ["kalshi", "polymarket"],
     edge: 0.0679, mode: "paper", agent: "kalshi-mlb", result: "executed",
     reasonCode: null, reason: "Both legs filled (paper)",
     detailsJson: { yesCents: 51, noCents: 41, stake: 50, expectedProfit: 4.4 },
@@ -253,7 +253,7 @@ export const MOCK_LOGS: ArbLog[] = [
   },
   {
     id: "log-2", time: "2026-07-07T23:52:31.000Z",
-    pair: "[CB:kalshi-mlb] Athletics v Tigers", venues: ["kalshi", "polymarket"],
+    pair: "[AG:kalshi-mlb] Athletics v Tigers", venues: ["kalshi", "polymarket"],
     edge: 0.0351, mode: "paper", agent: "kalshi-mlb", result: "halted",
     reasonCode: "identity_dedup", reason: "already tracking same physical match",
     detailsJson: { matchedLabel: "Athletics vs Tigers", existingOpportunity: "arb-oak-det" },
@@ -261,7 +261,7 @@ export const MOCK_LOGS: ArbLog[] = [
   },
   {
     id: "log-3", time: "2026-07-07T23:52:25.000Z",
-    pair: "[CB:kalshi-mlb] Tampa Bay Rays v New York Yankees", venues: ["kalshi", "polymarket"],
+    pair: "[AG:kalshi-mlb] Tampa Bay Rays v New York Yankees", venues: ["kalshi", "polymarket"],
     edge: 0.0234, mode: "paper", agent: "kalshi-mlb", result: "halted",
     reasonCode: "position_dedup", reason: "already tracking match+strategy (max=1, open=1)",
     detailsJson: { maxPositions: 1, openPositions: 1 },
@@ -269,7 +269,7 @@ export const MOCK_LOGS: ArbLog[] = [
   },
   {
     id: "log-4", time: "2026-07-07T23:51:40.000Z",
-    pair: "[CB:kalshi-mlb] Philadelphia v Cincinnati", venues: ["kalshi", "polymarket"],
+    pair: "[AG:kalshi-mlb] Philadelphia v Cincinnati", venues: ["kalshi", "polymarket"],
     edge: 0.0323, mode: "paper", agent: "kalshi-mlb", result: "halted",
     reasonCode: "orderbook_not_ready", reason: "kalshi orderbook not streamed yet",
     detailsJson: { venue: "kalshi", marketId: "KXMLBGAME-PHICIN-HOME" },
@@ -277,7 +277,7 @@ export const MOCK_LOGS: ArbLog[] = [
   },
   {
     id: "log-5", time: "2026-07-07T23:50:23.000Z",
-    pair: "[CB:kalshi-mlb] Seattle v Miami", venues: ["kalshi", "polymarket"],
+    pair: "[AG:kalshi-mlb] Seattle v Miami", venues: ["kalshi", "polymarket"],
     edge: 0.281, mode: "paper", agent: "kalshi-mlb", result: "halted",
     reasonCode: "edge_above_max", reason: "edge above cap and likely stale or mismatched",
     detailsJson: { edge: 0.281, maxEdge: 0.25 },

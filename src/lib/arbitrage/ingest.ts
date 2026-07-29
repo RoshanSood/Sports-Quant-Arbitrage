@@ -20,7 +20,7 @@ import {
 import { fetchPolymarketUsMLBMarkets, type PolymarketUsMarkets } from "@/lib/polymarketUs";
 import { polymarketRegion } from "@/lib/polymarketRegion";
 import { fetchPredictFunMoneylineByGame } from "@/lib/predictFun";
-import { fetchCloudbetMoneylineByGame } from "@/lib/cloudbet";
+import { fetchCloudbetMoneylineByGame, fetchCloudbetSpreadByGame, fetchCloudbetTotalsByGame } from "@/lib/cloudbet";
 import { fetchSxBetMLBMarkets, fetchSxBetMoneylineByGame, fetchSxBetTotalsByGame, type SxBetMarkets } from "@/lib/sxbet";
 import type { NormalizedMarket, Outcome, Sport, VenueId } from "@/types/arbitrage";
 import { decimalOddsFromCents, impliedProbFromCents } from "./arbMath";
@@ -224,6 +224,14 @@ async function ingestSportMarkets(
   const sxDynML = cfg.sxDynamic ? await withFetchedAt(fetchSxBetMoneylineByGame(games, cfg.sxDynamic), emptyTwoWay()) : freshEmptyTwoWay();
   const pfML = cfg.predictfun ? await withFetchedAt(fetchPredictFunMoneylineByGame(games), emptyTwoWay()) : freshEmptyTwoWay();
   const cbML = cfg.cloudbet ? await withFetchedAt(fetchCloudbetMoneylineByGame(games, cfg.cloudbet), emptyTwoWay()) : freshEmptyTwoWay();
+  const cbTot =
+    cfg.cloudbet && cfg.cloudbet.totals && cfg.markets.totals
+      ? await withFetchedAt(fetchCloudbetTotalsByGame(games, cfg.cloudbet), emptyTotals())
+      : freshEmptyTotals();
+  const cbSp =
+    cfg.cloudbet && cfg.cloudbet.spread && cfg.markets.spread
+      ? await withFetchedAt(fetchCloudbetSpreadByGame(games, cfg.cloudbet), emptySpread())
+      : freshEmptySpread();
 
   for (const game of games) {
     const kRows = [
@@ -244,7 +252,11 @@ async function ingestSportMarkets(
       ...normalizeVenueTwoWay("sxbet", game, sx.data.spread.get(game.id), "spread", cfg.sport, cfg.league, sx.fetchedAt),
     ];
     const pfRows = normalizeVenueTwoWay("predictfun", game, pfML.data.get(game.id), "moneyline", cfg.sport, cfg.league, pfML.fetchedAt);
-    const cbRows = normalizeVenueTwoWay("cloudbet", game, cbML.data.get(game.id), "moneyline", cfg.sport, cfg.league, cbML.fetchedAt);
+    const cbRows = [
+      ...normalizeVenueTwoWay("cloudbet", game, cbML.data.get(game.id), "moneyline", cfg.sport, cfg.league, cbML.fetchedAt),
+      ...normalizeVenueTotals("cloudbet", game, cbTot.data.get(game.id), cfg.sport, cfg.league, cbTot.fetchedAt),
+      ...normalizeVenueTwoWay("cloudbet", game, cbSp.data.get(game.id), "spread", cfg.sport, cfg.league, cbSp.fetchedAt),
+    ];
     venueCounts.kalshi += kRows.length;
     venueCounts.polymarket += pRows.length;
     venueCounts.sxbet += sRows.length;
@@ -321,6 +333,14 @@ export async function ingestTotals(date: string): Promise<IngestResult> {
       // predict.fun (MLB moneyline) + CloudBet (moneyline; 2-way, or 3-way soccer 1X2).
       const pfML = cfg.predictfun ? await fetchPredictFunMoneylineByGame(games).catch(emptyTwo) : emptyTwo();
       const cbML = cfg.cloudbet ? await fetchCloudbetMoneylineByGame(games, cfg.cloudbet).catch(emptyTwo) : emptyTwo();
+      const cbTot =
+        cfg.cloudbet && cfg.cloudbet.totals && cfg.markets.totals
+          ? await fetchCloudbetTotalsByGame(games, cfg.cloudbet).catch(emptyTot)
+          : emptyTot();
+      const cbSp =
+        cfg.cloudbet && cfg.cloudbet.spread && cfg.markets.spread
+          ? await fetchCloudbetSpreadByGame(games, cfg.cloudbet).catch(emptySpread)
+          : emptySpread();
 
       const now = new Date().toISOString();
       for (const game of games) {
@@ -342,7 +362,11 @@ export async function ingestTotals(date: string): Promise<IngestResult> {
         ];
         // predict.fun + CloudBet: moneyline only.
         const pfRows = normalizeVenueTwoWay("predictfun", game, pfML.get(game.id), "moneyline", cfg.sport, cfg.league, now);
-        const cbRows = normalizeVenueTwoWay("cloudbet", game, cbML.get(game.id), "moneyline", cfg.sport, cfg.league, now);
+        const cbRows = [
+          ...normalizeVenueTwoWay("cloudbet", game, cbML.get(game.id), "moneyline", cfg.sport, cfg.league, now),
+          ...normalizeVenueTotals("cloudbet", game, cbTot.get(game.id), cfg.sport, cfg.league, now),
+          ...normalizeVenueTwoWay("cloudbet", game, cbSp.get(game.id), "spread", cfg.sport, cfg.league, now),
+        ];
         venueCounts.kalshi += kRows.length;
         venueCounts.polymarket += pRows.length;
         venueCounts.sxbet += sRows.length;

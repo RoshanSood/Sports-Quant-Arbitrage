@@ -2,15 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { isRunning } from "@/lib/arbitrage/marketStore";
 import { runIngestion } from "@/lib/arbitrage/ingest";
 import { isAuthorized } from "@/lib/adminAuth";
+import { pacificTodayDateStr } from "@/lib/arbitrage/date";
 
 // Triggers Phase 3 ingestion (Kalshi + Polymarket game totals → NormalizedMarket).
 // Follows the value-plays/run pattern: auth, running guard, fire-and-forget; the
 // client polls GET /api/arbitrage/markets for results.
-
-function todayDateStr(): string {
-  const d = new Date();
-  return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
-}
 
 export async function POST(request: NextRequest) {
   let body: { date?: string; password?: string } = {};
@@ -24,7 +20,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const date = body.date ?? todayDateStr();
+  const date = body.date ?? pacificTodayDateStr();
   if (isRunning(date)) {
     return NextResponse.json({ status: "already-running", date });
   }

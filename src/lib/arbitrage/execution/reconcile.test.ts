@@ -30,9 +30,22 @@ describe("applyReconciliation", () => {
       { venue: "kalshi", orderId: "k1", confirmation: { status: "settled", filledContracts: 7 } },
       { venue: "sxbet", orderId: "s1", confirmation: null },
     ];
-    const out = applyReconciliation(results, recon);
+    const out = applyReconciliation(results, recon, [req("kalshi"), req("sxbet")]);
     expect(out[0].filledContracts).toBe(7);
+    expect(out[0].status).toBe("partial");
+    expect(out[0].ok).toBe(true);
     expect(out[1].filledContracts).toBe(10); // no confirmation → placement stands
+  });
+
+  it("clears stale placement errors when reconciliation finds a fill", () => {
+    const pendingZero: OrderResult = { ...filled("predictfun", "pf1", 0), error: "accepted but not reported filled" };
+    const out = applyReconciliation(
+      [pendingZero],
+      [{ venue: "predictfun", orderId: "pf1", confirmation: { status: "settled", filledContracts: 4.9 } }],
+      [{ ...req("predictfun"), sizeContracts: 5 }]
+    );
+    expect(out[0]).toMatchObject({ ok: true, filledContracts: 4.9, status: "partial" });
+    expect(out[0].error).toBeUndefined();
   });
 
   it("never downgrades on pending/unknown (no false naked flags)", () => {

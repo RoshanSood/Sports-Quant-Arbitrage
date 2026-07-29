@@ -1,0 +1,23 @@
+[
+  {
+    "id": "kalshi-mlb",
+    "name": "kalshi-mlb",
+    "strategy": "arbitrage",
+    "enabled": true,
+    "paper": false,
+    "live": true,
+    "autoTrade": true,
+    "minEdge": 0.001,
+    "maxEdge": 0.25,
+    "sizingMethod": "equal_profit",
+    "maxStake": 3,
+    "venues": [
+      "kalshi",
+      "polymarket",
+      "sxbet",
+      "predictfun",
+      "cloudbet"
+    ],
+    "staleQuoteMs": 30000
+  }
+]

@@ -21,6 +21,8 @@ type PfOutcome = { name: string; indexSet: number; onChainId: string; bestBid?: 
 type PfMarket = {
   id: number;
   title: string;
+  categorySlug?: string;
+  rewards?: { schedule?: { startsAt?: string; endsAt?: string }[] };
   conditionId?: string;
   feeRateBps?: number;
   tradingStatus?: string;
@@ -57,6 +59,21 @@ function splitTitle(title: string): [string, string] | null {
   return parts.length === 2 ? [parts[0].trim(), parts[1].trim()] : null;
 }
 
+function pfMarketDate(market: PfMarket): string | null {
+  const slugDate = market.categorySlug?.match(/\b(20\d{2})-(\d{2})-(\d{2})\b/);
+  if (slugDate) return `${slugDate[1]}-${slugDate[2]}-${slugDate[3]}`;
+  const startsAt = market.rewards?.schedule?.find((s) => s.startsAt)?.startsAt;
+  if (!startsAt) return null;
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Los_Angeles",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date(startsAt));
+  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
+  return `${get("year")}-${get("month")}-${get("day")}`;
+}
+
 // predict.fun MLB moneyline per game. Title order = outcome order (outcomes[0] is the
 // first-named team). Map each side to the game's home/away by team name.
 export async function fetchPredictFunMoneylineByGame(games: ArbGame[]): Promise<Map<string, VenueTwoWay>> {
@@ -68,6 +85,8 @@ export async function fetchPredictFunMoneylineByGame(games: ArbGame[]): Promise<
   for (const game of games) {
     const hit = markets.find((m) => {
       if (m.tradingStatus && m.tradingStatus !== "OPEN") return false;
+      const nativeDate = pfMarketDate(m);
+      if (nativeDate && nativeDate !== game.date) return false;
       const names = splitTitle(m.title);
       if (!names || (m.outcomes ?? []).length < 2) return false;
       const [a, b] = names;
@@ -95,7 +114,33 @@ export async function fetchPredictFunMoneylineByGame(games: ArbGame[]): Promise<
       // On-chain token id per outcome — threaded for order placement (like Polymarket).
       homeTokenId: homeOutcome.onChainId,
       awayTokenId: awayOutcome.onChainId,
+      sourceStartTime: pfMarketDate(hit) ?? game.date,
     });
   }
   return out;
+}
+
+export async function fetchPredictFunFeedDiagnostics(games: ArbGame[]): Promise<{ fetched: number; matchedDate: number; priced: number }> {
+  const markets = await fetchTeamMatchMarkets();
+  let matchedDate = 0;
+  let priced = 0;
+  for (const game of games) {
+    const hit = markets.find((m) => {
+      if (m.tradingStatus && m.tradingStatus !== "OPEN") return false;
+      const nativeDate = pfMarketDate(m);
+      if (nativeDate && nativeDate !== game.date) return false;
+      const names = splitTitle(m.title);
+      if (!names || (m.outcomes ?? []).length < 2) return false;
+      const [a, b] = names;
+      return (
+        (teamsMatch(a, game.awayTeam.name) && teamsMatch(b, game.homeTeam.name)) ||
+        (teamsMatch(a, game.homeTeam.name) && teamsMatch(b, game.awayTeam.name))
+      );
+    });
+    if (!hit) continue;
+    matchedDate += 1;
+    const [o0, o1] = hit.outcomes as [PfOutcome, PfOutcome];
+    if (cents(o0.bestAsk) != null && cents(o1.bestAsk) != null) priced += 1;
+  }
+  return { fetched: markets.length, matchedDate, priced };
 }

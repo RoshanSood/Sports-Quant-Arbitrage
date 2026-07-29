@@ -4,12 +4,8 @@ import { settledPnl } from "@/lib/arbitrage/executionPipeline";
 import { runExecution } from "@/lib/arbitrage/execution/executor";
 import { extractCredsFromHeaders } from "@/lib/kalshiAuth";
 import { extractOnchainCredsFromHeaders } from "@/lib/arbitrage/execution/onchainCreds";
+import { pacificTodayDateStr } from "@/lib/arbitrage/date";
 import type { Trade, TradeMode } from "@/types/arbitrage";
-
-function todayDateStr(): string {
-  const d = new Date();
-  return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
-}
 
 export async function GET(request: NextRequest) {
   try {
@@ -35,7 +31,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Missing opportunityId" }, { status: 400 });
     }
     const requestedMode = body.mode === "live" ? "live" : "dry_run";
-    const date = body.date ?? todayDateStr();
+    const date = body.date ?? pacificTodayDateStr();
     // Venue creds forwarded from the browser (localStorage → headers); undefined falls
     // back to server env inside each adapter. Used transiently, never persisted/logged.
     const kalshiCreds = extractCredsFromHeaders(request.headers);

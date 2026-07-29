@@ -28,6 +28,8 @@ export type ArbGame = {
 // the reader emits the draw leg.
 export type CloudbetSportCfg = {
   moneyline: string;
+  totals?: string;
+  spread?: string;
   threeWay?: boolean;
   competition?: string;
   sport?: string; // e.g. "tennis" — enumerate /sports/{sport} competitions matching competitionMatch
@@ -65,7 +67,7 @@ export const SPORTS: SportConfig[] = [
     kalshi: { game: "KXMLBGAME", total: "KXMLBTOTAL", spread: "KXMLBSPREAD" },
     polyTag: "mlb",
     sxLeagueId: 171,
-    cloudbet: { competition: "baseball-usa-mlb", moneyline: "baseball.moneyline" },
+    cloudbet: { competition: "baseball-usa-mlb", moneyline: "baseball.moneyline", totals: "baseball.totals", spread: "baseball.run_line" },
     predictfun: true,
     spreadFixedLine: 1.5,
   },
