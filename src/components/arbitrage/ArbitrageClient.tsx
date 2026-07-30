@@ -12,6 +12,7 @@ import type {
   Trade,
   Venue,
 } from "@/types/arbitrage";
+import type { ArbReject } from "@/lib/arbitrage/arbEngine";
 import { DEFAULT_AGENT, DEFAULT_RISK, DEFAULT_VENUES } from "@/lib/arbitrage/seed";
 import ClawArbsTopBar from "./ClawArbsTopBar";
 import ArenaCanvas, { type AgentTrade, type BookEdge } from "./ArenaCanvas";
@@ -26,16 +27,18 @@ import AgentDrawer from "./AgentDrawer";
 import VenueDrawer from "./VenueDrawer";
 import PlayModal from "./PlayModal";
 import AnalyticsPanel from "./AnalyticsPanel";
+import MarketMonitorPanel from "./MarketMonitorPanel";
 import { allAuthHeaders } from "./venueCreds";
 import { pacificTodayDateStr } from "@/lib/arbitrage/date";
 
-export type PanelKey = "arbs" | "portfolio" | "risk" | "log" | "matchmap" | "analytics";
+export type PanelKey = "arbs" | "monitor" | "portfolio" | "risk" | "log" | "matchmap" | "analytics";
 
 // Server response from POST /api/arbitrage/trades. `mode` is the effective mode: "live" if
 // it fired live, "dry_run" if it was an explicit paper request. A blocked live request
 // (`blocked:true`) is reported FAILED with `blockers` â€” it is never downgraded to paper.
 export type ExecResponse = {
   result?: string;
+  reasonCode?: string | null;
   reason?: string;
   mode?: "dry_run" | "live";
   blocked?: boolean;
@@ -52,11 +55,16 @@ const USE_MOCK = false;
 const SCAN_MIN_GAP_MS = 1000;
 const INGEST_POLL_MS = 120;
 const AUTO_BATCH_LIMIT = 4;
+const AUTO_RETRY_COOLDOWN_MS = 500;
+// The log panel only needs recent activity. Scope every log fetch to today + this cap so the
+// scan loop never re-pulls the entire multi-MB log history each cycle (the page-lag culprit).
+const LOG_PANEL_LIMIT = 300;
 
 export default function ArbitrageClient() {
   const [venues, setVenues] = useState<Venue[]>(DEFAULT_VENUES);
   const [agent, setAgent] = useState<Agent>(DEFAULT_AGENT);
   const [opportunities, setOpportunities] = useState<ArbOpportunity[]>([]);
+  const [arbRejects, setArbRejects] = useState<ArbReject[]>([]);
   const [trades, setTrades] = useState<Trade[]>([]);
   const [logs, setLogs] = useState<ArbLog[]>([]);
   const [risk, setRisk] = useState<RiskSettings>(DEFAULT_RISK);
@@ -83,6 +91,7 @@ export default function ArbitrageClient() {
   const tradeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const autoFiredRef = useRef<Set<string>>(new Set());
   const autoInFlightRef = useRef<Set<string>>(new Set());
+  const autoAttemptedAtRef = useRef<Map<string, number>>(new Map());
 
   // Live score updates for the games the engine currently maps (Activity â†’ SCORES tab).
   const [scoreFeed, setScoreFeed] = useState<ScoreEvent[]>([]);
@@ -169,12 +178,13 @@ export default function ArbitrageClient() {
           fetch("/api/arbitrage/agents").then((r) => r.json()),
           fetch(`/api/arbitrage/opportunities?date=${date}`).then((r) => r.json()),
           fetch(`/api/arbitrage/trades?date=${date}`).then((r) => r.json()),
-          fetch(`/api/arbitrage/logs?date=${date}`).then((r) => r.json()),
+          fetch(`/api/arbitrage/logs?date=${date}&limit=${LOG_PANEL_LIMIT}`).then((r) => r.json()),
           fetch("/api/arbitrage/risk").then((r) => r.json()),
         ]);
         if (v?.venues?.length) setVenues(v.venues);
         if (a?.agents?.[0]) setAgent(a.agents[0]);
         if (o?.opportunities) setOpportunities(o.opportunities);
+        if (Array.isArray(o?.rejects)) setArbRejects(o.rejects);
         if (tr?.trades) setTrades(tr.trades);
         if (lg?.logs) setLogs(lg.logs);
         if (rk?.risk) setRisk(rk.risk);
@@ -227,6 +237,7 @@ export default function ArbitrageClient() {
         .then((op) => {
           if (cancelled || !Array.isArray(op?.opportunities)) return;
           setOpportunities(op.opportunities);
+          setArbRejects(Array.isArray(op.rejects) ? op.rejects : []);
           setWatch(Array.isArray(op.watch) ? op.watch : []);
           setOppsLive(true);
           const edgeCounts: Record<string, number> = {};
@@ -314,10 +325,12 @@ export default function ArbitrageClient() {
   // auto-settlement so any finished games close out and land in realized P&L.
   const refreshPortfolio = useCallback(async () => {
     await fetch("/api/arbitrage/settle", { method: "POST" }).catch(() => null);
-    // Load all positions/logs (across dates) so multi-day open positions show + settle.
+    // Trades stay cross-date (multi-day open positions must show + settle); the log panel is
+    // scoped to today + a cap so the ~1s loop never re-pulls the whole log history each cycle.
+    const date = pacificTodayDateStr();
     const [tr, lg] = await Promise.all([
       fetch(`/api/arbitrage/trades`).then((r) => r.json()).catch(() => null),
-      fetch(`/api/arbitrage/logs`).then((r) => r.json()).catch(() => null),
+      fetch(`/api/arbitrage/logs?date=${date}&limit=${LOG_PANEL_LIMIT}`).then((r) => r.json()).catch(() => null),
     ]);
     if (Array.isArray(tr?.trades) && tr.trades.length) {
       setTrades(tr.trades);
@@ -331,9 +344,10 @@ export default function ArbitrageClient() {
     (async () => {
       // Auto-settle finished games before loading positions.
       await fetch("/api/arbitrage/settle", { method: "POST" }).catch(() => null);
+      const date = pacificTodayDateStr();
       const [tr, lg] = await Promise.all([
         fetch(`/api/arbitrage/trades`).then((r) => r.json()).catch(() => null),
-        fetch(`/api/arbitrage/logs`).then((r) => r.json()).catch(() => null),
+        fetch(`/api/arbitrage/logs?date=${date}&limit=${LOG_PANEL_LIMIT}`).then((r) => r.json()).catch(() => null),
       ]);
       if (cancelled) return;
       if (Array.isArray(tr?.trades) && tr.trades.length) {
@@ -409,17 +423,29 @@ export default function ArbitrageClient() {
   const fireAutoBatch = useCallback(
     async (nextOpps: ArbOpportunity[]) => {
       if (!agent.autoTrade || killSwitch) return;
+      const now = Date.now();
       const batch = nextOpps
-        .filter((o) => !autoFiredRef.current.has(o.id) && !autoInFlightRef.current.has(o.id))
+        .filter((o) => {
+          if (autoFiredRef.current.has(o.id) || autoInFlightRef.current.has(o.id)) return false;
+          const lastAttempt = autoAttemptedAtRef.current.get(o.id) ?? 0;
+          return now - lastAttempt >= AUTO_RETRY_COOLDOWN_MS;
+        })
         .slice(0, AUTO_BATCH_LIMIT);
       if (batch.length === 0) return;
 
-      for (const opp of batch) autoInFlightRef.current.add(opp.id);
+      for (const opp of batch) {
+        autoInFlightRef.current.add(opp.id);
+        autoAttemptedAtRef.current.set(opp.id, now);
+      }
 
       const mode = agent.live ? "live" : "paper";
       const results = await Promise.allSettled(batch.map((opp) => executeOpportunity(opp, mode, { refreshAfter: false })));
       results.forEach((result, i) => {
-        if (result.status === "fulfilled" && result.value?.result) autoFiredRef.current.add(batch[i].id);
+        if (result.status !== "fulfilled") return;
+        const value = result.value;
+        if (value?.result === "executed" || value?.result === "partial" || value?.result === "naked" || value?.reasonCode === "position_dedup") {
+          autoFiredRef.current.add(batch[i].id);
+        }
       });
       for (const opp of batch) autoInFlightRef.current.delete(opp.id);
       await refreshPortfolio();
@@ -438,10 +464,25 @@ export default function ArbitrageClient() {
 
       // Poll until ingestion settles, then pull derived data. Tight granularity so a
       // finished scan is picked up fast (the loop below re-scans immediately after).
+      let latestMarkets: { markets?: NormalizedMarket[]; venueCounts?: Record<string, number>; running?: boolean } | null = null;
       for (let i = 0; i < 40; i++) {
         await new Promise((r) => setTimeout(r, INGEST_POLL_MS));
         const m = await fetch(`/api/arbitrage/markets?date=${date}`).then((r) => r.json()).catch(() => null);
+        if (m?.markets?.length) latestMarkets = m;
         if (m && !m.running && m.markets?.length) break;
+      }
+      if (latestMarkets?.markets?.length) {
+        setMarkets(latestMarkets.markets);
+        setMarketsLive(true);
+        const now = new Date().toISOString();
+        const counts = latestMarkets.venueCounts ?? {};
+        setVenues((prev) =>
+          prev.map((v) =>
+            counts[v.id] != null
+              ? { ...v, cachedTickers: counts[v.id], freshness: "live", status: v.status === "credential_needed" ? v.status : "connected", lastUpdate: now }
+              : v
+          )
+        );
       }
       const [mm, op] = await Promise.all([
         fetch(`/api/arbitrage/match-map?date=${date}`).then((r) => r.json()).catch(() => null),
@@ -451,6 +492,7 @@ export default function ArbitrageClient() {
       if (Array.isArray(op?.opportunities)) {
         const nextOpps = op.opportunities as ArbOpportunity[];
         setOpportunities(nextOpps);
+        setArbRejects(Array.isArray(op.rejects) ? op.rejects : []);
         setWatch(Array.isArray(op.watch) ? op.watch : []);
         setOppsLive(true);
         await fireAutoBatch(nextOpps);
@@ -555,6 +597,18 @@ export default function ArbitrageClient() {
             onRefresh={refreshScan}
             onClose={() => setPanel(null)}
             onPlay={(opp) => setPlayOpp(opp)}
+          />
+        )}
+        {panel === "monitor" && (
+          <MarketMonitorPanel
+            markets={markets}
+            opportunities={opportunities}
+            rejects={arbRejects}
+            live={marketsLive}
+            scanning={scanning && !killSwitch}
+            refreshing={refreshing}
+            onRefresh={refreshScan}
+            onClose={() => setPanel(null)}
           />
         )}
         {panel === "portfolio" && (

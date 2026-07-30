@@ -1,0 +1,10 @@
+
+> mlb-betting@0.1.0 dev
+> next dev --port 3050
+
+▲ Next.js 16.2.6 (Turbopack)
+- Local:         http://localhost:3050
+- Network:       http://10.2.0.2:3050
+- Environments: .env.local
+✓ Ready in 374ms
+[?25h

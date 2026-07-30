@@ -1,0 +1,8 @@
+⨯ Another next dev server is already running.
+
+- Local:        http://localhost:3000
+- PID:          27664
+- Dir:          C:\Users\seema\Documents\GitHub\Sports-Trading-Bot
+- Log:          .next\dev\logs\next-development.log
+
+Run taskkill /PID 27664 /F to stop it.

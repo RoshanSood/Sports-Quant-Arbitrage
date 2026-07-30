@@ -97,6 +97,12 @@ function slateDate(date: string): string {
   return date.length === 8 ? `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6, 8)}` : date;
 }
 
+function isCompleted(event: Record<string, unknown>): boolean {
+  const status = (event.status as { type?: { completed?: boolean; state?: string; description?: string; name?: string } })?.type;
+  const description = `${status?.description ?? ""} ${status?.name ?? ""}`.toLowerCase();
+  return status?.completed === true || status?.state === "post" || /\bfinal\b/.test(description);
+}
+
 export async function fetchESPNGames(date: string): Promise<MLBGame[]> {
   // date format: YYYYMMDD
   const url = `${ESPN_BASE}/scoreboard?dates=${date}&limit=50`;
@@ -109,7 +115,7 @@ export async function fetchESPNGames(date: string): Promise<MLBGame[]> {
   const data = await res.json();
   const events: Record<string, unknown>[] = data.events || [];
 
-  return events.map((event) => {
+  return events.filter((event) => !isCompleted(event)).map((event) => {
     const competitions = (event.competitions as Record<string, unknown>[]) || [];
     const competition = competitions[0] || {};
     const competitors = (competition.competitors as Record<string, unknown>[]) || [];

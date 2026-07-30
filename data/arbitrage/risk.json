@@ -10,6 +10,6 @@
   "minLiquidityUsd": 20,
   "minExpectedProfitUsd": 0.15,
   "liquidityStakeBufferMultiple": 3,
-  "maxLiveStakeUsd": 4,
+  "maxLiveStakeUsd": 16,
   "perVenueCap": {}
 }

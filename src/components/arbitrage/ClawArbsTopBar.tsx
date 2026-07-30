@@ -7,6 +7,7 @@ import { formatSignedDollars } from "./arbFormat";
 
 const NAV_BUTTONS: { key: PanelKey; label: string }[] = [
   { key: "arbs", label: "Arbs" },
+  { key: "monitor", label: "Monitor" },
   { key: "portfolio", label: "Portfolio" },
   { key: "matchmap", label: "Match Map" },
   { key: "risk", label: "Risk" },

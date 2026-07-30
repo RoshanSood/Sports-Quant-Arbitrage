@@ -123,6 +123,12 @@ type PostOrderResponse = {
   makingAmount?: string; // USDC paid (BUY)
 };
 
+export type PolymarketFillQuote = {
+  limitPriceCents: number;
+  avgPriceCents: number;
+  availableContracts: number;
+  availableStakeUsd: number;
+};
 
 // avg fill price in cents from the response amounts (USDC paid / shares received),
 // falling back to our limit when the amounts are absent.
@@ -160,6 +166,53 @@ function orderError(resp: PostOrderResponse): string {
     return "Polymarket rejected direct EOA/MetaMask CLOB order placement; current API requires the deposit-wallet/POLY_1271 flow for this maker";
   }
   return message || `order not filled (${resp.status ?? "unknown"})`;
+}
+
+function readAskLevels(book: { asks?: Array<{ price?: string; size?: string }> }): Array<{ price: number; size: number }> {
+  return (book.asks ?? [])
+    .map((a) => ({ price: Number(a.price), size: Number(a.size) }))
+    .filter((a) => Number.isFinite(a.price) && Number.isFinite(a.size) && a.price > 0 && a.price < 1 && a.size > 0)
+    .sort((a, b) => a.price - b.price);
+}
+
+export function polymarketFillQuoteFromAsks(
+  asks: Array<{ price?: string; size?: string }>,
+  maxPriceCents: number,
+  targetContracts: number
+): PolymarketFillQuote | null {
+  const levels = readAskLevels({ asks }).filter((a) => a.price * 100 <= maxPriceCents + 1e-9);
+  if (!levels.length) return null;
+  let remaining = Math.max(0, targetContracts);
+  let contracts = 0;
+  let cost = 0;
+  let worstPrice = 0;
+  for (const level of levels) {
+    if (remaining <= 0) break;
+    const take = Math.min(level.size, remaining);
+    contracts += take;
+    cost += take * level.price;
+    worstPrice = Math.max(worstPrice, level.price);
+    remaining -= take;
+  }
+  if (contracts <= 0 || cost <= 0) return null;
+  return {
+    limitPriceCents: Math.ceil(worstPrice * 10_000) / 100,
+    avgPriceCents: (cost / contracts) * 100,
+    availableContracts: contracts,
+    availableStakeUsd: cost,
+  };
+}
+
+export async function quotePolymarketFokBuy(
+  req: OrderRequest,
+  creds?: PolymarketCreds,
+  maxPriceCents: number = req.limitPriceCents
+): Promise<PolymarketFillQuote | null> {
+  const key = walletKey("polymarket", creds?.key);
+  if (!key || !req.nativeSide) return null;
+  const client = await buildClient(key, creds?.funder, creds?.sigType);
+  const book = await client.getOrderBook(req.nativeSide);
+  return polymarketFillQuoteFromAsks(book.asks, maxPriceCents, req.sizeContracts);
 }
 
 export class PolymarketExecutionAdapter implements ExecutionAdapter {

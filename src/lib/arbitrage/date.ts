@@ -9,6 +9,13 @@ export function pacificTodayDateStr(d = new Date()): string {
   return `${get("year")}${get("month")}${get("day")}`;
 }
 
+export function dateParamToStorageDate(date: string): string {
+  return date.replace(/-/g, "").slice(0, 8);
+}
+
 export function dateParamToIsoDate(date: string): string {
-  return date.length === 8 ? `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6, 8)}` : date;
+  const storageDate = dateParamToStorageDate(date);
+  return storageDate.length === 8
+    ? `${storageDate.slice(0, 4)}-${storageDate.slice(4, 6)}-${storageDate.slice(6, 8)}`
+    : date;
 }

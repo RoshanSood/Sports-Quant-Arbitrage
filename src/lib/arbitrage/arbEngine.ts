@@ -11,6 +11,7 @@ import type {
   ArbLeg,
   ArbOpportunity,
   MainLineWatch,
+  MarketType,
   MatchedEvent,
   MatchedLeg,
   Outcome,
@@ -33,9 +34,17 @@ const SLIPPAGE_RESERVE = 0;
 export type ArbReject = {
   eventKey: string;
   matchup: string;
+  marketType: MarketType;
   line: number;
   reason: ReasonCode;
   netEdge: number;
+  grossEdge: number;
+  totalCostCents: number;
+  expectedProfit: number;
+  liquidityUsd: number;
+  requiredLiquidityUsd: number;
+  // Human-readable price equation, e.g. "kalshi over 8.5 48.00c + sxbet under 8.5 49.00c = 97.00c".
+  equation: string;
   detail: string;
 };
 
@@ -129,6 +138,14 @@ function bestCrossVenueSelection(legs: MatchedLeg[], outcomes: Outcome[]): Match
   return bestLegs;
 }
 
+// Human-readable price equation for a candidate selection, e.g.
+// "kalshi over 8.5 48.00c + sxbet under 8.5 49.00c = 97.00c".
+function rejectEquation(legs: MatchedLeg[]): string {
+  if (!legs.length) return "n/a";
+  const cost = legs.reduce((s, l) => s + l.priceCents, 0);
+  return `${legs.map((l) => `${l.venueId} ${l.label ?? l.outcome} ${l.priceCents.toFixed(2)}c`).join(" + ")} = ${cost.toFixed(2)}c`;
+}
+
 function buildLeg(m: MatchedLeg, size: number): ArbLeg {
   return {
     venueId: m.venueId,
@@ -202,6 +219,26 @@ export function detectArbs(
     const expectedProfit = round(plan.guaranteedPayout - plan.totalStake - totalFeeDollars, 2);
     const requiredLiquidityUsd = Math.max(minLiquidityUsd, plan.totalStake * liquidityStakeBufferMultiple);
 
+    // Every reject carries the full economic picture (price equation, sum, gross/net
+    // edge, expected profit, pair liquidity and the depth it needed) so a rejected
+    // opportunity is debuggable without string-parsing `detail`.
+    const pushReject = (reason: ReasonCode, detail: string) =>
+      rejects.push({
+        eventKey: ev.eventKey,
+        matchup: ev.matchup,
+        marketType: ev.marketType,
+        line: ev.line,
+        reason,
+        netEdge: net,
+        grossEdge: gross,
+        totalCostCents: totalCost,
+        expectedProfit,
+        liquidityUsd: pairLiquidity >= 1e8 ? 0 : Math.round(pairLiquidity),
+        requiredLiquidityUsd: Math.round(requiredLiquidityUsd),
+        equation: rejectEquation(selection),
+        detail,
+      });
+
     let status: MainLineWatch["status"];
     if (divergence > STALE_DIVERGENCE_CENTS) status = "stale";
     else if (
@@ -261,15 +298,15 @@ export function detectArbs(
         detectedAt: now,
       });
     } else if (status === "stale") {
-      rejects.push({ eventKey: ev.eventKey, matchup: ev.matchup, line: ev.line, reason: "stale_quote", netEdge: net, detail: `venues disagree ${divergence}c — likely stale` });
+      pushReject("stale_quote", `venues disagree ${divergence}c — likely stale`);
     } else if (totalCost < 100 && pairLiquidity < requiredLiquidityUsd) {
-      rejects.push({ eventKey: ev.eventKey, matchup: ev.matchup, line: ev.line, reason: "insufficient_depth", netEdge: net, detail: `executable $${Math.round(pairLiquidity)} < required $${Math.round(requiredLiquidityUsd)} (${liquidityStakeBufferMultiple}x stake buffer)` });
+      pushReject("insufficient_depth", `executable $${Math.round(pairLiquidity)} < required $${Math.round(requiredLiquidityUsd)} (${liquidityStakeBufferMultiple}x stake buffer)`);
     } else if (totalCost < 100 && expectedProfit < minExpectedProfitUsd) {
-      rejects.push({ eventKey: ev.eventKey, matchup: ev.matchup, line: ev.line, reason: "edge_below_min", netEdge: net, detail: `expected profit $${expectedProfit.toFixed(2)} < min $${minExpectedProfitUsd.toFixed(2)}` });
+      pushReject("edge_below_min", `expected profit $${expectedProfit.toFixed(2)} < min $${minExpectedProfitUsd.toFixed(2)}`);
     } else if (net > agent.maxEdge) {
-      rejects.push({ eventKey: ev.eventKey, matchup: ev.matchup, line: ev.line, reason: "edge_above_max", netEdge: net, detail: `net ${(net * 100).toFixed(2)}% > max` });
+      pushReject("edge_above_max", `net ${(net * 100).toFixed(2)}% > max`);
     } else if (totalCost < 100 && net < agent.minEdge) {
-      rejects.push({ eventKey: ev.eventKey, matchup: ev.matchup, line: ev.line, reason: "edge_below_min", netEdge: net, detail: `net ${(net * 100).toFixed(2)}% < min` });
+      pushReject("edge_below_min", `net ${(net * 100).toFixed(2)}% < min`);
     }
   }
 

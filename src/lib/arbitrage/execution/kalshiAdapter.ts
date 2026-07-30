@@ -62,8 +62,16 @@ export async function checkKalshiFillability(req: OrderRequest, creds?: KalshiCr
     const priceCents = yesNo === "yes" ? yesAsk : yesBid == null ? null : 100 - yesBid;
     const availableContracts = Number(yesNo === "yes" ? market.yes_ask_size_fp : market.yes_bid_size_fp);
     if (priceCents == null) return { ok: false, reason: "Kalshi top-of-book price unavailable" };
-    if (priceCents > req.limitPriceCents) {
-      return { ok: false, reason: `Kalshi top-of-book moved above limit (${priceCents}c > ${req.limitPriceCents}c)` };
+    // The IOC limit order already protects price at placement (it just won't fill above
+    // our limit), and this snapshot is read a round-trip before placement, so a hard
+    // reject on any move false-blocks on transient one-tick drift (the logged "moved above
+    // limit" failures). Allow a small tolerance; a genuine larger move still blocks here
+    // (which, when Kalshi is the hedge leg, avoids placing the anchor into a naked position).
+    const tolCents = Number.isFinite(Number(process.env.KALSHI_FILLABILITY_TOL_CENTS))
+      ? Number(process.env.KALSHI_FILLABILITY_TOL_CENTS)
+      : 2;
+    if (priceCents > req.limitPriceCents + tolCents) {
+      return { ok: false, reason: `Kalshi top-of-book moved above limit (${priceCents}c > ${req.limitPriceCents}c, tol ${tolCents}c)` };
     }
     if (!Number.isFinite(availableContracts) || availableContracts < req.sizeContracts) {
       return { ok: false, reason: `Kalshi top-of-book size ${Number.isFinite(availableContracts) ? availableContracts.toFixed(2) : "unknown"} < ${req.sizeContracts}` };

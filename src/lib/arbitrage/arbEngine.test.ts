@@ -85,6 +85,25 @@ describe("arbEngine — gates (manual §8/§13)", () => {
     expect(opportunities).toHaveLength(0);
     expect(rejects.some((r) => r.reason === "insufficient_depth")).toBe(true);
   });
+
+  it("attaches full economic diagnostics to a rejected opportunity", () => {
+    const { rejects } = detect([
+      nm("kalshi", "over", 52, { liquidityUsd: 5 }),
+      nm("kalshi", "under", 48, { liquidityUsd: 5 }),
+      nm("polymarket", "over", 45, { liquidityUsd: 5 }),
+      nm("polymarket", "under", 50, { liquidityUsd: 5 }),
+    ]);
+    const reject = rejects.find((r) => r.reason === "insufficient_depth");
+    expect(reject).toBeDefined();
+    // cheapest complementary pair: poly over 45 + kalshi under 48 = 93c
+    expect(reject!.marketType).toBe("total");
+    expect(reject!.totalCostCents).toBe(93);
+    expect(reject!.equation).toContain("= 93.00c");
+    expect(reject!.grossEdge).toBeGreaterThan(0);
+    expect(reject!.liquidityUsd).toBe(5);
+    expect(reject!.requiredLiquidityUsd).toBeGreaterThanOrEqual(MIN_LIQ);
+    expect(typeof reject!.expectedProfit).toBe("number");
+  });
 });
 
 describe("arbEngine - soccer total lines", () => {

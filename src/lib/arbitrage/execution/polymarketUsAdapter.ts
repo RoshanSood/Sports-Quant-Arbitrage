@@ -11,12 +11,35 @@
 import type { PolymarketCreds } from "./onchainCreds";
 import type { ExecutionAdapter, FillConfirmation, OrderRequest, OrderResult } from "./types";
 import { hasPmusCreds, pmusBuyingPower, pmusCreds, pmusFetch } from "./polymarketUsAuth";
+import { fetchPolymarketUsSideQuote } from "@/lib/polymarketUs";
+import type { PolymarketFillQuote } from "./polymarketAdapter";
 
 const TICK = 0.005; // orderPriceMinTickSize observed on MLB markets
 
 function toTickPrice(cents: number): string {
   const p = Math.round(cents / 100 / TICK) * TICK;
   return Math.min(0.995, Math.max(0.005, p)).toFixed(3);
+}
+
+// Live ask-depth quote for the EXACT market slug + side the US order will hit. Returns the
+// intl-shaped PolymarketFillQuote so the executor's resize/retry logic is region-agnostic.
+// Null when the side has no ask at/under our max price (treated as unfillable).
+export async function quotePolymarketUsFokBuy(
+  req: OrderRequest,
+  _creds?: PolymarketCreds,
+  maxPriceCents: number = req.limitPriceCents
+): Promise<PolymarketFillQuote | null> {
+  const slug = req.nativeMarketId;
+  const side = (req.nativeSide ?? "").toLowerCase();
+  if (!slug || (side !== "yes" && side !== "no")) return null;
+  const q = await fetchPolymarketUsSideQuote(slug, side);
+  if (!q || q.availableContracts <= 0 || q.askCents > maxPriceCents + 1e-9) return null;
+  return {
+    limitPriceCents: q.askCents,
+    avgPriceCents: q.askCents,
+    availableContracts: q.availableContracts,
+    availableStakeUsd: (q.askCents / 100) * q.availableContracts,
+  };
 }
 
 type CreateOrderResponse = {
@@ -48,6 +71,13 @@ export class PolymarketUsExecutionAdapter implements ExecutionAdapter {
       return reject(req, "missing Polymarket US market slug / yes-no side — live order not wired for this leg");
     }
 
+    // Guarantee the $1 marketable-BUY floor at the point of order — a sub-$1 FOK is
+    // rejected by Polymarket, so fail with a clear reason instead of a cryptic venue error.
+    const notionalUsd = req.sizeContracts * (req.limitPriceCents / 100);
+    if (notionalUsd < 1) {
+      return reject(req, `order notional $${notionalUsd.toFixed(2)} below Polymarket $1 minimum marketable buy`);
+    }
+
     const body = {
       marketSlug,
       type: "ORDER_TYPE_LIMIT",
@@ -60,7 +90,7 @@ export class PolymarketUsExecutionAdapter implements ExecutionAdapter {
     };
 
     const r = await pmusFetch<CreateOrderResponse>("POST", "/v1/orders", creds, body);
-    if (!r.ok || !r.data) return reject(req, r.error ?? `order rejected (HTTP ${r.status})`);
+    if (!r.ok || !r.data) return reject(req, r.error ?? `order rejected (HTTP ${r.status})`, { status: r.status, body: r.data ?? r.error });
 
     const execs = r.data.executions ?? [];
     const filled = execs.reduce((s, e) => s + (Number(e.lastShares) || 0), 0);
@@ -93,6 +123,6 @@ export class PolymarketUsExecutionAdapter implements ExecutionAdapter {
   }
 }
 
-function reject(req: OrderRequest, error: string): OrderResult {
-  return { ok: false, orderId: null, filledContracts: 0, avgPriceCents: req.limitPriceCents, status: "rejected", error };
+function reject(req: OrderRequest, error: string, raw?: unknown): OrderResult {
+  return { ok: false, orderId: null, filledContracts: 0, avgPriceCents: req.limitPriceCents, status: "rejected", error, raw };
 }

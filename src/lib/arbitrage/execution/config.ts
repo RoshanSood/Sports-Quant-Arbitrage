@@ -18,7 +18,7 @@ export type ExecMode = "dry_run" | "live";
 // Default per-trade live cap (dollars) used to SEED risk settings on first run. After
 // that it's edited in the Risk panel (UI), not here — kept low on purpose so the whole
 // path is validated at a few dollars before the cap is ever raised.
-export const DEFAULT_MAX_LIVE_STAKE_USD = 5;
+export const DEFAULT_MAX_LIVE_STAKE_USD = 13;
 
 export type GateInput = {
   requestedMode: ExecMode;
@@ -28,6 +28,7 @@ export type GateInput = {
   venues: string[];
   stakeUsd: number;
   maxLiveStakeUsd: number; // from risk settings (UI-configured)
+  ignoreLiveStakeCap?: boolean;
   venuesSupportLive: Record<string, boolean>;
 };
 
@@ -48,7 +49,7 @@ export function resolveExecutionMode(g: GateInput): GateDecision {
   if (g.agentPaper) blockers.push("agent is in paper mode (turn on Live in agent settings)");
   if (!g.agentLive) blockers.push("agent live execution switch is off");
   if (g.killSwitch) blockers.push("risk kill switch is on");
-  if (g.stakeUsd > g.maxLiveStakeUsd) blockers.push(`stake $${g.stakeUsd} exceeds live cap $${g.maxLiveStakeUsd}`);
+  if (!g.ignoreLiveStakeCap && g.stakeUsd > g.maxLiveStakeUsd) blockers.push(`stake $${g.stakeUsd} exceeds live cap $${g.maxLiveStakeUsd}`);
   for (const v of g.venues) {
     if (!g.venuesSupportLive[v]) blockers.push(`venue ${v} has no live credentials/signer`);
   }

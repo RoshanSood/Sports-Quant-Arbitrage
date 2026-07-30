@@ -186,15 +186,15 @@ async function main() {
     method: "POST",
     headers: { "x-api-key": apiKey, Authorization: `Bearer ${jwt}`, "Content-Type": "application/json", Accept: "application/json" },
     body: JSON.stringify({
-      data: {
-        order: { ...signed, hash },
-        pricePerShare: amounts.pricePerShare.toString(),
-        strategy: "MARKET",
-        isFillOrKill: true,
-        slippageBps: Number(amounts.slippageBps),
-      },
-    }),
-  });
+        data: {
+          order: { ...signed, hash },
+          pricePerShare: amounts.pricePerShare.toString(),
+          strategy: "MARKET",
+          isFillOrKill: true,
+          slippageBps: Number(amounts.slippageBps),
+        },
+      }),
+    });
   console.log("submitted:");
   console.log(JSON.stringify(result, null, 2));
 }

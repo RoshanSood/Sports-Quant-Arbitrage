@@ -35,6 +35,12 @@ function slateDate(date: string): string {
   return date.length === 8 ? `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6, 8)}` : date;
 }
 
+function isCompleted(event: Record<string, unknown>): boolean {
+  const status = (event.status as { type?: { completed?: boolean; state?: string; description?: string; name?: string } })?.type;
+  const description = `${status?.description ?? ""} ${status?.name ?? ""}`.toLowerCase();
+  return status?.completed === true || status?.state === "post" || /\bfinal\b/.test(description);
+}
+
 function parseCompetitor(competitor: ESPNCompetitor): Omit<WNBATeamInfo, "injuries"> {
   const team = (competitor.team as Record<string, unknown>) ?? {};
   const abbr = (team.abbreviation as string) ?? "??";
@@ -97,7 +103,7 @@ export async function fetchWNBAGames(date: string): Promise<WNBAGame[]> {
   if (!res.ok) throw new Error(`ESPN WNBA API error: ${res.status}`);
 
   const data = await res.json();
-  const events: Record<string, unknown>[] = data.events ?? [];
+  const events: Record<string, unknown>[] = (data.events ?? []).filter((event: Record<string, unknown>) => !isCompleted(event));
 
   // Fetch injuries concurrently for all games
   const injuryMaps = await Promise.all(

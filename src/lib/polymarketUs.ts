@@ -87,9 +87,28 @@ const cents = (a?: Amount): number | null => {
   return Number.isFinite(n) && n > 0 && n < 1 ? Number((n * 100).toFixed(4)) : null;
 };
 
+// Live top-of-book ask to BUY a specific outcome side, straight from the SAME public
+// gateway the live order fires against. Used by the pre-order depth check so it reads
+// the book the order will actually hit (yes = long, no = short), not the intl CLOB.
+export type PolymarketUsSideQuote = { askCents: number; availableContracts: number };
+export async function fetchPolymarketUsSideQuote(slug: string, side: "yes" | "no"): Promise<PolymarketUsSideQuote | null> {
+  const bbo = await fetchBbo(slug);
+  if (!bbo) return null;
+  const askCents = cents(side === "yes" ? bbo.longQuote : bbo.shortQuote);
+  if (askCents == null) return null;
+  // askDepth/bidDepth are contract counts at the best ask for the long/short side
+  // (liquidityUsd = depth × price/100 elsewhere in this file).
+  const depth = side === "yes" ? bbo.askDepth : bbo.bidDepth;
+  const availableContracts = Number.isFinite(depth) && (depth ?? 0) > 0 ? (depth as number) : 0;
+  return { askCents, availableContracts };
+}
+
 function eventMatchesGame(ev: PmEvent, game: ArbGame): boolean {
+  // Fail closed: an event with no resolvable date must NOT match on team names alone,
+  // or tomorrow's game (which the startDateMin floor also returns) could be ingested
+  // under today's slate. Require an explicit same-day match.
   const eventDate = (ev.startTime ?? "").slice(0, 10);
-  if (eventDate && eventDate !== game.date) return false;
+  if (!eventDate || eventDate !== game.date) return false;
 
   // A head-to-head game event has EXACTLY two teams. Futures (e.g. "World Series
   // Champion") list many contenders and would spuriously match both sides.
@@ -144,7 +163,11 @@ export async function fetchPolymarketUsMLBMarkets(games: ArbGame[]): Promise<Pol
   const bboBySlug = new Map<string, MarketData | null>(bboEntries);
 
   for (const game of games) {
-    if (!matched.has(game.id)) continue;
+    const ev = matched.get(game.id);
+    if (!ev) continue;
+    // Venue-native start time, threaded onto every row so the execution pipeline's
+    // venue_source_date guard can catch a mis-dated (tomorrow) Polymarket US leg.
+    const sourceStartTime = ev.startTime;
     const gameJobs = jobs.filter((j) => j.game.id === game.id);
 
     // Moneyline
@@ -165,6 +188,7 @@ export async function fetchPolymarketUsMLBMarkets(games: ArbGame[]): Promise<Pol
           awayLiquidityUsd: longIsHome ? shortLiq : longLiq,
           marketId: mlJob.market.slug,
           yesSide: longIsHome ? "home" : "away",
+          sourceStartTime,
         });
       }
     }
@@ -184,6 +208,7 @@ export async function fetchPolymarketUsMLBMarkets(games: ArbGame[]): Promise<Pol
         overLiquidityUsd: (bbo?.askDepth ?? 0) * (overAsk / 100),
         underLiquidityUsd: (bbo?.bidDepth ?? 0) * (underAsk / 100),
         marketId: j.market.slug,
+        sourceStartTime,
       });
     }
     if (totalRows.length) result.totals.set(game.id, totalRows);
@@ -207,6 +232,7 @@ export async function fetchPolymarketUsMLBMarkets(games: ArbGame[]): Promise<Pol
           homeSignedLine: longIsHome ? -lineMag : lineMag,
           marketId: spJob.market.slug,
           yesSide: longIsHome ? "home" : "away",
+          sourceStartTime,
         });
       }
     }

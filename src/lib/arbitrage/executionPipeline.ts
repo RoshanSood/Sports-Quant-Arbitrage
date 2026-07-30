@@ -41,8 +41,15 @@ export type ExecutionOutcome = {
 };
 
 const SLIPPAGE_RESERVE = 0; // legs priced at ask; spread already included
-const LIVE_REFRESH_RETRIES = 2;
+const LIVE_REFRESH_RETRIES = 0;
 const LIVE_REFRESH_RETRY_DELAY_MS = 250;
+// The scanner re-ingests the whole slate every ~1-3s, so an auto-fired opportunity's legs
+// are almost always 1-3s old. When they are already this fresh we skip the redundant
+// ~1.2s pre-trade network refresh (which is itself a race that can vanish the arb) and go
+// straight to the gates. Clamped to staleQuoteMs so it can never exceed the configured
+// staleness tolerance.
+const LIVE_QUOTE_FRESH_MS = 2500;
+export const POLYMARKET_MIN_MARKET_BUY_USD = 1.01; // keep the rounded FOK BUY amount safely above Polymarket's $1 floor
 
 function nowIso() {
   return new Date().toISOString();
@@ -62,6 +69,37 @@ function opportunityStartDate(opportunityId: string): string | null {
 function sourceStartDate(value: string | undefined): string | null {
   if (!value) return null;
   return value.match(/^(\d{4}-\d{2}-\d{2})/)?.[1] ?? null;
+}
+
+function opportunityLineKey(opp: Pick<ArbOpportunity, "marketType" | "line">): number {
+  return opp.marketType === "moneyline" || opp.line == null ? 0 : opp.line;
+}
+
+function legSnapshot(opp: ArbOpportunity, markets: NormalizedMarket[]) {
+  const now = Date.now();
+  return opp.legs.map((leg) => {
+    const market = markets.find((m) => m.marketId === leg.marketId);
+    const lastUpdated = market?.lastUpdated ?? null;
+    return {
+      venueId: leg.venueId,
+      outcome: leg.outcome,
+      label: leg.label,
+      marketId: leg.marketId,
+      nativeMarketId: leg.nativeMarketId,
+      nativeSide: leg.nativeSide,
+      priceCents: leg.priceCents,
+      liquidityUsd: leg.liquidityUsd ?? 0,
+      sourceStartTime: leg.sourceStartTime,
+      lastUpdated,
+      ageMs: lastUpdated ? Math.max(0, now - Date.parse(lastUpdated)) : null,
+    };
+  });
+}
+
+function legEquation(legs: Array<{ venueId: string; label?: string; outcome: string; priceCents: number }>): string {
+  if (!legs.length) return "n/a";
+  const cost = legs.reduce((sum, leg) => sum + leg.priceCents, 0);
+  return `${legs.map((leg) => `${leg.venueId} ${leg.label ?? leg.outcome} ${leg.priceCents.toFixed(2)}c`).join(" + ")} = ${cost.toFixed(2)}c`;
 }
 
 export async function writeLog(
@@ -119,6 +157,7 @@ export type PreparedContext = {
   expectedProfit: number;
   netAfter: number;
   executionSteps: ExecutionStep[];
+  timing: Record<string, unknown>;
 };
 
 export type PrepareResult =
@@ -129,6 +168,8 @@ export type PrepareResult =
 // writes the halt log and returns a halt; on success it returns the prepared context.
 // Shared by paper and live so both enforce the exact same safety gates.
 export async function prepareExecution(opportunityId: string, date: string, requestedMode: "dry_run" | "live" = "dry_run"): Promise<PrepareResult> {
+  const attemptStartedAtMs = Date.now();
+  const attemptStartedAt = new Date(attemptStartedAtMs).toISOString();
   const agent = (await getAgent(DEFAULT_AGENT.id)) ?? DEFAULT_AGENT;
   const risk: RiskSettings = await getRiskSettings();
   const configuredVenues = await getVenues();
@@ -145,8 +186,8 @@ export async function prepareExecution(opportunityId: string, date: string, requ
   const detect = async () => {
     const markets = filterMarketsForAgent(await getMarkets(date), configuredVenues, agent);
     const { matched } = matchMarkets(markets);
-    const { opportunities } = detectArbs(matched, agent, risk.minLiquidityUsd);
-    return { markets, opp: opportunities.find((o) => o.id === opportunityId) };
+    const detected = detectArbs(matched, agent, risk);
+    return { markets, matched, ...detected, opp: detected.opportunities.find((o) => o.id === opportunityId) };
   };
   // Age (ms) of the oldest quote backing the opportunity's legs.
   const legAgeMs = (o: ArbOpportunity, mkts: NormalizedMarket[]) =>
@@ -155,25 +196,148 @@ export async function prepareExecution(opportunityId: string, date: string, requ
       return m ? Date.now() - Date.parse(m.lastUpdated) : 0;
     }));
 
-  let { markets, opp } = await detect();
-  // Live orders must run on a just-refreshed snapshot. Paper keeps the wider cache
-  // window because it is useful for tracking/simulation and carries no fill risk.
-  if (requestedMode === "live") {
+  const initialDetectStartMs = Date.now();
+  let { markets, matched, opportunities, rejects, opp } = await detect();
+  const initialDetectedAtMs = Date.now();
+  const initialDetectMs = initialDetectedAtMs - initialDetectStartMs;
+  const initialOpp = opp ?? null;
+  const initialLegs = initialOpp ? legSnapshot(initialOpp, markets) : [];
+  const initialQuoteAgeMs = initialOpp ? legAgeMs(initialOpp, markets) : null;
+  const refreshAttempts: Array<{
+    attempt: number;
+    startedAt: string;
+    completedAt: string;
+    durationMs: number;
+    networkMs: number; // targeted venue refresh (fetch games + scoped venue quotes)
+    gamesFetchMs: number;
+    ingestMs: number;
+    redetectMs: number; // match + arb recomputation over the cache
+    refreshedMarketType: string | null;
+    refreshedVenues: string[];
+    venueTimings: Array<{ venueId: string; marketType: string; durationMs: number; ok: boolean; rawCount: number; error?: string }>;
+    survived: boolean;
+    oldestQuoteAgeMs: number | null;
+    legEquation: string | null;
+  }> = [];
+  // Live orders must run on a fresh snapshot. Paper keeps the wider cache window because it
+  // is useful for tracking/simulation and carries no fill risk.
+  //
+  // Fast-path: if the scanner already left this opportunity's legs fresher than
+  // LIVE_QUOTE_FRESH_MS (clamped to staleQuoteMs), skip the network refresh entirely — the
+  // stale gate below still enforces freshness, and verifyPostFill re-checks drift post-fill.
+  const legVenues = initialOpp ? [...new Set(initialOpp.legs.map((l) => l.venueId))] : undefined;
+  const canSkipLiveRefresh =
+    initialOpp != null &&
+    initialQuoteAgeMs != null &&
+    initialQuoteAgeMs <= Math.min(risk.staleQuoteMs, LIVE_QUOTE_FRESH_MS);
+  if (requestedMode === "live" && !canSkipLiveRefresh) {
     for (let attempt = 0; attempt <= LIVE_REFRESH_RETRIES; attempt += 1) {
-      await refreshMarketsForOpportunity(date, opportunityId).catch((e) => console.error("[arbitrage/exec] targeted pre-execution refresh failed:", e));
-      ({ markets, opp } = await detect());
+      const refreshStartedAtMs = Date.now();
+      const refreshStartedAt = new Date(refreshStartedAtMs).toISOString();
+      const refresh = await refreshMarketsForOpportunity(date, opportunityId, legVenues).catch((e) => {
+        console.error("[arbitrage/exec] targeted pre-execution refresh failed:", e);
+        return null;
+      });
+      const networkCompletedAtMs = Date.now();
+      ({ markets, matched, opportunities, rejects, opp } = await detect());
+      const refreshCompletedAtMs = Date.now();
+      refreshAttempts.push({
+        attempt: attempt + 1,
+        startedAt: refreshStartedAt,
+        completedAt: new Date(refreshCompletedAtMs).toISOString(),
+        durationMs: refreshCompletedAtMs - refreshStartedAtMs,
+        networkMs: networkCompletedAtMs - refreshStartedAtMs,
+        gamesFetchMs: refresh?.gamesFetchMs ?? 0,
+        ingestMs: refresh?.ingestMs ?? 0,
+        redetectMs: refreshCompletedAtMs - networkCompletedAtMs,
+        refreshedMarketType: refresh?.refreshedMarketType ?? null,
+        refreshedVenues: refresh?.refreshedVenues ?? [],
+        venueTimings: refresh?.timings ?? [],
+        survived: Boolean(opp),
+        oldestQuoteAgeMs: opp ? legAgeMs(opp, markets) : null,
+        legEquation: opp ? legEquation(opp.legs) : null,
+      });
       if (opp) break;
       if (attempt < LIVE_REFRESH_RETRIES) await sleep(LIVE_REFRESH_RETRY_DELAY_MS);
     }
-  } else if (!opp || legAgeMs(opp, markets) > risk.staleQuoteMs) {
+  } else if (requestedMode !== "live" && (!opp || legAgeMs(opp, markets) > risk.staleQuoteMs)) {
+    // Paper only — a stale cache is refreshed via the full slate ingest (no fill risk).
+    // The live fast-path (canSkipLiveRefresh) intentionally does NOT fall through to here.
     await ingestTotals(date).catch((e) => console.error("[arbitrage/exec] pre-execution refresh failed:", e));
-    ({ markets, opp } = await detect());
+    ({ markets, matched, opportunities, rejects, opp } = await detect());
   }
+
+  const refreshDiagnostics = () => {
+    const completedAtMs = Date.now();
+    const baseOpp = initialOpp ?? opp ?? null;
+    const targetLine = baseOpp ? opportunityLineKey(baseOpp) : null;
+    const refreshedMatch =
+      baseOpp && targetLine != null
+        ? matched.find((ev) => ev.eventKey === baseOpp.eventKey && ev.marketType === baseOpp.marketType && ev.line === targetLine)
+        : undefined;
+    const refreshedReject =
+      baseOpp && targetLine != null
+        ? rejects.find((r) => r.eventKey === baseOpp.eventKey && r.line === targetLine)
+        : undefined;
+    const refreshedOpp =
+      baseOpp && targetLine != null
+        ? opportunities.find((o) => o.eventKey === baseOpp.eventKey && o.marketType === baseOpp.marketType && opportunityLineKey(o) === targetLine)
+        : undefined;
+    return {
+      attemptStartedAt,
+      initialDetectedAt: new Date(initialDetectedAtMs).toISOString(),
+      initialDetectMs,
+      finalRefreshCompletedAt: new Date(completedAtMs).toISOString(),
+      timeFromAttemptStartToRefreshCompleteMs: completedAtMs - attemptStartedAtMs,
+      timeFromInitialDetectionToRefreshCompleteMs: completedAtMs - initialDetectedAtMs,
+      initialQuoteAgeMs,
+      initialLegEquation: initialLegs.length ? legEquation(initialLegs) : null,
+      // Compact per-attempt timing: keep every NUMBER, but drop the heavy per-venue and
+      // per-leg arrays that bloated each persisted log ~5KB (that log volume × payload was
+      // the arbitrage page-lag cause). Slowest venue + error count is enough to diagnose.
+      refreshAttempts: refreshAttempts.map((a) => {
+        const slowest = a.venueTimings.reduce<(typeof a.venueTimings)[number] | null>(
+          (m, v) => (m == null || v.durationMs > m.durationMs ? v : m),
+          null
+        );
+        return {
+          attempt: a.attempt,
+          durationMs: a.durationMs,
+          networkMs: a.networkMs,
+          gamesFetchMs: a.gamesFetchMs,
+          ingestMs: a.ingestMs,
+          redetectMs: a.redetectMs,
+          refreshedMarketType: a.refreshedMarketType,
+          refreshedVenues: a.refreshedVenues,
+          survived: a.survived,
+          oldestQuoteAgeMs: a.oldestQuoteAgeMs,
+          slowestVenue: slowest ? { venueId: slowest.venueId, marketType: slowest.marketType, durationMs: slowest.durationMs, ok: slowest.ok } : null,
+          venueErrors: a.venueTimings.filter((v) => !v.ok).length,
+        };
+      }),
+      refreshedStatus: refreshedOpp ? "still_arb" : refreshedReject ? "rejected_after_refresh" : refreshedMatch ? "matched_but_no_arb" : "market_or_line_missing",
+      refreshedOpportunity: refreshedOpp
+        ? {
+            id: refreshedOpp.id,
+            netEdge: refreshedOpp.netEdge,
+            grossEdge: refreshedOpp.grossEdge,
+            totalCostCents: refreshedOpp.totalCostCents,
+            legEquation: legEquation(refreshedOpp.legs),
+          }
+        : null,
+      refreshedReject: refreshedReject
+        ? { reason: refreshedReject.reason, detail: refreshedReject.detail, netEdge: refreshedReject.netEdge, line: refreshedReject.line }
+        : null,
+      refreshedMarket: refreshedMatch
+        ? { eventKey: refreshedMatch.eventKey, marketType: refreshedMatch.marketType, line: refreshedMatch.line, venues: refreshedMatch.venues }
+        : null,
+    };
+  };
 
   const asHalt = async (rc: ReasonCode, reason: string, matchup: string, venues: string[], edge: number, details: Record<string, unknown>) => {
     addStep(rc, reasonCodeLabel(rc), "halt", reason);
     const h = halt(rc, reason);
-    await writeLog(agent, matchup, venues, edge, "halted", rc, reason, { ...details, opportunityId, pipelineSteps: executionSteps }, date);
+    await writeLog(agent, matchup, venues, edge, "halted", rc, reason, { ...details, opportunityId, timing: refreshDiagnostics(), pipelineSteps: executionSteps }, date);
     return { kind: "halt" as const, outcome: h };
   };
 
@@ -186,7 +350,18 @@ export async function prepareExecution(opportunityId: string, date: string, requ
     return asHalt("final_refresh_failed", `Opportunity is for ${oppDate}, not requested slate ${requestedSlateDate}`, priorMatchup, [], 0, { opportunityId, opportunityDate: oppDate, requestedSlateDate });
   }
   addStep("final_refresh", "Final quote refresh", opp ? "pass" : "halt", opp ? "Opportunity survived refresh" : "Opportunity disappeared");
-  if (!opp) return asHalt("final_refresh_failed", "Opportunity no longer exists after quote refresh", priorMatchup, [], 0, { opportunityId });
+  if (!opp) {
+    const timing = refreshDiagnostics();
+    const lastRefresh = refreshAttempts[refreshAttempts.length - 1];
+    const after =
+      timing.refreshedReject && typeof timing.refreshedReject === "object"
+        ? `; after refresh: ${timing.refreshedReject.detail}`
+        : timing.refreshedMarket
+          ? "; after refresh: market still matched but no qualifying arb"
+          : "; after refresh: market/line missing from matched feed";
+    const timingText = `Opportunity no longer exists after quote refresh (${timing.timeFromAttemptStartToRefreshCompleteMs}ms from attempt start, ${lastRefresh?.durationMs ?? 0}ms last refresh${after})`;
+    return asHalt("final_refresh_failed", timingText, priorMatchup, [], 0, { opportunityId });
+  }
 
   const venues = [...new Set(opp.legs.map((l) => l.venueId))];
   const sourceDateMismatches = opp.legs
@@ -211,18 +386,16 @@ export async function prepareExecution(opportunityId: string, date: string, requ
     });
   }
 
-  // Live execution trusts the targeted final refresh: if the refreshed opportunity is
-  // still an arb, continue with its updated prices. Paper still uses the wider stale
-  // cache window because it can operate from stored snapshots.
+  // Freshness gate — now enforced for BOTH modes. This is what makes the live fast-path
+  // (skipping the network refresh when legs are already fresh) safe: if the cached quotes
+  // are older than staleQuoteMs the trade halts instead of firing on stale prices. Live
+  // continues on whichever quotes it has (refreshed or scanner-fresh); it just may no
+  // longer silently pass a stale snapshot.
   const oldestMs = legAgeMs(opp, markets);
-  if (requestedMode === "live") {
-    addStep("stale_quote", "Quote freshness", "pass", `${oldestMs}ms oldest quote after targeted refresh; using refreshed arb prices`);
-  } else {
-    const maxQuoteAgeMs = risk.staleQuoteMs;
-    addStep("stale_quote", "Quote freshness", oldestMs <= maxQuoteAgeMs ? "pass" : "halt", `${oldestMs}ms oldest quote`);
-    if (oldestMs > maxQuoteAgeMs) {
-      return asHalt("stale_quote", `quote age ${oldestMs}ms exceeds ${maxQuoteAgeMs}ms (venue feed not refreshing fast enough)`, opp.matchup, venues, opp.netEdge, { oldestMs, maxQuoteAgeMs });
-    }
+  const maxQuoteAgeMs = risk.staleQuoteMs;
+  addStep("stale_quote", "Quote freshness", oldestMs <= maxQuoteAgeMs ? "pass" : "halt", `${oldestMs}ms oldest quote / ${maxQuoteAgeMs}ms max`);
+  if (oldestMs > maxQuoteAgeMs) {
+    return asHalt("stale_quote", `quote age ${oldestMs}ms exceeds ${maxQuoteAgeMs}ms (venue feed not refreshing fast enough)`, opp.matchup, venues, opp.netEdge, { oldestMs, maxQuoteAgeMs });
   }
 
   // Real-money position cap PER opportunity (match + line + market). Paper tracking is
@@ -260,6 +433,28 @@ export async function prepareExecution(opportunityId: string, date: string, requ
     const executedCents = slip(l.priceCents);
     return { ...l, priceCents: executedCents, decimalOdds: 100 / executedCents, impliedProbability: executedCents / 100 };
   });
+  if (requestedMode === "live") {
+    const polyLegs = executedLegs.filter((l) => l.venueId === "polymarket");
+    const polyCosts = polyLegs
+      .map((l) => centsToDollars(l.priceCents) * l.size)
+      .filter((cost) => cost > 0 && cost < POLYMARKET_MIN_MARKET_BUY_USD);
+    if (!polyLegs.length) {
+      addStep("polymarket_min_order", "Polymarket min order", "pass", "No Polymarket leg");
+    } else if (polyCosts.length) {
+      const scale = POLYMARKET_MIN_MARKET_BUY_USD / Math.min(...polyCosts);
+      executedLegs.forEach((l) => {
+        l.size = round(l.size * scale, 4);
+      });
+      addStep(
+        "polymarket_min_order",
+        "Polymarket min order",
+        "warn",
+        `resized all legs ${scale.toFixed(2)}x so Polymarket marketable BUY is at least $${POLYMARKET_MIN_MARKET_BUY_USD.toFixed(2)}`
+      );
+    } else {
+      addStep("polymarket_min_order", "Polymarket min order", "pass", "Polymarket leg is at least $1");
+    }
+  }
   const execTotalCents = executedLegs.reduce((s, l) => s + l.priceCents, 0);
   const grossAfter = (100 - execTotalCents) / execTotalCents;
   const legSizes: Record<string, number> = {};
@@ -273,6 +468,36 @@ export async function prepareExecution(opportunityId: string, date: string, requ
   if (netAfter < agent.minEdge) return asHalt("final_refresh_failed", `Edge collapsed to ${(netAfter * 100).toFixed(2)}% after slippage`, opp.matchup, venues, netAfter, { grossAfter, netAfter });
 
   const totalStake = round(Object.values(legSizes).reduce((s, v) => s + v, 0), 2);
+  if (requestedMode === "live" && totalStake > agent.maxStake) {
+    const isPolymarketMinOrderResize = executedLegs.some((l) => l.venueId === "polymarket");
+    if (isPolymarketMinOrderResize) {
+      addStep(
+        "exposure_exceeded",
+        "Stake cap override",
+        "warn",
+        `Polymarket minimum order requires $${totalStake.toFixed(2)} stake; overriding agent max $${agent.maxStake.toFixed(2)}`
+      );
+    } else {
+      return asHalt(
+        "exposure_exceeded",
+        `Polymarket minimum order requires $${totalStake.toFixed(2)} stake, above agent max $${agent.maxStake.toFixed(2)}`,
+        opp.matchup,
+        venues,
+        netAfter,
+        { totalStake, agentMaxStake: agent.maxStake, polymarketMinMarketBuyUsd: POLYMARKET_MIN_MARKET_BUY_USD }
+      );
+    }
+  }
+  if (requestedMode === "live" && openExposure + totalStake > risk.maxExposure) {
+    return asHalt(
+      "exposure_exceeded",
+      `Polymarket minimum order would push exposure to $${(openExposure + totalStake).toFixed(2)} above cap $${risk.maxExposure.toFixed(2)}`,
+      opp.matchup,
+      venues,
+      netAfter,
+      { openExposure, totalStake, maxExposure: risk.maxExposure, polymarketMinMarketBuyUsd: POLYMARKET_MIN_MARKET_BUY_USD }
+    );
+  }
   const guaranteedPayout = executedLegs[0]?.size ?? 0; // both legs buy equal contracts
   const totalFeeDollars = fees.reduce((s, f) => s + f.feeCents / 100, 0);
   const expectedProfit = round(guaranteedPayout - totalStake - totalFeeDollars, 2);
@@ -319,6 +544,7 @@ export async function prepareExecution(opportunityId: string, date: string, requ
       expectedProfit,
       netAfter,
       executionSteps,
+      timing: refreshDiagnostics(),
     },
   };
 }
@@ -335,7 +561,10 @@ export async function verifyPostFill(opportunityId: string, date: string, entryN
     const configuredVenues = await getVenues();
     const markets = filterMarketsForAgent(await getMarkets(date), configuredVenues, agent);
     const { matched } = matchMarkets(markets);
-    const { opportunities } = detectArbs(matched, agent, risk.minLiquidityUsd);
+    // Use the SAME risk filters as detection (minExpectedProfitUsd + liquidity buffer),
+    // not just minLiquidityUsd — otherwise post-fill verification is more permissive than
+    // the detector and the two can disagree on whether the arb still exists.
+    const { opportunities } = detectArbs(matched, agent, risk);
     const same = opportunities.find((o) => o.id === opportunityId);
     if (!same) {
       return {
