@@ -142,9 +142,25 @@ function eventSearchText(event: KalshiEvent): string {
   return [event.title, event.sub_title].filter(Boolean).join(" ");
 }
 
+function kalshiTickerIsoDate(ticker: string | undefined): string | null {
+  const m = ticker?.match(/-(\d{2})([A-Z]{3})(\d{2})/);
+  if (!m) return null;
+  const [, yy, mon, dd] = m;
+  const month = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"].indexOf(mon);
+  if (month < 0) return null;
+  return `20${yy}-${String(month + 1).padStart(2, "0")}-${dd}`;
+}
+
+function eventMatchesSlateDate(game: ArbGame, event: KalshiEvent): boolean {
+  const tickers = [event.event_ticker, ...(event.markets ?? []).map((m) => m.ticker)];
+  const dates = tickers.map(kalshiTickerIsoDate).filter((d): d is string => Boolean(d));
+  return dates.length === 0 || dates.some((d) => d === game.date);
+}
+
 function eventMatchesGame(game: ArbGame, event: KalshiEvent): boolean {
   const text = eventSearchText(event);
   if (!text) return false;
+  if (!eventMatchesSlateDate(game, event)) return false;
   const awayHit = teamMatchesTitle(
     game.awayTeam.name,
     game.awayTeam.shortName,
@@ -468,6 +484,7 @@ export async function fetchKalshiMoneylineByGame(
       awayLiquidityUsd: yesSide === "away" ? yesUsd : noUsd,
       marketId: m.ticker,
       yesSide,
+      sourceStartTime: kalshiTickerIsoDate(m.ticker) ?? undefined,
     });
   }
 
@@ -526,6 +543,7 @@ export async function fetchKalshiSpreadByGame(
       homeSignedLine: yesSide === "home" ? -line : line,
       marketId: m.ticker,
       yesSide,
+      sourceStartTime: kalshiTickerIsoDate(m.ticker) ?? undefined,
     });
   }
 
@@ -588,6 +606,7 @@ export async function fetchKalshiTotalsByGame(
       overLiquidityUsd: q.overUsd,
       underLiquidityUsd: q.underUsd,
       marketId: q.ticker,
+      sourceStartTime: kalshiTickerIsoDate(q.ticker) ?? undefined,
     }));
     result.set(game.id, lines);
   }

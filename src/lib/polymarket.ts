@@ -2,6 +2,7 @@ import { GameMarket, MLBGame, OddsOption } from "@/types";
 import { teamMatchesTitle, teamsMatch } from "./teamNormalization";
 import type { VenueTotalLine, VenueTwoWay, VenueSpread } from "./kalshi";
 import type { ArbGame } from "./arbitrage/sports";
+import { pacificDateFromIso } from "./arbitrage/date";
 
 const GAMMA_API = "https://gamma-api.polymarket.com";
 
@@ -81,11 +82,14 @@ function slugDate(slug: string | undefined): string | null {
 }
 
 function polymarketGameDate(ev: PolymarketEvent): string | null {
+  // Derive the PACIFIC calendar day from the event's timestamps (was dateOnly = raw UTC
+  // date, which mismatched the now-Pacific game.date and matched tomorrow's market to
+  // tonight's game). Slug dates are already bare calendar dates and pass through unchanged.
   return (
-    dateOnly(ev.eventDate) ??
-    dateOnly(ev.startTime) ??
+    pacificDateFromIso(ev.eventDate) ??
+    pacificDateFromIso(ev.startTime) ??
     slugDate(ev.slug) ??
-    (ev.markets ?? []).map((m) => dateOnly(m.gameStartTime)).find(Boolean) ??
+    (ev.markets ?? []).map((m) => pacificDateFromIso(m.gameStartTime)).find(Boolean) ??
     (ev.markets ?? []).map((m) => slugDate(m.slug)).find(Boolean) ??
     null
   );

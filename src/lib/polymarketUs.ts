@@ -19,6 +19,7 @@
 import type { VenueSpread, VenueTotalLine, VenueTwoWay } from "./kalshi";
 import type { ArbGame } from "./arbitrage/sports";
 import { teamsMatch } from "./teamNormalization";
+import { pacificDateFromIso } from "./arbitrage/date";
 
 const GATEWAY = "https://gateway.polymarket.us";
 
@@ -86,6 +87,10 @@ const cents = (a?: Amount): number | null => {
 };
 
 function eventMatchesGame(ev: PmEvent, game: ArbGame): boolean {
+  // Reject an event whose Pacific day clearly differs from the game's — otherwise
+  // tomorrow's market (the startDateMin floor returns future events) matches today's game.
+  const evDate = pacificDateFromIso(ev.startTime);
+  if (evDate && evDate !== game.date) return false;
   // A head-to-head game event has EXACTLY two teams. Futures (e.g. "World Series
   // Champion") list many contenders and would spuriously match both sides.
   const teams = ev.teams ?? [];

@@ -1,0 +1,1011 @@
+
+> mlb-betting@0.1.0 dev
+> next dev
+
+▲ Next.js 16.2.6 (Turbopack)
+- Local:         http://localhost:3000
+- Network:       http://10.2.0.2:3000
+- Environments: .env.local
+✓ Ready in 556ms
+
+ GET /arbitrage 200 in 1581ms (next.js: 1445ms, application-code: 136ms)
+[browser] A tree hydrated but some attributes of the server rendered HTML didn't match the client properties. This won't be patched up. This can happen if a SSR-ed Client Component used:
+
+- A server/client branch `if (typeof window !== 'undefined')`.
+- Variable input such as `Date.now()` or `Math.random()` which changes each time it's called.
+- Date formatting in a user's locale which doesn't match the server.
+- External changing data without sending a snapshot of it along with the HTML.
+- Invalid HTML tag nesting.
+
+It can also happen if the client has a browser extension installed which messes with the HTML before React loaded.
+
+https://react.dev/link/hydration-mismatch
+
+  ...
+    <HotReload globalError={[...]} webSocket={WebSocket} staticIndicatorState={{pathname:null, ...}}>
+      <AppDevOverlayErrorBoundary globalError={[...]}>
+        <ReplaySsrOnlyErrors>
+        <DevRootHTTPAccessFallbackBoundary>
+          <HTTPAccessFallbackBoundary notFound={<NotAllowedRootHTTPFallbackError>}>
+            <HTTPAccessFallbackErrorBoundary pathname="/arbitrage" notFound={<NotAllowedRootHTTPFallbackError>} ...>
+              <RedirectBoundary>
+                <RedirectErrorBoundary router={{...}}>
+                  <Head>
+                  <__next_root_layout_boundary__>
+                    <SegmentViewNode type="layout" pagePath="layout.tsx">
+                      <SegmentTrieNode>
+                      <link>
+                      <script>
+                      <script>
+                      <script>
+                      <RootLayout>
+                        <html
+                          lang="en"
+                          className="h-full"
+-                         data-darkreader-proxy-injected="true"
+                        >
+                  ...
+ 
+ GET /api/arbitrage/agents 200 in 441ms (next.js: 235ms, application-code: 206ms)
+ GET /api/arbitrage/opportunities?date=20260731 200 in 461ms (next.js: 354ms, application-code: 106ms)
+ GET /api/arbitrage/venues 200 in 464ms (next.js: 428ms, application-code: 36ms)
+ POST /api/arbitrage/settle 200 in 473ms (next.js: 388ms, application-code: 84ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 191ms (next.js: 183ms, application-code: 8ms)
+ GET /api/arbitrage/trades?date=20260731 200 in 1003ms (next.js: 913ms, application-code: 90ms)
+ GET /api/arbitrage/risk 200 in 288ms (next.js: 237ms, application-code: 51ms)
+ GET /api/arbitrage/logs?date=20260731 200 in 290ms (next.js: 263ms, application-code: 27ms)
+ GET /api/arbitrage/trades 200 in 298ms (next.js: 203ms, application-code: 95ms)
+ GET /api/arbitrage/opportunities?date=20260731 200 in 50ms (next.js: 15ms, application-code: 36ms)
+ GET /api/arbitrage/match-map?date=20260731 200 in 88ms (next.js: 77ms, application-code: 11ms)
+ GET /api/arbitrage/logs 200 in 466ms (next.js: 256ms, application-code: 209ms)
+[arbitrage/ingest] targeted mlb games fetch failed: [TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 23.214.112.246:443, 23.214.112.237:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+ POST /api/arbitrage/trades 200 in 21.2s (next.js: 4ms, application-code: 21.2s)
+[Kalshi] events fetch failed (KXMLBGAME): [TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 3.174.207.28:443, 3.174.207.34:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+[Polymarket] fetch error: [TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 104.18.34.205:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+[arbitrage/ingest] targeted mlb games fetch failed: [TypeError: fetch failed] {
+  [cause]: Error: read ECONNRESET
+      at ignore-listed frames {
+    errno: -4077,
+    code: 'ECONNRESET',
+    syscall: 'read'
+  }
+}
+ POST /api/arbitrage/trades 200 in 2.1min (next.js: 2ms, application-code: 2.1min)
+[Polymarket] fetch error: [TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 104.18.34.205:443, 172.64.153.51:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+[Polymarket] fetch error: [TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 104.18.34.205:443, 172.64.153.51:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+[Kalshi] events fetch failed (KXMLBTOTAL): [TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 3.174.207.79:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+[TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 23.214.112.237:443, 23.214.112.246:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+Failed to set fetch cache https://site.api.espn.com/apis/site/v2/sports/soccer/bra.1/scoreboard?limit=100 TypeError: terminated
+    at ignore-listed frames {
+  [cause]: Error: read ECONNRESET
+      at ignore-listed frames {
+    errno: -4077,
+    code: 'ECONNRESET',
+    syscall: 'read'
+  }
+}
+[espn:soccer/bra.1] scores fetch failed: TypeError: terminated
+    at ignore-listed frames {
+  [cause]: Error: read ECONNRESET
+      at ignore-listed frames {
+    errno: -4077,
+    code: 'ECONNRESET',
+    syscall: 'read'
+  }
+}
+ GET /api/arbitrage/scores 200 in 2.5min (next.js: 320ms, application-code: 2.5min)
+[Kalshi] events fetch failed (KXMLBGAME): [TypeError: fetch failed] {
+  [cause]: Error: Client network socket disconnected before secure TLS connection was established
+      at ignore-listed frames {
+    code: 'ECONNRESET',
+    path: undefined,
+    host: 'api.elections.kalshi.com',
+    port: 443,
+    localAddress: null
+  }
+}
+[TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 23.214.112.246:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+[Polymarket] fetch error: [TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 172.64.153.51:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+Failed to set fetch cache https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/scoreboard?dates=20260731&limit=50 TypeError: terminated
+    at ignore-listed frames {
+  [cause]: Error [BodyTimeoutError]: Body Timeout Error
+      at ignore-listed frames {
+    code: 'UND_ERR_BODY_TIMEOUT'
+  }
+}
+[arbitrage/ingest] targeted wnba games fetch failed: TypeError: terminated
+    at ignore-listed frames {
+  [cause]: Error [BodyTimeoutError]: Body Timeout Error
+      at ignore-listed frames {
+    code: 'UND_ERR_BODY_TIMEOUT'
+  }
+}
+ POST /api/arbitrage/trades 200 in 5.3min (next.js: 2ms, application-code: 5.3min)
+[Polymarket] fetch error: [TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 172.64.153.51:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+[Polymarket] fetch error: [TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 172.64.153.51:443, 104.18.34.205:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+[Polymarket] fetch error: [TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 172.64.153.51:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+[sxbet] markets fetch failed: [TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 172.66.157.65:443, 104.20.20.77:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+[predict.fun] markets fetch failed: [TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 172.67.72.75:443, 104.26.6.96:443, 104.26.7.96:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+[TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 23.214.112.237:443, 23.214.112.246:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+[Kalshi] events fetch failed (KXMLBGAME): [TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 3.174.207.28:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+[Kalshi] events fetch failed (KXMLBTOTAL): [TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 3.174.207.28:443, 3.174.207.34:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+[Kalshi] events fetch failed (KXMLBSPREAD): [TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 3.174.207.28:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+[Kalshi] events fetch failed (KXMLBGAME): [TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 3.174.207.28:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+[Kalshi] events fetch failed (KXMLBTOTAL): [TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 3.174.207.28:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+[Polymarket] fetch error: [TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 104.18.34.205:443, 172.64.153.51:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+[Polymarket] fetch error: [TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 104.18.34.205:443, 172.64.153.51:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+[Polymarket] fetch error: [TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 104.18.34.205:443, 172.64.153.51:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+[sxbet] markets fetch failed: [TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 172.66.157.65:443, 104.20.20.77:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+[predict.fun] markets fetch failed: [TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 172.67.72.75:443, 104.26.6.96:443, 104.26.7.96:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+[cloudbet] baseball-usa-mlb events fetch failed: [TypeError: fetch failed] {
+  [cause]: Error: read ECONNRESET
+      at ignore-listed frames {
+    errno: -4077,
+    code: 'ECONNRESET',
+    syscall: 'read'
+  }
+}
+[Kalshi] events fetch failed (KXMLBTOTAL): [TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 3.174.207.28:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+[TypeError: fetch failed] {
+  [cause]: Error: read ECONNRESET
+      at ignore-listed frames {
+    errno: -4077,
+    code: 'ECONNRESET',
+    syscall: 'read'
+  }
+}
+[TypeError: fetch failed] {
+  [cause]: Error: read ECONNRESET
+      at ignore-listed frames {
+    errno: -4077,
+    code: 'ECONNRESET',
+    syscall: 'read'
+  }
+}
+⨯ Error: failed to pipe response
+    at ignore-listed frames {
+  [cause]: [TypeError: fetch failed] {
+    [cause]: Error: read ECONNRESET
+        at ignore-listed frames {
+      errno: -4077,
+      code: 'ECONNRESET',
+      syscall: 'read'
+    }
+  }
+}
+ GET /api/arbitrage/scores 500 in 4.1min (next.js: 2ms, application-code: 4.1min)
+[TypeError: fetch failed] {
+  [cause]: Error: read ECONNRESET
+      at ignore-listed frames {
+    errno: -4077,
+    code: 'ECONNRESET',
+    syscall: 'read'
+  }
+}
+[TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 23.214.112.246:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+[TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 23.214.112.246:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+⨯ Error: failed to pipe response
+    at ignore-listed frames {
+  [cause]: [TypeError: fetch failed] {
+    [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 23.214.112.246:443, timeout: 10000ms)
+        at ignore-listed frames {
+      code: 'UND_ERR_CONNECT_TIMEOUT'
+    }
+  }
+}
+ GET /api/arbitrage/scores 500 in 10.3s (next.js: 2ms, application-code: 10.3s)
+[TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 23.214.112.246:443, 23.214.112.237:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+[TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 23.214.112.246:443, 23.214.112.237:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+⨯ Error: failed to pipe response
+    at ignore-listed frames {
+  [cause]: [TypeError: fetch failed] {
+    [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 23.214.112.246:443, 23.214.112.237:443, timeout: 10000ms)
+        at ignore-listed frames {
+      code: 'UND_ERR_CONNECT_TIMEOUT'
+    }
+  }
+}
+ GET /api/arbitrage/scores 500 in 10.6s (next.js: 3ms, application-code: 10.6s)
+ GET /api/arbitrage/scores 200 in 2.6s (next.js: 2ms, application-code: 2.6s)
+ GET /api/arbitrage/scores 200 in 15ms (next.js: 9ms, application-code: 7ms)
+ GET /api/arbitrage/scores 200 in 9ms (next.js: 1817µs, application-code: 7ms)
+ GET /api/arbitrage/scores 200 in 8ms (next.js: 1847µs, application-code: 6ms)
+ POST /api/arbitrage/settle 200 in 10ms (next.js: 1675µs, application-code: 8ms)
+ GET /api/arbitrage/markets?date=20260731&refresh=1 200 in 18ms (next.js: 3ms, application-code: 15ms)
+ GET /api/arbitrage/scores 200 in 9ms (next.js: 2ms, application-code: 7ms)
+ GET /api/arbitrage/scores 200 in 10ms (next.js: 1725µs, application-code: 8ms)
+ GET /api/arbitrage/scores 200 in 9ms (next.js: 1889µs, application-code: 7ms)
+ GET /api/arbitrage/scores 200 in 10ms (next.js: 3ms, application-code: 7ms)
+ GET /api/arbitrage/scores 200 in 9ms (next.js: 1757µs, application-code: 7ms)
+ GET /api/arbitrage/scores 200 in 11ms (next.js: 2ms, application-code: 9ms)
+ GET /api/arbitrage/scores 200 in 10ms (next.js: 2ms, application-code: 8ms)
+ GET /api/arbitrage/scores 200 in 9ms (next.js: 1798µs, application-code: 7ms)
+ GET /api/arbitrage/scores 200 in 9ms (next.js: 1482µs, application-code: 7ms)
+ GET /api/arbitrage/scores 200 in 8ms (next.js: 1734µs, application-code: 6ms)
+ GET /api/arbitrage/scores 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/scores 200 in 9ms (next.js: 1987µs, application-code: 7ms)
+ GET /api/arbitrage/scores 200 in 8ms (next.js: 1858µs, application-code: 6ms)
+ GET /api/arbitrage/scores 200 in 8ms (next.js: 1579µs, application-code: 7ms)
+ GET /api/arbitrage/scores 200 in 8ms (next.js: 1976µs, application-code: 6ms)
+ GET /api/arbitrage/scores 200 in 9ms (next.js: 1506µs, application-code: 8ms)
+ GET /api/arbitrage/scores 200 in 9ms (next.js: 2ms, application-code: 7ms)
+ GET /api/arbitrage/scores 200 in 8ms (next.js: 1744µs, application-code: 6ms)
+ GET /api/arbitrage/scores 200 in 8ms (next.js: 1512µs, application-code: 6ms)
+ GET /api/arbitrage/scores 200 in 7ms (next.js: 1746µs, application-code: 6ms)
+ GET /api/arbitrage/scores 200 in 8ms (next.js: 1554µs, application-code: 7ms)
+ GET /api/arbitrage/scores 200 in 8ms (next.js: 1720µs, application-code: 6ms)
+ GET /api/arbitrage/scores 200 in 10ms (next.js: 2ms, application-code: 7ms)
+ GET /api/arbitrage/trades 200 in 11ms (next.js: 1841µs, application-code: 9ms)
+ GET /api/arbitrage/logs 200 in 41ms (next.js: 2ms, application-code: 39ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 9ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 10ms (next.js: 3ms, application-code: 7ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 9ms (next.js: 1983µs, application-code: 7ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 9ms (next.js: 3ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 3ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 9ms (next.js: 2ms, application-code: 7ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1945µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1977µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 9ms (next.js: 2ms, application-code: 7ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 9ms (next.js: 3ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 3ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1940µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1995µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 9ms (next.js: 2ms, application-code: 7ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1874µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1999µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1976µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 3ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1891µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 9ms (next.js: 1891µs, application-code: 7ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1900µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1937µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1893µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1874µs, application-code: 7ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/match-map?date=20260731 200 in 13ms (next.js: 3ms, application-code: 11ms)
+ GET /api/arbitrage/opportunities?date=20260731 200 in 14ms (next.js: 2ms, application-code: 12ms)
+ POST /api/arbitrage/settle 200 in 10ms (next.js: 1996µs, application-code: 8ms)
+ GET /api/arbitrage/markets?date=20260731&refresh=1 200 in 7ms (next.js: 1698µs, application-code: 6ms)
+ GET /api/arbitrage/trades 200 in 12ms (next.js: 2ms, application-code: 9ms)
+ GET /api/arbitrage/logs 200 in 32ms (next.js: 2ms, application-code: 30ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 10ms (next.js: 3ms, application-code: 7ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1999µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1896µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 9ms (next.js: 1993µs, application-code: 7ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1859µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1919µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1922µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1944µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1925µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1631µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1853µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1981µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1993µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 9ms (next.js: 3ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1998µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+[espn:tennis/wta] fixtures fetch failed: [TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 23.214.112.246:443, 23.214.112.237:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+[espn:soccer/usa.1] fixtures fetch failed: [TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 23.214.112.246:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1937µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 3ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/scores 200 in 9ms (next.js: 1954µs, application-code: 7ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 10ms (next.js: 2ms, application-code: 7ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 9ms (next.js: 3ms, application-code: 7ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/match-map?date=20260731 200 in 11ms (next.js: 2ms, application-code: 9ms)
+ GET /api/arbitrage/opportunities?date=20260731 200 in 13ms (next.js: 1933µs, application-code: 11ms)
+ POST /api/arbitrage/settle 200 in 11ms (next.js: 2ms, application-code: 9ms)
+ GET /api/arbitrage/markets?date=20260731&refresh=1 200 in 8ms (next.js: 1828µs, application-code: 6ms)
+ GET /api/arbitrage/trades 200 in 12ms (next.js: 3ms, application-code: 9ms)
+ GET /api/arbitrage/logs 200 in 31ms (next.js: 1857µs, application-code: 29ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 9ms (next.js: 3ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 9ms (next.js: 3ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 9ms (next.js: 2ms, application-code: 7ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1904µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1903µs, application-code: 5ms)
+[Polymarket] fetch error: [TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 104.18.34.205:443, 172.64.153.51:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 9ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1890µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1937µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1952µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1795µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1952µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1966µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1900µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1894µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1914µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1883µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1928µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1882µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1983µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1866µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1901µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1999µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1928µs, application-code: 6ms)
+ GET /api/arbitrage/match-map?date=20260731 200 in 16ms (next.js: 3ms, application-code: 14ms)
+ GET /api/arbitrage/opportunities?date=20260731 200 in 13ms (next.js: 2ms, application-code: 11ms)
+ POST /api/arbitrage/settle 200 in 11ms (next.js: 2ms, application-code: 9ms)
+ GET /api/arbitrage/markets?date=20260731&refresh=1 200 in 8ms (next.js: 1904µs, application-code: 6ms)
+ GET /api/arbitrage/trades 200 in 12ms (next.js: 3ms, application-code: 9ms)
+ GET /api/arbitrage/logs 200 in 33ms (next.js: 2ms, application-code: 30ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 9ms (next.js: 2ms, application-code: 7ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 10ms (next.js: 3ms, application-code: 7ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 9ms (next.js: 2ms, application-code: 7ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 10ms (next.js: 3ms, application-code: 7ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 9ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 9ms (next.js: 3ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1943µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1960µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1999µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1876µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1865µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1893µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1855µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1923µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1842µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1929µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1990µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 9ms (next.js: 2ms, application-code: 7ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1908µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+[sxbet] leagues fetch failed: [TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 172.66.157.65:443, 104.20.20.77:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1653µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 9ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1981µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1817µs, application-code: 6ms)
+ GET /api/arbitrage/match-map?date=20260731 200 in 11ms (next.js: 1814µs, application-code: 10ms)
+ GET /api/arbitrage/opportunities?date=20260731 200 in 13ms (next.js: 1821µs, application-code: 11ms)
+ POST /api/arbitrage/settle 200 in 9ms (next.js: 1860µs, application-code: 7ms)
+ GET /api/arbitrage/markets?date=20260731&refresh=1 200 in 7ms (next.js: 1459µs, application-code: 5ms)
+ GET /api/arbitrage/trades 200 in 9ms (next.js: 1890µs, application-code: 7ms)
+ GET /api/arbitrage/logs 200 in 33ms (next.js: 1821µs, application-code: 31ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1791µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1792µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1927µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1926µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1995µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1982µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1990µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 10ms (next.js: 2ms, application-code: 7ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 10ms (next.js: 2ms, application-code: 7ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1965µs, application-code: 5ms)
+ GET /api/arbitrage/scores 200 in 10ms (next.js: 2ms, application-code: 8ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1882µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+[Kalshi] events fetch failed (KXWNBASPREAD): [TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 3.174.207.79:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+[Kalshi] events fetch failed (KXWNBAGAME): [TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 3.174.207.79:443, 3.174.207.28:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+[cloudbet] /sports/tennis fetch failed: [TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 104.20.31.170:443, 172.66.167.42:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 10ms (next.js: 3ms, application-code: 8ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1802µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET / 200 in 291ms (next.js: 238ms, application-code: 53ms)
+ GET /api/arbitrage/markets?date=20260730&refresh=1 200 in 10ms (next.js: 2ms, application-code: 8ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 3ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260730 200 in 6ms (next.js: 1929µs, application-code: 4ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260730 200 in 7ms (next.js: 2ms, application-code: 4ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1939µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260730 200 in 6ms (next.js: 2ms, application-code: 4ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1936µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1959µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260730 200 in 6ms (next.js: 1996µs, application-code: 4ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260730 200 in 6ms (next.js: 2ms, application-code: 4ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1970µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/match-map?date=20260731 200 in 15ms (next.js: 2ms, application-code: 13ms)
+ GET /api/arbitrage/opportunities?date=20260731 200 in 16ms (next.js: 2ms, application-code: 13ms)
+ GET /api/arbitrage/markets?date=20260730 200 in 7ms (next.js: 2ms, application-code: 5ms)
+ POST /api/arbitrage/settle 200 in 11ms (next.js: 3ms, application-code: 8ms)
+ GET /api/arbitrage/markets?date=20260731&refresh=1 200 in 8ms (next.js: 1572µs, application-code: 6ms)
+ GET /api/arbitrage/trades 200 in 11ms (next.js: 2ms, application-code: 9ms)
+ GET /api/arbitrage/logs 200 in 38ms (next.js: 2ms, application-code: 36ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 3ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 9ms (next.js: 2ms, application-code: 7ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 9ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260730 200 in 5ms (next.js: 1958µs, application-code: 3ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1970µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1913µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 9ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 9ms (next.js: 2ms, application-code: 7ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 9ms (next.js: 1840µs, application-code: 7ms)
+ GET /api/arbitrage/markets?date=20260730 200 in 6ms (next.js: 1691µs, application-code: 4ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 9ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260730 200 in 6ms (next.js: 2ms, application-code: 4ms)
+[espn:soccer/bra.1] fixtures fetch failed: [TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 23.214.112.246:443, 23.214.112.237:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+ GET /api/arbitrage/markets?date=20260730 200 in 6ms (next.js: 2ms, application-code: 4ms)
+ GET /api/arbitrage/markets?date=20260730 200 in 6ms (next.js: 1921µs, application-code: 4ms)
+ GET /api/arbitrage/markets?date=20260730 200 in 7ms (next.js: 3ms, application-code: 4ms)
+ GET /api/arbitrage/scores 200 in 9.6s (next.js: 2ms, application-code: 9.6s)
+ GET /api/arbitrage/markets?date=20260731 200 in 15ms (next.js: 8ms, application-code: 7ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1959µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1888µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1937µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1959µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 10ms (next.js: 3ms, application-code: 7ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1915µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1976µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1756µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1945µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1836µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1966µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/match-map?date=20260731 200 in 12ms (next.js: 1627µs, application-code: 10ms)
+ GET /api/arbitrage/opportunities?date=20260731 200 in 12ms (next.js: 1738µs, application-code: 10ms)
+ POST /api/arbitrage/settle 200 in 9ms (next.js: 2ms, application-code: 7ms)
+ GET /api/arbitrage/markets?date=20260731&refresh=1 200 in 7ms (next.js: 1442µs, application-code: 5ms)
+ GET /api/arbitrage/trades 200 in 10ms (next.js: 1894µs, application-code: 8ms)
+ GET /api/arbitrage/logs 200 in 34ms (next.js: 1805µs, application-code: 32ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1885µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1830µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1981µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1991µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1878µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1836µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1928µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1970µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1925µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1953µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1995µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1920µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1957µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 1798µs, application-code: 5ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 7ms (next.js: 2ms, application-code: 5ms)
+ GET /api/arbitrage/match-map?date=20260731 200 in 11ms (next.js: 1580µs, application-code: 10ms)
+ GET /api/arbitrage/opportunities?date=20260731 200 in 16ms (next.js: 2ms, application-code: 13ms)
+[Kalshi] events fetch failed (KXMLBSPREAD): TypeError: terminated
+    at ignore-listed frames {
+  [cause]: Error: read ECONNRESET
+      at ignore-listed frames {
+    errno: -4077,
+    code: 'ECONNRESET',
+    syscall: 'read'
+  }
+}
+[Polymarket] fetch error: [TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 104.18.34.205:443, 172.64.153.51:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+[Polymarket] fetch error: [TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 104.18.34.205:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+[Polymarket] fetch error: [TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 104.18.34.205:443, 172.64.153.51:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+[sxbet] markets fetch failed: [TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 172.66.157.65:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+[predict.fun] markets fetch failed: [TypeError: fetch failed] {
+  [cause]: Error: read ECONNRESET
+      at ignore-listed frames {
+    errno: -4077,
+    code: 'ECONNRESET',
+    syscall: 'read'
+  }
+}
+[cloudbet] baseball-usa-mlb events fetch failed: [TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 172.66.167.42:443, 104.20.31.170:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+[Kalshi] events fetch failed (KXMLBSPREAD): [TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 3.174.207.28:443, 3.174.207.34:443, 3.174.207.44:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+[TypeError: fetch failed] {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 23.214.112.237:443, 23.214.112.246:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+[Polymarket] fetch error: TypeError: terminated
+    at ignore-listed frames {
+  [cause]: Error: read ECONNRESET
+      at ignore-listed frames {
+    errno: -4077,
+    code: 'ECONNRESET',
+    syscall: 'read'
+  }
+}
+Failed to set fetch cache https://site.api.espn.com/apis/site/v2/sports/soccer/uefa.champions/scoreboard?limit=100 TypeError: terminated
+    at ignore-listed frames {
+  [cause]: Error: read ECONNRESET
+      at ignore-listed frames {
+    errno: -4077,
+    code: 'ECONNRESET',
+    syscall: 'read'
+  }
+}
+TypeError: terminated
+    at ignore-listed frames {
+  [cause]: Error: read ECONNRESET
+      at ignore-listed frames {
+    errno: -4077,
+    code: 'ECONNRESET',
+    syscall: 'read'
+  }
+}
+TypeError: terminated
+    at ignore-listed frames {
+  [cause]: Error: read ECONNRESET
+      at ignore-listed frames {
+    errno: -4077,
+    code: 'ECONNRESET',
+    syscall: 'read'
+  }
+}
+⨯ Error: failed to pipe response
+    at ignore-listed frames {
+  [cause]: TypeError: terminated
+      at ignore-listed frames {
+    [cause]: Error: read ECONNRESET
+        at ignore-listed frames {
+      errno: -4077,
+      code: 'ECONNRESET',
+      syscall: 'read'
+    }
+  }
+}
+ GET /api/arbitrage/scores 500 in 75s (next.js: 3ms, application-code: 75s)
+[Polymarket] fetch error: TypeError: terminated
+    at ignore-listed frames {
+  [cause]: Error: read ECONNRESET
+      at ignore-listed frames {
+    errno: -4077,
+    code: 'ECONNRESET',
+    syscall: 'read'
+  }
+}
+[Polymarket] fetch error: TypeError: terminated
+    at ignore-listed frames {
+  [cause]: Error: read ECONNRESET
+      at ignore-listed frames {
+    errno: -4077,
+    code: 'ECONNRESET',
+    syscall: 'read'
+  }
+}
+[Polymarket] fetch error: TypeError: terminated
+    at ignore-listed frames {
+  [cause]: Error: read ECONNRESET
+      at ignore-listed frames {
+    errno: -4077,
+    code: 'ECONNRESET',
+    syscall: 'read'
+  }
+}
+Failed to set fetch cache https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard?limit=100 TypeError: terminated
+    at ignore-listed frames {
+  [cause]: Error: read ECONNRESET
+      at ignore-listed frames {
+    errno: -4077,
+    code: 'ECONNRESET',
+    syscall: 'read'
+  }
+}
+TypeError: terminated
+    at ignore-listed frames {
+  [cause]: Error: read ECONNRESET
+      at ignore-listed frames {
+    errno: -4077,
+    code: 'ECONNRESET',
+    syscall: 'read'
+  }
+}
+[Kalshi] events fetch failed (KXMLBTOTAL): [TypeError: fetch failed] {
+  [cause]: Error: read ECONNRESET
+      at ignore-listed frames {
+    errno: -4077,
+    code: 'ECONNRESET',
+    syscall: 'read'
+  }
+}
+[Polymarket] fetch error: TypeError: terminated
+    at ignore-listed frames {
+  [cause]: Error: read ECONNRESET
+      at ignore-listed frames {
+    errno: -4077,
+    code: 'ECONNRESET',
+    syscall: 'read'
+  }
+}
+[Polymarket] fetch error: TypeError: terminated
+    at ignore-listed frames {
+  [cause]: Error: read ECONNRESET
+      at ignore-listed frames {
+    errno: -4077,
+    code: 'ECONNRESET',
+    syscall: 'read'
+  }
+}
+Failed to set fetch cache https://site.api.espn.com/apis/site/v2/sports/tennis/wta/scoreboard?dates=20260730&limit=100 TypeError: terminated
+    at ignore-listed frames {
+  [cause]: Error: read ECONNRESET
+      at ignore-listed frames {
+    errno: -4077,
+    code: 'ECONNRESET',
+    syscall: 'read'
+  }
+}
+[espn:tennis/wta] fixtures fetch failed: TypeError: terminated
+    at ignore-listed frames {
+  [cause]: Error: read ECONNRESET
+      at ignore-listed frames {
+    errno: -4077,
+    code: 'ECONNRESET',
+    syscall: 'read'
+  }
+}
+[Kalshi] events fetch failed (KXMLBGAME): [TypeError: fetch failed] {
+  [cause]: Error: read ECONNRESET
+      at ignore-listed frames {
+    errno: -4077,
+    code: 'ECONNRESET',
+    syscall: 'read'
+  }
+}
+[Polymarket] fetch error: TypeError: terminated
+    at ignore-listed frames {
+  [cause]: Error: read ECONNRESET
+      at ignore-listed frames {
+    errno: -4077,
+    code: 'ECONNRESET',
+    syscall: 'read'
+  }
+}
+[Kalshi] events fetch failed (KXMLBSPREAD): TypeError: terminated
+    at ignore-listed frames {
+  [cause]: Error: read ECONNRESET
+      at ignore-listed frames {
+    errno: -4077,
+    code: 'ECONNRESET',
+    syscall: 'read'
+  }
+}
+ GET /api/arbitrage/logs 200 in 165ms (next.js: 3ms, application-code: 162ms)
+ GET /api/arbitrage/scores 200 in 331ms (next.js: 3ms, application-code: 329ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/trades 200 in 13ms (next.js: 3ms, application-code: 11ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 1956µs, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 9ms (next.js: 2ms, application-code: 7ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 9ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 8ms (next.js: 2ms, application-code: 6ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 9ms (next.js: 2ms, application-code: 7ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 10ms (next.js: 3ms, application-code: 8ms)
+ GET /api/arbitrage/markets?date=20260731 200 in 11ms (next.js: 5ms, application-code: 6ms)
+[arbitrage/ingest] 20260731: 32 games, 390 Kalshi + 392 Polymarket + 82 SX.bet + 28 predict.fun + 0 CloudBet quotes
+ POST /api/arbitrage/trades 200 in 10.5min (next.js: 2ms, application-code: 10.5min)
+ GET /api/arbitrage/markets?date=20260731 200 in 9ms (next.js: 2ms, application-code: 7ms)
+ GET /api/arbitrage/match-map?date=20260731 200 in 15ms (next.js: 3ms, application-code: 12ms)
+ GET /api/arbitrage/opportunities?date=20260731 200 in 17ms (next.js: 2ms, application-code: 15ms)
