@@ -41,8 +41,15 @@ export type ExecutionOutcome = {
 };
 
 const SLIPPAGE_RESERVE = 0; // legs priced at ask; spread already included
-const LIVE_REFRESH_RETRIES = 2;
+// The old path re-ran the FULL refresh up to 3× (retries=2), each a slow re-fetch — the
+// biggest chunk of placement latency. The targeted refresh + freshness fast-path below make
+// retries unnecessary: one targeted refresh (or none, when quotes are already fresh).
+const LIVE_REFRESH_RETRIES = 0;
 const LIVE_REFRESH_RETRY_DELAY_MS = 250;
+// The scanner re-ingests every ~1s, so a just-detected opportunity's legs are usually
+// fresh. When they're fresher than this (clamped to staleQuoteMs) we skip the pre-trade
+// network refresh entirely and go straight to the gates — the single biggest speedup.
+const LIVE_QUOTE_FRESH_MS = 2500;
 
 function nowIso() {
   return new Date().toISOString();
@@ -145,7 +152,7 @@ export async function prepareExecution(opportunityId: string, date: string, requ
   const detect = async () => {
     const markets = filterMarketsForAgent(await getMarkets(date), configuredVenues, agent);
     const { matched } = matchMarkets(markets);
-    const { opportunities } = detectArbs(matched, agent, risk.minLiquidityUsd);
+    const { opportunities } = detectArbs(matched, agent, { minLiquidityUsd: risk.minLiquidityUsd, staleDivergenceCents: risk.staleDivergenceCents });
     return { markets, opp: opportunities.find((o) => o.id === opportunityId) };
   };
   // Age (ms) of the oldest quote backing the opportunity's legs.
@@ -156,16 +163,24 @@ export async function prepareExecution(opportunityId: string, date: string, requ
     }));
 
   let { markets, opp } = await detect();
-  // Live orders must run on a just-refreshed snapshot. Paper keeps the wider cache
-  // window because it is useful for tracking/simulation and carries no fill risk.
-  if (requestedMode === "live") {
+  // Live orders must run on a fresh snapshot. Paper keeps the wider cache window (no fill risk).
+  //
+  // Fast-path: if the scanner already left this opportunity's legs fresher than
+  // LIVE_QUOTE_FRESH_MS (clamped to staleQuoteMs), skip the network refresh — the stale
+  // gate below still enforces freshness. Otherwise do ONE targeted refresh scoped to just
+  // the arb's leg venues + market type (not every venue × every market for the game).
+  const initialQuoteAgeMs = opp ? legAgeMs(opp, markets) : null;
+  const legVenues = opp ? [...new Set(opp.legs.map((l) => l.venueId))] : undefined;
+  const canSkipLiveRefresh =
+    opp != null && initialQuoteAgeMs != null && initialQuoteAgeMs <= Math.min(risk.staleQuoteMs, LIVE_QUOTE_FRESH_MS);
+  if (requestedMode === "live" && !canSkipLiveRefresh) {
     for (let attempt = 0; attempt <= LIVE_REFRESH_RETRIES; attempt += 1) {
-      await refreshMarketsForOpportunity(date, opportunityId).catch((e) => console.error("[arbitrage/exec] targeted pre-execution refresh failed:", e));
+      await refreshMarketsForOpportunity(date, opportunityId, legVenues).catch((e) => console.error("[arbitrage/exec] targeted pre-execution refresh failed:", e));
       ({ markets, opp } = await detect());
       if (opp) break;
       if (attempt < LIVE_REFRESH_RETRIES) await sleep(LIVE_REFRESH_RETRY_DELAY_MS);
     }
-  } else if (!opp || legAgeMs(opp, markets) > risk.staleQuoteMs) {
+  } else if (requestedMode !== "live" && (!opp || legAgeMs(opp, markets) > risk.staleQuoteMs)) {
     await ingestTotals(date).catch((e) => console.error("[arbitrage/exec] pre-execution refresh failed:", e));
     ({ markets, opp } = await detect());
   }
@@ -335,7 +350,7 @@ export async function verifyPostFill(opportunityId: string, date: string, entryN
     const configuredVenues = await getVenues();
     const markets = filterMarketsForAgent(await getMarkets(date), configuredVenues, agent);
     const { matched } = matchMarkets(markets);
-    const { opportunities } = detectArbs(matched, agent, risk.minLiquidityUsd);
+    const { opportunities } = detectArbs(matched, agent, { minLiquidityUsd: risk.minLiquidityUsd, staleDivergenceCents: risk.staleDivergenceCents });
     const same = opportunities.find((o) => o.id === opportunityId);
     if (!same) {
       return {

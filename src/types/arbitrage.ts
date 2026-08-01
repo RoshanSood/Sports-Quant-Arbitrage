@@ -350,6 +350,7 @@ export type RiskSettings = {
   minLiquidityUsd: number; // drop legs with less executable $ than this (manual section 13)
   minExpectedProfitUsd: number; // drop tiny arbs whose profit cushion is likely to vanish
   liquidityStakeBufferMultiple: number; // require top-of-book liquidity >= stake * this multiple
+  staleDivergenceCents: number; // max cross-venue price disagreement (cents) before a line is skipped as likely-stale
   maxLiveStakeUsd: number; // hard cap on $ any single LIVE trade may commit (UI-configured)
   perVenueCap: Record<VenueId, number>;
 };

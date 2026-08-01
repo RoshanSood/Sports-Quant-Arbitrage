@@ -49,11 +49,16 @@ export type ArbRiskFilters = {
   minLiquidityUsd?: number;
   minExpectedProfitUsd?: number;
   liquidityStakeBufferMultiple?: number;
+  // Max cross-venue divergence (cents) on the first outcome before the line is treated as
+  // stale and skipped. Configurable via risk settings — raise it to capture genuine live
+  // cross-venue disagreements (the SX/Kalshi fillability checks at execution time are the
+  // real guard against a truly stale price, so this can be loosened safely).
+  staleDivergenceCents?: number;
 };
 
-// Cross-venue over-price divergence beyond which a main-line quote is treated as
-// stale (venues agree closely on the actively-traded main total; a big gap means
-// one side is stale/mispriced, which is what fabricates tail-line phantom arbs).
+// Default cross-venue over-price divergence beyond which a quote is treated as stale
+// (venues agree closely on an actively-traded line; a big gap usually means one side is
+// stale/mispriced). Overridable per-call via ArbRiskFilters.staleDivergenceCents.
 const STALE_DIVERGENCE_CENTS = 15;
 
 // Per game, pick the single MAIN total line — the shared line whose over price is
@@ -156,6 +161,8 @@ export function detectArbs(
   const minExpectedProfitUsd = typeof riskFilters === "number" ? 0 : riskFilters.minExpectedProfitUsd ?? 0;
   const liquidityStakeBufferMultiple =
     typeof riskFilters === "number" ? 1 : Math.max(1, riskFilters.liquidityStakeBufferMultiple ?? 1);
+  const staleDivergenceCents =
+    typeof riskFilters === "number" ? STALE_DIVERGENCE_CENTS : riskFilters.staleDivergenceCents ?? STALE_DIVERGENCE_CENTS;
   const opportunities: ArbOpportunity[] = [];
   const rejects: ArbReject[] = [];
   const watch: MainLineWatch[] = [];
@@ -203,7 +210,7 @@ export function detectArbs(
     const requiredLiquidityUsd = Math.max(minLiquidityUsd, plan.totalStake * liquidityStakeBufferMultiple);
 
     let status: MainLineWatch["status"];
-    if (divergence > STALE_DIVERGENCE_CENTS) status = "stale";
+    if (divergence > staleDivergenceCents) status = "stale";
     else if (
       totalCost < 100 &&
       pairLiquidity >= requiredLiquidityUsd &&

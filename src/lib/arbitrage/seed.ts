@@ -147,6 +147,7 @@ export const DEFAULT_RISK: RiskSettings = {
   minLiquidityUsd: 20, // filter thin/tail lines with little executable size
   minExpectedProfitUsd: 0,
   liquidityStakeBufferMultiple: 1,
+  staleDivergenceCents: 15, // skip lines where venues disagree by more than this; raise to capture live cross-venue splits
   maxLiveStakeUsd: DEFAULT_MAX_LIVE_STAKE_USD, // per-trade live cap; raise in the Risk panel after validating
   perVenueCap: {},
 };

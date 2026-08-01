@@ -22,11 +22,34 @@ import { polymarketRegion } from "@/lib/polymarketRegion";
 import { fetchPredictFunMoneylineByGame } from "@/lib/predictFun";
 import { fetchCloudbetMoneylineByGame } from "@/lib/cloudbet";
 import { fetchSxBetMLBMarkets, fetchSxBetMoneylineByGame, fetchSxBetTotalsByGame, type SxBetMarkets } from "@/lib/sxbet";
-import type { NormalizedMarket, Outcome, Sport, VenueId } from "@/types/arbitrage";
+import type { MarketType, NormalizedMarket, Outcome, Sport, VenueId } from "@/types/arbitrage";
 import { decimalOddsFromCents, impliedProbFromCents } from "./arbMath";
 import { buildEventKey } from "./matching";
 import { getMarkets, saveMarkets, setRunning } from "./marketStore";
 import { SPORTS, type ArbGame, type SportConfig } from "./sports";
+
+// Narrows a targeted pre-trade refresh to only the venues + market type an opportunity
+// actually needs, instead of re-fetching every venue × every market type for the game
+// (the dominant placement latency: a 2-venue moneyline arb only needs 2 venues × 1 type).
+// Hard cap on the targeted pre-trade refresh so a hung venue fetch can't block placement.
+const REFRESH_TIMEOUT_MS = 3000;
+export type IngestScope = { venues?: Set<VenueId>; marketTypes?: Set<MarketType> };
+function scopeAllows(scope: IngestScope | undefined, venue: VenueId, marketType: MarketType): boolean {
+  if (!scope) return true;
+  if (scope.venues && !scope.venues.has(venue)) return false;
+  if (scope.marketTypes && !scope.marketTypes.has(marketType)) return false;
+  return true;
+}
+function scopeAllowsVenue(scope: IngestScope | undefined, venue: VenueId): boolean {
+  return !scope?.venues || scope.venues.has(venue);
+}
+// opportunityId = `${eventKey}:${marketType}:${line}`; eventKey has colons but marketType
+// never does, so the market type is the second-to-last colon segment.
+const MARKET_TYPES: MarketType[] = ["moneyline", "total", "spread"];
+function opportunityMarketType(opportunityId: string): MarketType | null {
+  const seg = opportunityId.split(":").at(-2);
+  return MARKET_TYPES.find((t) => t === seg) ?? null;
+}
 
 const EMPTY_SX: SxBetMarkets = { moneyline: new Map(), spread: new Map(), totals: new Map() };
 const EMPTY_PM: PolymarketUsMarkets = { moneyline: new Map(), spread: new Map(), totals: new Map() };
@@ -180,28 +203,31 @@ export type IngestResult = {
 
 async function ingestSportMarkets(
   cfg: SportConfig,
-  games: ArbGame[]
+  games: ArbGame[],
+  scope?: IngestScope
 ): Promise<{ markets: NormalizedMarket[]; venueCounts: Record<VenueId, number> }> {
   const markets: NormalizedMarket[] = [];
   const venueCounts: Record<VenueId, number> = { kalshi: 0, polymarket: 0, sxbet: 0, predictfun: 0, cloudbet: 0 };
   if (!games.length) return { markets, venueCounts };
 
+  const allow = (v: VenueId, t: MarketType) => scopeAllows(scope, v, t);
+  const allowV = (v: VenueId) => scopeAllowsVenue(scope, v);
   const freshEmptyTotals = () => ({ data: emptyTotals(), fetchedAt: new Date().toISOString() });
   const freshEmptyTwoWay = () => ({ data: emptyTwoWay(), fetchedAt: new Date().toISOString() });
   const freshEmptySpread = () => ({ data: emptySpread(), fetchedAt: new Date().toISOString() });
 
   const [kTot, kML, kSp] = cfg.kalshi
     ? await Promise.all([
-        cfg.markets.totals ? withFetchedAt(fetchKalshiTotalsByGame(games, cfg.kalshi.total), emptyTotals()) : Promise.resolve(freshEmptyTotals()),
-        cfg.markets.moneyline ? withFetchedAt(fetchKalshiMoneylineByGame(games, cfg.kalshi.game), emptyTwoWay()) : Promise.resolve(freshEmptyTwoWay()),
-        cfg.markets.spread ? withFetchedAt(fetchKalshiSpreadByGame(games, cfg.kalshi.spread, cfg.spreadFixedLine), emptySpread()) : Promise.resolve(freshEmptySpread()),
+        cfg.markets.totals && allow("kalshi", "total") ? withFetchedAt(fetchKalshiTotalsByGame(games, cfg.kalshi.total), emptyTotals()) : Promise.resolve(freshEmptyTotals()),
+        cfg.markets.moneyline && allow("kalshi", "moneyline") ? withFetchedAt(fetchKalshiMoneylineByGame(games, cfg.kalshi.game), emptyTwoWay()) : Promise.resolve(freshEmptyTwoWay()),
+        cfg.markets.spread && allow("kalshi", "spread") ? withFetchedAt(fetchKalshiSpreadByGame(games, cfg.kalshi.spread, cfg.spreadFixedLine), emptySpread()) : Promise.resolve(freshEmptySpread()),
       ])
     : [freshEmptyTotals(), freshEmptyTwoWay(), freshEmptySpread()];
 
   let pTot: Timed<Map<string, VenueTotalLine[]>> = freshEmptyTotals();
   let pML: Timed<Map<string, VenueTwoWay>> = freshEmptyTwoWay();
   let pSp: Timed<Map<string, VenueSpread>> = freshEmptySpread();
-  if (cfg.polyTag) {
+  if (cfg.polyTag && allowV("polymarket")) {
     if ((cfg.markets.totals || cfg.markets.spread) && polymarketRegion() === "us") {
       const pm = await withFetchedAt(fetchPolymarketUsMLBMarkets(games), EMPTY_PM);
       pTot = { data: pm.data.totals, fetchedAt: pm.fetchedAt };
@@ -211,19 +237,19 @@ async function ingestSportMarkets(
       const tag = cfg.polyTag;
       const winnerSport = cfg.sport === "soccer" || cfg.sport === "tennis";
       [pTot, pML, pSp] = await Promise.all([
-        cfg.markets.totals ? withFetchedAt(fetchPolymarketTotalsByGame(games, tag), emptyTotals()) : Promise.resolve(freshEmptyTotals()),
-        cfg.markets.moneyline
+        cfg.markets.totals && allow("polymarket", "total") ? withFetchedAt(fetchPolymarketTotalsByGame(games, tag), emptyTotals()) : Promise.resolve(freshEmptyTotals()),
+        cfg.markets.moneyline && allow("polymarket", "moneyline")
           ? withFetchedAt(winnerSport ? fetchPolymarketWinnerByGame(games, tag, cfg.sport === "soccer") : fetchPolymarketMoneylineByGame(games, tag), emptyTwoWay())
           : Promise.resolve(freshEmptyTwoWay()),
-        cfg.markets.spread ? withFetchedAt(fetchPolymarketSpreadByGame(games, tag), emptySpread()) : Promise.resolve(freshEmptySpread()),
+        cfg.markets.spread && allow("polymarket", "spread") ? withFetchedAt(fetchPolymarketSpreadByGame(games, tag), emptySpread()) : Promise.resolve(freshEmptySpread()),
       ]);
     }
   }
 
-  const sx = cfg.sxLeagueId != null ? await withFetchedAt(fetchSxBetMLBMarkets(games, cfg.sxLeagueId), EMPTY_SX) : { data: EMPTY_SX, fetchedAt: new Date().toISOString() };
-  const sxDynML = cfg.sxDynamic ? await withFetchedAt(fetchSxBetMoneylineByGame(games, cfg.sxDynamic), emptyTwoWay()) : freshEmptyTwoWay();
-  const pfML = cfg.predictfun ? await withFetchedAt(fetchPredictFunMoneylineByGame(games), emptyTwoWay()) : freshEmptyTwoWay();
-  const cbML = cfg.cloudbet ? await withFetchedAt(fetchCloudbetMoneylineByGame(games, cfg.cloudbet), emptyTwoWay()) : freshEmptyTwoWay();
+  const sx = cfg.sxLeagueId != null && allowV("sxbet") ? await withFetchedAt(fetchSxBetMLBMarkets(games, cfg.sxLeagueId), EMPTY_SX) : { data: EMPTY_SX, fetchedAt: new Date().toISOString() };
+  const sxDynML = cfg.sxDynamic && allow("sxbet", "moneyline") ? await withFetchedAt(fetchSxBetMoneylineByGame(games, cfg.sxDynamic), emptyTwoWay()) : freshEmptyTwoWay();
+  const pfML = cfg.predictfun && allow("predictfun", "moneyline") ? await withFetchedAt(fetchPredictFunMoneylineByGame(games), emptyTwoWay()) : freshEmptyTwoWay();
+  const cbML = cfg.cloudbet && allow("cloudbet", "moneyline") ? await withFetchedAt(fetchCloudbetMoneylineByGame(games, cfg.cloudbet), emptyTwoWay()) : freshEmptyTwoWay();
 
   for (const game of games) {
     const kRows = [
@@ -371,7 +397,11 @@ function marketGameId(market: NormalizedMarket): string | null {
 // Refresh only the game behind a live opportunity, then merge those rows back into
 // the date cache. This keeps the pre-trade freshness check from waiting on every
 // active sport/game/market in the scanner.
-export async function refreshMarketsForOpportunity(date: string, opportunityId: string): Promise<NormalizedMarket[]> {
+export async function refreshMarketsForOpportunity(
+  date: string,
+  opportunityId: string,
+  legVenues?: VenueId[]
+): Promise<NormalizedMarket[]> {
   const current = await getMarkets(date);
   const eventKey = opportunityEventKey(opportunityId);
   if (!eventKey) return current;
@@ -384,6 +414,18 @@ export async function refreshMarketsForOpportunity(date: string, opportunityId: 
   const cfg = SPORTS.find((s) => s.sport === seed.sport && s.league === seed.league);
   if (!cfg) return current;
 
+  // Scope to the opportunity's market type and — when supplied — exactly the arb's leg
+  // venues, so a slow non-leg venue never sits on the pre-trade critical path.
+  const marketType = opportunityMarketType(opportunityId);
+  const scopeVenues = legVenues?.length
+    ? [...new Set(legVenues)]
+    : marketType
+      ? [...new Set(eventMarkets.filter((m) => m.marketType === marketType).map((m) => m.venueId))]
+      : [];
+  const scope: IngestScope | undefined = marketType
+    ? { marketTypes: new Set([marketType]), venues: scopeVenues.length ? new Set(scopeVenues) : undefined }
+    : undefined;
+
   const games = await cfg.fetchGames(date).catch((e) => {
     console.error(`[arbitrage/ingest] targeted ${cfg.league} games fetch failed:`, e);
     return [];
@@ -391,11 +433,26 @@ export async function refreshMarketsForOpportunity(date: string, opportunityId: 
   const game = games.find((g) => g.id === gameId);
   if (!game) return current;
 
-  const fresh = await ingestSportMarkets(cfg, [game]);
-  if (!fresh.markets.length) return current;
+  // Cap the pre-trade refresh: if a venue fetch hangs, fall back to the cached quotes
+  // (the stale-quote gate then decides) instead of blocking placement for minutes.
+  const fresh = await Promise.race([
+    ingestSportMarkets(cfg, [game], scope),
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), REFRESH_TIMEOUT_MS)),
+  ]);
+  if (!fresh || !fresh.markets.length) return current;
 
-  const merged = current.filter((m) => !(m.sport === seed.sport && m.league === seed.league && marketGameId(m) === gameId));
-  merged.push(...fresh.markets);
+  // Replace only the (game, refreshed market type, refreshed venues) rows; keep everything
+  // else so a scoped refresh never drops the venues/markets it didn't re-fetch.
+  const refreshedTypes = scope?.marketTypes;
+  const refreshedVenues = scope?.venues;
+  const isRefreshedRow = (m: NormalizedMarket) =>
+    m.sport === seed.sport &&
+    m.league === seed.league &&
+    marketGameId(m) === gameId &&
+    (!refreshedTypes || refreshedTypes.has(m.marketType)) &&
+    (!refreshedVenues || refreshedVenues.has(m.venueId));
+  const merged = current.filter((m) => !isRefreshedRow(m));
+  merged.push(...fresh.markets.filter((m) => !refreshedVenues || refreshedVenues.has(m.venueId)));
   await saveMarkets(date, merged);
   return merged;
 }

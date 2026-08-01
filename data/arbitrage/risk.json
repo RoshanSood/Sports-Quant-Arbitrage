@@ -4,12 +4,13 @@
   "currentExposure": 0,
   "maxDailyLoss": 500,
   "dailyPnl": 0,
-  "maxOpenPositions": 3,
+  "maxOpenPositions": 0,
   "pauseOnNaked": true,
   "staleQuoteMs": 30000,
   "minLiquidityUsd": 20,
   "minExpectedProfitUsd": 0.15,
   "liquidityStakeBufferMultiple": 3,
-  "maxLiveStakeUsd": 5,
+  "staleDivergenceCents": 40,
+  "maxLiveStakeUsd": 4,
   "perVenueCap": {}
 }
