@@ -115,6 +115,57 @@ export function equalProfitSizing(
   };
 }
 
+// ── Executed-trade economics ──────────────────────────────────────────────────
+//
+// What a trade ACTUALLY cost/earned, derived from the filled legs (real avg prices,
+// filled sizes, per-leg fee in cents) rather than the pre-fill quote. Mirrors the
+// detection-stage math in prepareExecution so the portfolio shows the truth of the fill:
+//   cost    = Σ (contracts × priceCents)/100          (matches the per-leg $ shown in the UI)
+//   payout  = matched contracts (min across legs) × $1 — the guaranteed, hedged quantity;
+//             any overage on one leg is naked directional, not part of the locked payout
+//   profit  = payout − cost − fees
+//   netEdge = profit / cost   (identical to grossEdge − feeFraction; SLIPPAGE_RESERVE is 0)
+export function executedEconomics(
+  legs: Pick<ArbLeg, "priceCents" | "size" | "feeCents">[]
+): { totalCost: number; guaranteedPayout: number; expectedProfit: number; netEdge: number } {
+  if (legs.length === 0) return { totalCost: 0, guaranteedPayout: 0, expectedProfit: 0, netEdge: 0 };
+  const totalCost = round(
+    legs.reduce((s, l) => s + centsToDollars(l.size * l.priceCents), 0),
+    2
+  );
+  const guaranteedPayout = round(Math.min(...legs.map((l) => l.size)), 4);
+  const feeDollars = legs.reduce((s, l) => s + (l.feeCents || 0) / 100, 0);
+  const expectedProfit = round(guaranteedPayout - totalCost - feeDollars, 2);
+  const netEdge = totalCost > 0 ? round(expectedProfit / totalCost, 6) : 0;
+  return { totalCost, guaranteedPayout, expectedProfit, netEdge };
+}
+
+// ── SX.bet $1 minimum-order sizing ────────────────────────────────────────────
+//
+// SX.bet rejects taker orders below $1. Equal-profit sizing buys the SAME contract count on
+// every leg, so scaling all legs by ONE factor keeps the hedge ratio and the edge% identical
+// — it just trades a larger (still fully guaranteed) arb. Given the arb legs, return the
+// uniform scale needed for the SX leg to stake >= minStakeUsd (1 = no change: already >= $1,
+// no SX leg, or unpriced), plus the total stake at that floor (what the live cap must allow).
+export function sxbetMinStakeScale(
+  legs: Pick<ArbLeg, "venueId" | "priceCents" | "size">[],
+  minStakeUsd = 1
+): { scale: number; floorTotalUsd: number } {
+  const sx = legs.find((l) => l.venueId.toLowerCase().includes("sx"));
+  if (!sx || sx.size <= 0) return { scale: 1, floorTotalUsd: 0 };
+  const sxPrice = centsToDollars(sx.priceCents);
+  if (sxPrice <= 0 || sxPrice * sx.size >= minStakeUsd) return { scale: 1, floorTotalUsd: 0 };
+  // Contracts on every leg for the SX leg to clear the minimum; round UP so 4-dp size
+  // rounding downstream can't leave it a hair under $1.
+  const floorContracts = Math.ceil((minStakeUsd / sxPrice) * 1e4) / 1e4;
+  const scale = floorContracts / sx.size;
+  const floorTotalUsd = round(
+    legs.reduce((s, l) => s + centsToDollars(l.priceCents) * round(l.size * scale, 4), 0),
+    2
+  );
+  return { scale, floorTotalUsd };
+}
+
 // ── util ─────────────────────────────────────────────────────────────────────
 
 function round(n: number, dp: number): number {

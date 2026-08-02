@@ -15,6 +15,12 @@ function legDollars(leg: ArbLeg): number {
   return centsToDollars(leg.size * leg.priceCents);
 }
 
+// Executed prices carry sub-cent precision (e.g. a FOK filled at 79.8c). Show up to one
+// decimal, trimming a trailing ".0" so whole-cent fills still read "79c".
+function fmtCents(cents: number): string {
+  return Number(cents.toFixed(1)).toString();
+}
+
 // Parse marketType + line out of a marketId like "kalshi:401..:total:6.5:over".
 function parseMarket(marketId: string): { type: string; line: string | null } {
   const parts = marketId.split(":");
@@ -422,7 +428,7 @@ function LegColumn({ leg }: { leg?: ArbLeg }) {
     <td className="py-3 pr-3 text-right align-top whitespace-nowrap">
       <div className="text-[10px]" style={{ color: s.text }}>{venueDisplayName(leg.venueId)}</div>
       <div className="font-semibold text-white">
-        {leg.decimalOdds.toFixed(2)} <span className="text-gray-400">({leg.priceCents}c)</span>{" "}
+        {leg.decimalOdds.toFixed(2)} <span className="text-gray-400">({fmtCents(leg.priceCents)}c)</span>{" "}
         <span className="text-gray-300 capitalize">{side}</span>
       </div>
       <div className="text-[10px] text-gray-500">{formatDollars(legDollars(leg))}</div>

@@ -15,6 +15,13 @@
 
 export type ExecMode = "dry_run" | "live";
 
+// SX.bet enforces a $1 minimum on every taker order. An arb whose SX leg would stake less
+// is sized UP (equal-profit sizing buys the same contract count on every leg, so scaling
+// all legs by one factor keeps the hedge ratio and the edge% unchanged) until the SX leg
+// clears $1. That $1 floor OVERRIDES the risk stake cap and the agent's target size: a
+// sub-$1 SX order simply cannot be placed, so the choice is "trade it larger" or "skip it".
+export const SXBET_MIN_TAKER_STAKE_USD = 1;
+
 // Default per-trade live cap (dollars) used to SEED risk settings on first run. After
 // that it's edited in the Risk panel (UI), not here — kept low on purpose so the whole
 // path is validated at a few dollars before the cap is ever raised.

@@ -65,9 +65,10 @@ export class PolymarketUsExecutionAdapter implements ExecutionAdapter {
     const execs = r.data.executions ?? [];
     const filled = execs.reduce((s, e) => s + (Number(e.lastShares) || 0), 0);
     const ok = filled > 0;
-    // Volume-weighted avg fill price (cents), falling back to our limit.
+    // Volume-weighted avg fill price (cents), falling back to our limit. Sub-cent
+    // precision so the portfolio shows what was actually paid, not a rounded price.
     const notional = execs.reduce((s, e) => s + (Number(e.lastShares) || 0) * (Number(e.lastPx?.value) || 0), 0);
-    const avgCents = filled > 0 && notional > 0 ? Math.round((notional / filled) * 100) : req.limitPriceCents;
+    const avgCents = filled > 0 && notional > 0 ? Math.round((notional / filled) * 10000) / 100 : req.limitPriceCents;
 
     return {
       ok,

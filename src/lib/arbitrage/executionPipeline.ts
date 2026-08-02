@@ -27,8 +27,9 @@ import { getRiskSettings } from "./riskStore";
 import { getTradesByDate, saveTrade } from "./tradeStore";
 import { appendLog } from "./arbLogStore";
 import { DEFAULT_AGENT } from "./seed";
-import { centsToDollars } from "./arbMath";
+import { centsToDollars, sxbetMinStakeScale } from "./arbMath";
 import { computeFees, feeFractionOfStake } from "./feeEngine";
+import { SXBET_MIN_TAKER_STAKE_USD } from "./execution/config";
 import { getVenues } from "./venueStore";
 import { filterMarketsForAgent } from "./venueFilters";
 import { dateParamToIsoDate } from "./date";
@@ -125,6 +126,10 @@ export type PreparedContext = {
   guaranteedPayout: number;
   expectedProfit: number;
   netAfter: number;
+  // When an SX.bet leg forced the arb to be sized up to clear the $1 order minimum, this is
+  // the resulting total stake — the gate allows it even above the configured live cap. 0 when
+  // no size-up was needed.
+  minLiveStakeFloorUsd: number;
   executionSteps: ExecutionStep[];
 };
 
@@ -275,6 +280,28 @@ export async function prepareExecution(opportunityId: string, date: string, requ
     const executedCents = slip(l.priceCents);
     return { ...l, priceCents: executedCents, decimalOdds: 100 / executedCents, impliedProbability: executedCents / 100 };
   });
+
+  // ── SX.bet $1 minimum order: size the WHOLE arb up so the SX leg clears $1 ──────────
+  // A sub-$1 SX order cannot be placed at all, so this $1 floor overrides the agent's target
+  // size AND the risk live-stake cap (runExecution raises the cap to minLiveStakeFloorUsd).
+  // Scaling every leg by the same factor preserves the hedge ratio and edge% — see the helper.
+  // Example: Polymarket ~$3 / SX ~$0.68 → SX is bumped to $1 and Polymarket scales with it
+  // (~$4.4) so the arb still holds.
+  let minLiveStakeFloorUsd = 0;
+  const { scale: sxScale, floorTotalUsd } = sxbetMinStakeScale(executedLegs, SXBET_MIN_TAKER_STAKE_USD);
+  if (sxScale > 1) {
+    executedLegs.forEach((l) => (l.size = round(l.size * sxScale, 4)));
+    minLiveStakeFloorUsd = floorTotalUsd;
+    const sxLeg = executedLegs.find((l) => l.venueId.toLowerCase().includes("sx"));
+    const sxStakeNow = sxLeg ? centsToDollars(sxLeg.priceCents) * sxLeg.size : 0;
+    addStep(
+      "sxbet_min_order",
+      "SX.bet $1 minimum",
+      "warn",
+      `sized arb up ${sxScale.toFixed(2)}x so SX.bet stakes $${sxStakeNow.toFixed(2)} (>= $${SXBET_MIN_TAKER_STAKE_USD.toFixed(2)} min); overrides target size & live cap`
+    );
+  }
+
   const execTotalCents = executedLegs.reduce((s, l) => s + l.priceCents, 0);
   const grossAfter = (100 - execTotalCents) / execTotalCents;
   const legSizes: Record<string, number> = {};
@@ -333,6 +360,7 @@ export async function prepareExecution(opportunityId: string, date: string, requ
       guaranteedPayout,
       expectedProfit,
       netAfter,
+      minLiveStakeFloorUsd,
       executionSteps,
     },
   };

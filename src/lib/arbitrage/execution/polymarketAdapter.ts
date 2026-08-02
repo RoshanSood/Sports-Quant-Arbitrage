@@ -22,7 +22,7 @@ import { Wallet } from "ethers";
 import { POLYGON_CHAIN_ID, polymarketClobHost, polygonUsdcAddress } from "./chains";
 import type { PolymarketCreds } from "./onchainCreds";
 import { deriveEoa, providerFor, usdcBalance } from "./wallet";
-import type { ExecutionAdapter, OrderRequest, OrderResult } from "./types";
+import type { ExecutionAdapter, FillConfirmation, OrderRequest, OrderResult } from "./types";
 import { clobSignerShim, walletKey } from "./wallet";
 
 // Which signature scheme the funded wallet uses. Default EOA (direct wallet). Users
@@ -125,12 +125,15 @@ type PostOrderResponse = {
 
 
 // avg fill price in cents from the response amounts (USDC paid / shares received),
-// falling back to our limit when the amounts are absent.
-function avgCentsFrom(resp: PostOrderResponse, limitCents: number): number {
+// falling back to our limit when the amounts are absent. Kept at sub-cent precision
+// (a fill at 79.8c must report 79.8, not round to 80) so the portfolio shows what was
+// actually paid — the FOK crosses the ask ladder and often fills a few tenths above the
+// detected top-of-book.
+export function avgCentsFrom(resp: PostOrderResponse, limitCents: number): number {
   const paid = Number(resp.makingAmount);
   const shares = Number(resp.takingAmount);
   if (Number.isFinite(paid) && Number.isFinite(shares) && shares > 0) {
-    return Math.round((paid / shares) * 100);
+    return roundTo((paid / shares) * 100, 2);
   }
   return limitCents;
 }
@@ -149,9 +152,80 @@ export function polymarketFokBuyAmount(sizeContracts: number, limitPriceCents: n
   return roundTo(sizeContracts * (limitPriceCents / 100), 2);
 }
 
-function filledContractsFrom(resp: PostOrderResponse, fallback: number): number {
+// A live-book quote for how much a marketable FOK BUY can ACTUALLY fill at/below our price.
+// Sizing the order to this (instead of the arb-detected size) is what lets the FOK fill
+// rather than get killed for asking more than the book holds.
+export type PolymarketFillQuote = {
+  limitPriceCents: number; // worst ask we'd cross (send the FOK at >= this so it fills)
+  avgPriceCents: number; // volume-weighted fill price
+  availableContracts: number; // contracts fillable at <= maxPriceCents
+  availableStakeUsd: number;
+};
+
+function readAskLevels(asks?: Array<{ price?: string; size?: string }>): Array<{ price: number; size: number }> {
+  return (asks ?? [])
+    .map((a) => ({ price: Number(a.price), size: Number(a.size) }))
+    .filter((a) => Number.isFinite(a.price) && Number.isFinite(a.size) && a.price > 0 && a.price < 1 && a.size > 0)
+    .sort((a, b) => a.price - b.price);
+}
+
+// Walk the ask ladder up to maxPriceCents, accumulating fillable contracts (capped at
+// targetContracts). Returns null when nothing is offered at or under our price.
+export function polymarketFillQuoteFromAsks(
+  asks: Array<{ price?: string; size?: string }> | undefined,
+  maxPriceCents: number,
+  targetContracts: number
+): PolymarketFillQuote | null {
+  const levels = readAskLevels(asks).filter((a) => a.price * 100 <= maxPriceCents + 1e-9);
+  if (!levels.length) return null;
+  let remaining = Math.max(0, targetContracts);
+  let contracts = 0;
+  let cost = 0;
+  let worstPrice = 0;
+  for (const level of levels) {
+    if (remaining <= 0) break;
+    const take = Math.min(level.size, remaining);
+    contracts += take;
+    cost += take * level.price;
+    worstPrice = Math.max(worstPrice, level.price);
+    remaining -= take;
+  }
+  if (contracts <= 0 || cost <= 0) return null;
+  return {
+    limitPriceCents: Math.ceil(worstPrice * 10_000) / 100,
+    avgPriceCents: (cost / contracts) * 100,
+    availableContracts: contracts,
+    availableStakeUsd: cost,
+  };
+}
+
+// Read the live CLOB ask book for this token and quote how much a FOK BUY can fill at or
+// below maxPriceCents. Used to right-size the order pre-send so it fills instead of killing.
+export async function quotePolymarketFokBuy(
+  req: OrderRequest,
+  creds?: PolymarketCreds,
+  maxPriceCents: number = req.limitPriceCents
+): Promise<PolymarketFillQuote | null> {
+  const key = walletKey("polymarket", creds?.key);
+  if (!key || !req.nativeSide) return null;
+  const client = await buildClient(key, creds?.funder, creds?.sigType);
+  const book = await client.getOrderBook(req.nativeSide);
+  return polymarketFillQuoteFromAsks(book.asks, maxPriceCents, req.sizeContracts);
+}
+
+// Ground-truth fill decision from a FOK postOrder response. A real fill reports the actual
+// shares received in `takingAmount`; absent/zero shares (or an explicit unmatched status)
+// means the order was killed — report ZERO fill, never the requested size. This is the fix
+// for phantom "filled" logs where the CLOB echoed an order hash but nothing matched.
+export function polymarketFillFromResponse(
+  resp: PostOrderResponse,
+  requestedContracts: number
+): { ok: boolean; filledContracts: number; status: "filled" | "partial" | "unfilled" } {
   const shares = Number(resp.takingAmount);
-  return Number.isFinite(shares) && shares > 0 ? shares : fallback;
+  const explicitlyUnmatched = /unmatch|cancel|kill|not.?filled|reject/i.test(resp.status ?? "");
+  const filled = Number.isFinite(shares) && shares > 0 && !explicitlyUnmatched ? shares : 0;
+  const ok = filled > 0 && !resp.error && !resp.errorMsg;
+  return { ok, filledContracts: filled, status: ok ? (filled >= requestedContracts ? "filled" : "partial") : "unfilled" };
 }
 
 function orderError(resp: PostOrderResponse): string {
@@ -221,20 +295,40 @@ export class PolymarketExecutionAdapter implements ExecutionAdapter {
       const signed = await client.createMarketOrder({ tokenID, amount, price, side: Side.BUY, orderType: OrderType.FOK });
       const resp = (await client.postOrder(signed, OrderType.FOK)) as PostOrderResponse;
 
-      const ok = resp.success === true && Boolean(resp.orderID);
-      // FOK is all-or-nothing: success ⇒ fully filled, else nothing filled.
-      const filled = ok ? filledContractsFrom(resp, req.sizeContracts) : 0;
+      // Decide fill from ACTUAL shares received, not from success+orderID (see helper).
+      const { ok, filledContracts, status } = polymarketFillFromResponse(resp, req.sizeContracts);
       return {
         ok,
         orderId: resp.orderID ?? null,
-        filledContracts: filled,
+        filledContracts,
         avgPriceCents: avgCentsFrom(resp, req.limitPriceCents),
-        status: ok ? "filled" : "unfilled",
+        status,
         error: ok ? undefined : orderError(resp),
         raw: resp,
       };
     } catch (e) {
       return reject(req, String(e).slice(0, 200));
+    }
+  }
+
+  // Re-query the CLOB for a matched trade created by THIS order on the token, so the
+  // settlement reconciler can confirm a real fill instead of trusting the placement ack.
+  // Returns "settled" (with the on-chain share count) when a matching trade is found,
+  // "pending" when none is found yet (could be indexing lag — reconcile keeps polling; a
+  // false "failed" here would wrongly flag a genuine hedge as naked), "unknown" on error.
+  async confirmFill(orderId: string, req: OrderRequest): Promise<FillConfirmation> {
+    const key = this.key();
+    const tokenID = req.nativeSide;
+    if (!key || !tokenID || !orderId) return { status: "unknown" };
+    try {
+      const client = await buildClient(key, this.funder(), this.sigType());
+      const trades = (await client.getTrades({ asset_id: tokenID })) as Array<{ taker_order_id?: string; size?: string; status?: string }>;
+      const ours = (trades ?? []).filter((t) => t.taker_order_id === orderId && !/fail|cancel/i.test(t.status ?? ""));
+      const shares = ours.reduce((sum, t) => sum + (Number(t.size) || 0), 0);
+      if (shares > 0) return { status: "settled", filledContracts: shares };
+      return { status: "pending" };
+    } catch {
+      return { status: "unknown" };
     }
   }
 }

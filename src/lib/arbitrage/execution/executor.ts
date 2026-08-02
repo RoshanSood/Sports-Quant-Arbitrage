@@ -6,14 +6,18 @@
 import type { ArbLeg, Trade } from "@/types/arbitrage";
 import { saveTrade } from "../tradeStore";
 import { prepareExecution, verifyPostFill, writeLog, type ExecutionOutcome } from "../executionPipeline";
-import { resolveExecutionMode, type ExecMode } from "./config";
+import { resolveExecutionMode, SXBET_MIN_TAKER_STAKE_USD, type ExecMode } from "./config";
 import { getAdapter, venueSupportsLive, type ExecCreds } from "./registry";
 import { applyReconciliation, reconcileLegs, type LegReconciliation } from "./reconcile";
 import { checkKalshiFillability } from "./kalshiAdapter";
 import { checkSxFillability } from "./sxbetAdapter";
+import { quotePolymarketFokBuy } from "./polymarketAdapter";
+import { computeFees } from "../feeEngine";
+import { executedEconomics } from "../arbMath";
 import type { ExecutionAdapter, OrderRequest, OrderResult } from "./types";
 
-export const SXBET_MIN_TAKER_STAKE_USD = 1;
+// Re-exported for callers/tests that reference it from the executor module.
+export { SXBET_MIN_TAKER_STAKE_USD };
 
 export function liveVenueMinimumStakeBlockers(legs: ArbLeg[]): string[] {
   return legs.flatMap((leg) => {
@@ -113,7 +117,9 @@ export async function runExecution(
     killSwitch: ctx.risk.killSwitch,
     venues: ctx.venues,
     stakeUsd: ctx.totalStake,
-    maxLiveStakeUsd: ctx.risk.maxLiveStakeUsd,
+    // The SX.bet $1-minimum floor overrides the configured live cap: when an arb had to be
+    // sized up so its SX leg clears $1, that (larger) stake must still be allowed to fire.
+    maxLiveStakeUsd: Math.max(ctx.risk.maxLiveStakeUsd, ctx.minLiveStakeFloorUsd),
     venuesSupportLive: venueSupportsLive(ctx.venues, creds),
   });
 
@@ -178,7 +184,7 @@ export async function runExecution(
   // A cross-venue arb must fire both legs at once: placing them sequentially leaves a
   // window where leg A is filled and leg B's price has moved, creating naked exposure.
   const adapters: ExecutionAdapter[] = ctx.executedLegs.map((leg) => getAdapter(leg.venueId, mode, creds));
-  const requests: OrderRequest[] = ctx.executedLegs.map((leg) => ({
+  let requests: OrderRequest[] = ctx.executedLegs.map((leg) => ({
     venueId: leg.venueId,
     marketId: leg.marketId,
     nativeMarketId: leg.nativeMarketId,
@@ -215,6 +221,50 @@ export async function runExecution(
   let placed: OrderResult[];
   const sequencingOrder = mode === "live" ? fragileVenueFirstOrder(requests) : requests.map((_, i) => i);
   const shouldSequence = mode === "live" && shouldSequenceFragileVenuePair(requests);
+
+  // ── Polymarket anchor preflight: size the FOK to the LIVE book so it actually fills ──
+  // Polymarket is the anchor (placed first). A FOK is killed when it asks for more than the
+  // book holds at our price — that's what left legs unfilled. Read the live ask depth and
+  // resize the anchor (and the hedge, so both legs match) to what's fillable at <= our limit
+  // (+1c cushion for small moves). If nothing is fillable at our price the arb has moved away,
+  // so we leave it: the order won't fill and the hedge is skipped — no naked exposure.
+  const anchorIdx = shouldSequence ? sequencingOrder[0] : -1;
+  if (anchorIdx >= 0 && requests[anchorIdx].venueId === "polymarket") {
+    const maxPrice = Math.min(99, requests[anchorIdx].limitPriceCents + 1);
+    const quote = await quotePolymarketFokBuy(requests[anchorIdx], creds?.polymarket, maxPrice).catch(() => null);
+    const nextSize = quote ? Math.floor(Math.min(requests[anchorIdx].sizeContracts, quote.availableContracts) * 1e4) / 1e4 : 0;
+    // If an SX.bet leg is hedging this anchor, the resized size must still keep the SX leg at
+    // or above its $1 order minimum. Shrinking below that would place a sub-$1 SX order that
+    // SX rejects AFTER the Polymarket anchor already filled — a naked position. So require the
+    // SX floor here: if Polymarket's book can't cover it, skip (anchor left unfilled, no naked).
+    const sxHedge = requests.find((r, i) => i !== anchorIdx && r.venueId.toLowerCase().includes("sx"));
+    const sxFloorContracts = sxHedge && sxHedge.limitPriceCents > 0 ? SXBET_MIN_TAKER_STAKE_USD / (sxHedge.limitPriceCents / 100) : 0;
+    if (quote && nextSize > 0 && nextSize + 1e-9 >= sxFloorContracts) {
+      const nextLimit = Math.min(99, Math.max(requests[anchorIdx].limitPriceCents, quote.limitPriceCents));
+      requests = requests.map((r, i) => ({ ...r, sizeContracts: nextSize, limitPriceCents: i === anchorIdx ? nextLimit : r.limitPriceCents }));
+      executionSteps.push({
+        key: "polymarket_book_preflight",
+        label: "Polymarket book preflight",
+        status: "pass",
+        detail: `resized to ${nextSize.toFixed(4)} fillable contracts at <= ${nextLimit.toFixed(2)}c (both legs matched)`,
+      });
+    } else if (quote && nextSize > 0 && sxHedge) {
+      executionSteps.push({
+        key: "polymarket_book_preflight",
+        label: "Polymarket book preflight",
+        status: "warn",
+        detail: `Polymarket depth ${nextSize.toFixed(4)} ctr below SX.bet $${SXBET_MIN_TAKER_STAKE_USD.toFixed(2)} minimum (needs ${sxFloorContracts.toFixed(4)} ctr) — skipping, anchor left unfilled (no naked)`,
+      });
+    } else {
+      executionSteps.push({
+        key: "polymarket_book_preflight",
+        label: "Polymarket book preflight",
+        status: "warn",
+        detail: `no ask depth at <= ${maxPrice.toFixed(2)}c — arb moved away, order left unfilled (hedge skipped, no naked)`,
+      });
+    }
+  }
+
   if (shouldSequence) {
     placed = new Array<OrderResult>(requests.length);
     const [first, ...rest] = sequencingOrder;
@@ -296,6 +346,13 @@ export async function runExecution(
     return { ...l, priceCents: cents, decimalOdds: 100 / cents, impliedProbability: cents / 100, size: r.filledContracts || (status === "failed" ? 0 : l.size) };
   });
 
+  // Recompute economics from what ACTUALLY filled (real avg prices + filled sizes) so the
+  // portfolio shows the truth of the fill, not the pre-trade quote. Fees are re-derived on
+  // the actual sizes; cost/profit/edge come from the shared executed-economics helper.
+  const legFees = computeFees(legs);
+  legs.forEach((l, i) => (l.feeCents = legFees[i].feeCents));
+  const econ = executedEconomics(legs);
+
   const opened = new Date().toISOString();
   const tradeMode = mode === "live" ? "live" : "paper";
   const trade: Trade | null =
@@ -310,10 +367,10 @@ export async function runExecution(
           legs,
           orderIds: results.map((r) => r.orderId),
           fillStatus,
-          totalCost: ctx.totalStake,
-          expectedProfit: ctx.expectedProfit,
+          totalCost: econ.totalCost,
+          expectedProfit: econ.expectedProfit,
           realizedPnl: null,
-          netEdge: ctx.netAfter,
+          netEdge: econ.netEdge,
           clvDrift: null,
           status,
           openedAt: opened,
@@ -341,7 +398,7 @@ export async function runExecution(
     ctx.agent,
     ctx.opportunityMatchup,
     ctx.venues,
-    ctx.netAfter,
+    trade ? econ.netEdge : ctx.netAfter,
     result === "halted" ? "halted" : result,
     reasonCode,
     reason,
@@ -355,8 +412,8 @@ export async function runExecution(
       reconciliation: reconciliation.length
         ? reconciliation.map((rc) => ({ venue: rc.venue, orderId: rc.orderId, settlement: rc.confirmation?.status ?? "n/a" }))
         : undefined,
-      totalCost: ctx.totalStake,
-      expectedProfit: ctx.expectedProfit,
+      totalCost: econ.totalCost,
+      expectedProfit: econ.expectedProfit,
       postFill,
     },
     date,
