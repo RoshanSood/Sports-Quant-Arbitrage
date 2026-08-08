@@ -49,7 +49,7 @@ export function startBucket(startTime: string, windowMinutes = START_WINDOW_MINU
 export function buildEventKey(market: NormalizedMarket): string {
   const sport = normalizeSport(market.sport);
   const league = normalizeLeague(market.league);
-  const teams = market.teams.map(normalizeTeamName).sort();
+  const teams = market.teams.map((team) => normalizeTeamName(team, market.sport)).sort();
   const bucket = startBucket(market.startTime);
   return `${sport}:${league}:${teams[0]}|${teams[1]}:${bucket}`;
 }
@@ -66,8 +66,8 @@ function startDeltaMinutes(a: string, b: string): number {
 // meaningful when feeds diverge.
 function confidenceScore(a: NormalizedMarket, b: NormalizedMarket): number {
   const teamScore =
-    normalizeTeamName(a.teams[0]) === normalizeTeamName(b.teams[0]) &&
-    normalizeTeamName(a.teams[1]) === normalizeTeamName(b.teams[1])
+    normalizeTeamName(a.teams[0], a.sport) === normalizeTeamName(b.teams[0], b.sport) &&
+    normalizeTeamName(a.teams[1], a.sport) === normalizeTeamName(b.teams[1], b.sport)
       ? 1
       : 0;
   const delta = startDeltaMinutes(a.startTime, b.startTime);

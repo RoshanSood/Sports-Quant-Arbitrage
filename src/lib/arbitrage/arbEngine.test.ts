@@ -154,6 +154,35 @@ describe("arbEngine — 3-way soccer (1X2)", () => {
     expect(opportunities[0].totalCostCents).toBe(95);
   });
 
+  it("prefers executable MLS legs over cheaper zero-liquidity legs", () => {
+    const teams: [string, string] = ["Charlotte", "Chicago"];
+    const { opportunities } = detectML([
+      ml("polymarket", "home", 85, "soccer", teams),
+      ml("sxbet", "home", 90.625, "soccer", teams),
+      ml("sxbet", "draw", 11.625, "soccer", teams),
+      ml("cloudbet", "draw", 17.24, "soccer", teams),
+      ml("cloudbet", "away", 1, "soccer", teams),
+      ml("sxbet", "away", 1.25, "soccer", teams),
+    ].map((m) => (m.venueId === "cloudbet" ? { ...m, liquidityUsd: 0 } : m)));
+    expect(opportunities).toHaveLength(1);
+    expect(opportunities[0].totalCostCents).toBe(97.875);
+    expect(opportunities[0].legs.find((l) => l.outcome === "away")?.venueId).toBe("sxbet");
+  });
+
+  it("adds MLS moneyline near-arbs to diagnostics when no tradeable edge exists", () => {
+    const { opportunities, rejects, watch } = detectML([
+      ml("sxbet", "home", 47.5, "soccer", ["Seattle", "Portland"]),
+      ml("polymarket", "draw", 24, "soccer", ["Seattle", "Portland"]),
+      ml("polymarket", "away", 29, "soccer", ["Seattle", "Portland"]),
+      ml("sxbet", "away", 29, "soccer", ["Seattle", "Portland"]),
+    ]);
+    expect(opportunities).toHaveLength(0);
+    expect(rejects.some((r) => r.detail.includes("1X2 basket cost 100.50c"))).toBe(true);
+    expect(watch).toHaveLength(1);
+    expect(watch[0].totalCostCents).toBe(100.5);
+    expect(watch[0].venuePrices.some((v) => v.drawCents === 24)).toBe(true);
+  });
+
   it("rejects a single-venue soccer 'arb' (all three outcomes on one book)", () => {
     const { opportunities } = detectML([
       ml("cloudbet", "home", 40),
@@ -173,6 +202,21 @@ describe("arbEngine — 2-way tennis moneyline", () => {
     expect(opportunities).toHaveLength(1);
     expect(opportunities[0].legs).toHaveLength(2);
     expect(opportunities[0].totalCostCents).toBe(93);
+  });
+
+  it("adds ATP moneyline near-arbs to diagnostics when no tradeable edge exists", () => {
+    const { opportunities, rejects, watch } = detectML([
+      ml("polymarket", "home", 56, "tennis", ["Alejandro Tabilo", "Denis Shapovalov"]),
+      ml("sxbet", "away", 45, "tennis", ["Alejandro Tabilo", "Denis Shapovalov"]),
+      ml("sxbet", "home", 58, "tennis", ["Alejandro Tabilo", "Denis Shapovalov"]),
+    ]);
+
+    expect(opportunities).toHaveLength(0);
+    expect(rejects.some((r) => r.detail.includes("moneyline basket cost 101.00c"))).toBe(true);
+    expect(watch).toHaveLength(1);
+    expect(watch[0].totalCostCents).toBe(101);
+    expect(watch[0].venuePrices.some((v) => v.homeCents === 56)).toBe(true);
+    expect(watch[0].venuePrices.every((v) => v.drawCents == null)).toBe(true);
   });
 });
 

@@ -248,13 +248,20 @@ export type MatchMapData = {
   stats: MatchStats;
 };
 
-// One game's main total line, monitored live even when there's no tradeable arb.
+// One game's monitored line or moneyline basket, even when there's no tradeable arb.
 export type MainLineWatch = {
   eventKey: string;
   matchup: string;
   line: number;
-  venuePrices: { venueId: VenueId; overCents: number | null; underCents: number | null }[];
-  totalCostCents: number; // cheapest cross-venue over + under
+  venuePrices: {
+    venueId: VenueId;
+    overCents?: number | null;
+    underCents?: number | null;
+    homeCents?: number | null;
+    drawCents?: number | null;
+    awayCents?: number | null;
+  }[];
+  totalCostCents: number; // cheapest complete outcome basket
   grossEdge: number; // may be <= 0
   netEdge: number; // may be <= 0
   divergenceCents: number; // cross-venue over-price disagreement

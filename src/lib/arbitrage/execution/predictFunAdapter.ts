@@ -15,7 +15,7 @@ import { ChainId, OrderBuilder, Side, type Book } from "@predictdotfun/sdk";
 import { JsonRpcProvider, Wallet, formatUnits, parseUnits } from "ethers";
 import { BNB_USDT_DECIMALS, bnbRpcUrl } from "./chains";
 import type { PredictFunCreds } from "./onchainCreds";
-import type { ExecutionAdapter, OrderRequest, OrderResult } from "./types";
+import type { ExecutableOrderQuote, ExecutionAdapter, OrderRequest, OrderResult } from "./types";
 
 const API = "https://api.predict.fun";
 
@@ -78,6 +78,43 @@ async function orderbook(marketId: string, apiKey: string): Promise<PfBook> {
   const book = normalizeBook(marketId, body);
   if (!book || book.asks.length === 0) throw new Error("predict.fun orderbook has no ask liquidity");
   return book;
+}
+
+export async function quotePredictFunOrder(req: OrderRequest, creds?: PredictFunCreds): Promise<ExecutableOrderQuote> {
+  const apiKey = pfApiKey(creds);
+  const marketId = req.nativeMarketId;
+  if (!apiKey || !marketId) {
+    return { ok: false, priceCents: req.limitPriceCents, averagePriceCents: req.limitPriceCents, availableContracts: 0, reason: "predict.fun API key / market id unavailable" };
+  }
+  try {
+    const book = await orderbook(marketId, apiKey);
+    let remaining = req.sizeContracts;
+    let contracts = 0;
+    let costCents = 0;
+    let worst = 0;
+    for (const [rawPrice, quantity] of book.asks) {
+      const priceCents = rawPrice <= 1 ? rawPrice * 100 : rawPrice;
+      if (priceCents > req.limitPriceCents) continue;
+      const take = Math.min(remaining, quantity);
+      contracts += take;
+      costCents += take * priceCents;
+      worst = priceCents;
+      remaining -= take;
+      if (remaining <= 0) break;
+    }
+    if (contracts <= 0) {
+      return { ok: false, priceCents: req.limitPriceCents, averagePriceCents: req.limitPriceCents, availableContracts: 0, reason: "predict.fun has no ask depth within the limit" };
+    }
+    return {
+      ok: contracts + 1e-9 >= req.sizeContracts,
+      priceCents: worst,
+      averagePriceCents: costCents / contracts,
+      availableContracts: contracts,
+      reason: contracts + 1e-9 >= req.sizeContracts ? undefined : `predict.fun fillable size ${contracts.toFixed(2)} < ${req.sizeContracts.toFixed(2)}`,
+    };
+  } catch (error) {
+    return { ok: false, priceCents: req.limitPriceCents, averagePriceCents: req.limitPriceCents, availableContracts: 0, reason: String(error).slice(0, 160) };
+  }
 }
 
 function asRecord(v: unknown): JsonRecord | null {
@@ -256,6 +293,10 @@ export class PredictFunExecutionAdapter implements ExecutionAdapter {
     } catch {
       return null;
     }
+  }
+
+  quoteOrder(req: OrderRequest): Promise<ExecutableOrderQuote> {
+    return quotePredictFunOrder(req, this.creds);
   }
 
   async placeOrder(req: OrderRequest): Promise<OrderResult> {

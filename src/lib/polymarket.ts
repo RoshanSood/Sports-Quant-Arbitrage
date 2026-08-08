@@ -3,6 +3,7 @@ import { teamMatchesTitle, teamsMatch } from "./teamNormalization";
 import type { VenueTotalLine, VenueTwoWay, VenueSpread } from "./kalshi";
 import type { ArbGame } from "./arbitrage/sports";
 import { pacificDateFromIso } from "./arbitrage/date";
+import { isFullGameMarketTitle } from "./arbitrage/marketSegment";
 
 const GAMMA_API = "https://gamma-api.polymarket.com";
 
@@ -186,6 +187,11 @@ function formatVolume(vol: string | number | null | undefined): string | null {
 type MarketType = "moneyline" | "spread" | "total" | null;
 
 function classifyMarket(market: PolymarketMarket): MarketType {
+  // Only FULL-GAME markets are tradeable. A game SEGMENT (1st 5 innings / F5, a single
+  // inning, a half, a period, a quarter) shares O/U line numbers with full-game totals, so
+  // it would be matched cross-segment against another book's full-game line — a false arb
+  // that settles on a different outcome. Drop segments entirely (total / moneyline / spread).
+  if (!isFullGameMarketTitle(market.question)) return null;
   const q = market.question.toLowerCase();
   if (/o\/u|over|under/.test(q) && !q.includes("spread")) return "total";
   if (q.startsWith("spread:") || q.includes("spread:")) return "spread";
@@ -202,6 +208,18 @@ function classifyMarket(market: PolymarketMarket): MarketType {
     return "moneyline";
   }
   return null;
+}
+
+function isMainBinaryWinnerMarket(market: PolymarketMarket, game: ArbGame, sport?: string): boolean {
+  const { outcomes } = parseOutcomes(market);
+  if (outcomes.length !== 2) return false;
+  const q = market.question.toLowerCase();
+  if (/\b(completed|set|sets|game|games|o\/u|over|under|spread|handicap|correct|exact|score)\b/.test(q)) {
+    return false;
+  }
+  const away = outcomes.some((o) => teamsMatch(o, game.awayTeam.name, sport));
+  const home = outcomes.some((o) => teamsMatch(o, game.homeTeam.name, sport));
+  return away && home;
 }
 
 function signedLine(val: number): string {
@@ -295,20 +313,22 @@ function buildTotalOptions(market: PolymarketMarket): OddsOption[] {
 }
 
 // Check whether a Polymarket event matches an ESPN game (order-independent)
-function gameMatchesEvent(game: ArbGame, event: PolymarketEvent): boolean {
+function gameMatchesEvent(game: ArbGame, event: PolymarketEvent, sport?: string): boolean {
   const title = event.title;
 
   const awayMatches = teamMatchesTitle(
     game.awayTeam.name,
     game.awayTeam.shortName,
     game.awayTeam.abbreviation,
-    title
+    title,
+    sport
   );
   const homeMatches = teamMatchesTitle(
     game.homeTeam.name,
     game.homeTeam.shortName,
     game.homeTeam.abbreviation,
-    title
+    title,
+    sport
   );
 
   return awayMatches && homeMatches;
@@ -330,6 +350,18 @@ function eventHasLivePrices(event: PolymarketEvent): boolean {
     const { prices } = parseOutcomes(m);
     return hasRealPrices(prices);
   });
+}
+
+function usableWinnerQuestion(question: string): boolean {
+  const q = question.toLowerCase();
+  if (!/\b(win|winner)\b/.test(q)) return false;
+  return !/\b(spread|handicap|total|over|under|score|scores|goal|goals|corner|card|half|period|exact|by)\b/.test(q);
+}
+
+function usableDrawQuestion(question: string): boolean {
+  const q = question.toLowerCase();
+  if (!/\b(draw|tie)\b/.test(q)) return false;
+  return !/\b(half|period|score|scores|goal|goals|corner|card|exact)\b/.test(q);
 }
 
 export async function fetchPolymarketData(
@@ -503,7 +535,8 @@ export async function fetchPolymarketTotalsByGame(
 // Polymarket MLB moneyline per game (home/away buy costs at the ask).
 export async function fetchPolymarketMoneylineByGame(
   games: ArbGame[],
-  tag: string = "mlb"
+  tag: string = "mlb",
+  sport?: string
 ): Promise<Map<string, VenueTwoWay>> {
   const result = new Map<string, VenueTwoWay>();
   if (!games.length) return result;
@@ -511,20 +544,23 @@ export async function fetchPolymarketMoneylineByGame(
   const events = await fetchMLBEvents(tag);
 
   for (const game of games) {
-    const matched = events.filter((ev) => gameMatchesEvent(game, ev));
+    const matched = events.filter((ev) => gameMatchesEvent(game, ev, sport));
     if (matched.length === 0) continue;
     const event = pickBestEvent(matched, game.date);
     if (!event) continue;
 
-    const ml = (event.markets ?? []).find((m) => classifyMarket(m) === "moneyline");
+    const ml =
+      sport === "tennis"
+        ? (event.markets ?? []).find((m) => isMainBinaryWinnerMarket(m, game, sport))
+        : (event.markets ?? []).find((m) => classifyMarket(m) === "moneyline");
     if (!ml) continue;
     const { outcomes, prices, tokenIds } = parseOutcomes(ml);
     if (outcomes.length < 2 || isSettledMarket(prices)) continue;
 
     // Which outcome token is the away team? bestBid/bestAsk are for outcomes[0].
     const outcome0IsAway =
-      teamsMatch(outcomes[0], game.awayTeam.name) ||
-      outcomes[0].toLowerCase().includes(game.awayTeam.abbreviation.toLowerCase());
+      teamsMatch(outcomes[0], game.awayTeam.name, sport) ||
+      (sport !== "tennis" && outcomes[0].toLowerCase().includes(game.awayTeam.abbreviation.toLowerCase()));
     const awayTokenId = outcome0IsAway ? tokenIds[0] ?? undefined : tokenIds[1] ?? undefined;
     const homeTokenId = outcome0IsAway ? tokenIds[1] ?? undefined : tokenIds[0] ?? undefined;
 
@@ -589,20 +625,28 @@ export async function fetchPolymarketWinnerByGame(
   };
   const yesToken = (m: PolymarketMarket): string | undefined => parseOutcomes(m).tokenIds[0] ?? undefined;
   const liqOf = (m: PolymarketMarket): number => (typeof m.liquidityNum === "number" ? m.liquidityNum : 0);
+  const sport = threeWay ? "soccer" : "tennis";
   const namesTeam = (q: string, t: { name: string; shortName: string; abbreviation: string }) =>
-    teamMatchesTitle(t.name, t.shortName, t.abbreviation, q);
+    teamMatchesTitle(t.name, t.shortName, t.abbreviation, q, sport);
+  const bestByAsk = (markets: PolymarketMarket[]): PolymarketMarket | null =>
+    markets
+      .map((market) => ({ market, ask: yesAsk(market) }))
+      .filter((m): m is { market: PolymarketMarket; ask: number } => m.ask != null)
+      .sort((a, b) => a.ask - b.ask || liqOf(b.market) - liqOf(a.market))[0]?.market ?? null;
 
   for (const game of games) {
-    const matchedEvents = events.filter((ev) => gameMatchesEvent(game, ev));
+    const matchedEvents = events.filter((ev) => gameMatchesEvent(game, ev, sport));
     if (matchedEvents.length === 0) continue;
-    const event = pickBestEvent(matchedEvents, game.date);
-    if (!event) continue;
-    const markets = event.markets ?? [];
+    const sameDateEvents = matchedEvents.filter((ev) => eventDateMatches(ev, game.date));
+    const liveEvents = sameDateEvents.filter(eventHasLivePrices);
+    const candidateEvents = liveEvents.length ? liveEvents : sameDateEvents;
+    if (!candidateEvents.length) continue;
+    const markets = candidateEvents.flatMap((event) => event.markets ?? []);
     if (!markets.length) continue;
 
     // The per-outcome "win" markets name exactly one team; the draw market says draw/tie.
-    const homeM = markets.find((m) => /\bwin\b/i.test(m.question) && namesTeam(m.question, game.homeTeam) && !namesTeam(m.question, game.awayTeam));
-    const awayM = markets.find((m) => /\bwin\b/i.test(m.question) && namesTeam(m.question, game.awayTeam) && !namesTeam(m.question, game.homeTeam));
+    const homeM = bestByAsk(markets.filter((m) => usableWinnerQuestion(m.question) && namesTeam(m.question, game.homeTeam) && !namesTeam(m.question, game.awayTeam)));
+    const awayM = bestByAsk(markets.filter((m) => usableWinnerQuestion(m.question) && namesTeam(m.question, game.awayTeam) && !namesTeam(m.question, game.homeTeam)));
     if (!homeM || !awayM) continue;
     const homeAsk = yesAsk(homeM);
     const awayAsk = yesAsk(awayM);
@@ -610,7 +654,7 @@ export async function fetchPolymarketWinnerByGame(
 
     let drawFields: Partial<VenueTwoWay> = {};
     if (threeWay) {
-      const drawM = markets.find((m) => /\b(draw|tie)\b/i.test(m.question));
+      const drawM = bestByAsk(markets.filter((m) => usableDrawQuestion(m.question)));
       const drawAsk = drawM ? yesAsk(drawM) : null;
       if (drawM == null || drawAsk == null) continue; // incomplete 1X2 → skip
       drawFields = { drawCents: Math.round(drawAsk * 100), drawLiquidityUsd: liqOf(drawM), drawTokenId: yesToken(drawM) };
@@ -624,7 +668,7 @@ export async function fetchPolymarketWinnerByGame(
       marketId: homeM.id,
       homeTokenId: yesToken(homeM),
       awayTokenId: yesToken(awayM),
-      sourceStartTime: polymarketGameDate(event) ?? game.date,
+      sourceStartTime: polymarketGameDate(candidateEvents[0]) ?? game.date,
       ...drawFields,
     });
   }

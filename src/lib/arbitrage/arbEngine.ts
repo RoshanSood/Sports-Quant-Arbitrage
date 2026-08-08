@@ -107,31 +107,38 @@ function requiredOutcomes(ev: MatchedEvent): Outcome[] {
 // e.g. a soccer 1X2 arb buying home+draw on one book and away on another — which is what
 // makes 3-way arbs viable across only two venues. Returns null if any outcome is missing
 // or no ≥2-venue combination exists.
-function bestCrossVenueSelection(legs: MatchedLeg[], outcomes: Outcome[]): MatchedLeg[] | null {
-  const byOutcome = outcomes.map((o) =>
-    legs.filter((l) => l.outcome === o).sort((a, b) => a.priceCents - b.priceCents)
-  );
-  if (byOutcome.some((g) => g.length === 0)) return null;
+function bestCrossVenueSelection(legs: MatchedLeg[], outcomes: Outcome[], minLiquidityUsd = 0): MatchedLeg[] | null {
+  const buildGroups = (liquidityFloor: number) =>
+    outcomes.map((o) =>
+      legs
+        .filter((l) => l.outcome === o && l.liquidityUsd >= liquidityFloor)
+        .sort((a, b) => a.priceCents - b.priceCents)
+    );
 
-  let bestLegs: MatchedLeg[] | null = null;
-  let bestCost = Infinity;
-  const pick = (i: number, acc: MatchedLeg[], cost: number) => {
-    if (cost >= bestCost) return; // prune: can't beat the incumbent
-    if (i === byOutcome.length) {
-      if (new Set(acc.map((l) => l.venueId)).size >= 2) {
-        bestLegs = [...acc];
-        bestCost = cost;
+  const search = (byOutcome: MatchedLeg[][]): MatchedLeg[] | null => {
+    if (byOutcome.some((g) => g.length === 0)) return null;
+    let bestLegs: MatchedLeg[] | null = null;
+    let bestCost = Infinity;
+    const pick = (i: number, acc: MatchedLeg[], cost: number) => {
+      if (cost >= bestCost) return; // prune: can't beat the incumbent
+      if (i === byOutcome.length) {
+        if (new Set(acc.map((l) => l.venueId)).size >= 2) {
+          bestLegs = [...acc];
+          bestCost = cost;
+        }
+        return;
       }
-      return;
-    }
-    for (const leg of byOutcome[i]) {
-      acc.push(leg);
-      pick(i + 1, acc, cost + leg.priceCents);
-      acc.pop();
-    }
+      for (const leg of byOutcome[i]) {
+        acc.push(leg);
+        pick(i + 1, acc, cost + leg.priceCents);
+        acc.pop();
+      }
+    };
+    pick(0, [], 0);
+    return bestLegs;
   };
-  pick(0, [], 0);
-  return bestLegs;
+
+  return search(buildGroups(minLiquidityUsd)) ?? search(buildGroups(0));
 }
 
 function buildLeg(m: MatchedLeg, size: number): ArbLeg {
@@ -179,7 +186,7 @@ export function detectArbs(
   for (const ev of candidates) {
     const isTotal = ev.marketType === "total";
     const required = requiredOutcomes(ev);
-    const selection = bestCrossVenueSelection(ev.legs, required);
+    const selection = bestCrossVenueSelection(ev.legs, required, minLiquidityUsd);
     if (!selection) continue;
 
     // Cross-venue divergence on the first outcome group (stale-quote signal).
@@ -247,6 +254,34 @@ export function detectArbs(
       });
     }
 
+    // Moneyline diagnostics: soccer 1X2 and tennis 2-way winners can go near-arb
+    // without any totals watch row, so keep the cheapest complete basket visible.
+    if (ev.marketType === "moneyline") {
+      const pricesByVenue = new Map<string, Partial<Record<Outcome, number>>>();
+      for (const l of ev.legs) {
+        const row = pricesByVenue.get(l.venueId) ?? {};
+        row[l.outcome] = l.priceCents;
+        pricesByVenue.set(l.venueId, row);
+      }
+      watch.push({
+        eventKey: ev.eventKey,
+        matchup: ev.matchup,
+        line: 0,
+        venuePrices: [...pricesByVenue.entries()].map(([venueId, prices]) => ({
+          venueId,
+          homeCents: prices.home ?? null,
+          drawCents: prices.draw ?? null,
+          awayCents: prices.away ?? null,
+        })),
+        totalCostCents: totalCost,
+        grossEdge: gross,
+        netEdge: net,
+        divergenceCents: divergence,
+        liquidityUsd: pairLiquidity >= 1e8 ? 0 : Math.round(pairLiquidity),
+        status,
+      });
+    }
+
     const line = ev.marketType === "moneyline" ? null : ev.line;
     if (status === "arb") {
       opportunities.push({
@@ -277,6 +312,9 @@ export function detectArbs(
       rejects.push({ eventKey: ev.eventKey, matchup: ev.matchup, line: ev.line, reason: "edge_above_max", netEdge: net, detail: `net ${(net * 100).toFixed(2)}% > max` });
     } else if (totalCost < 100 && net < agent.minEdge) {
       rejects.push({ eventKey: ev.eventKey, matchup: ev.matchup, line: ev.line, reason: "edge_below_min", netEdge: net, detail: `net ${(net * 100).toFixed(2)}% < min` });
+    } else if (ev.marketType === "moneyline" && totalCost >= 100) {
+      const basket = ev.sport === "soccer" ? "1X2" : "moneyline";
+      rejects.push({ eventKey: ev.eventKey, matchup: ev.matchup, line: ev.line, reason: "edge_below_min", netEdge: net, detail: `${basket} basket cost ${totalCost.toFixed(2)}c >= 100c` });
     }
   }
 

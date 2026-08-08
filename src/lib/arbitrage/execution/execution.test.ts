@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { maxLiveQuoteAgeMs, shouldHaltForLiveStaleQuote } from "../executionPipeline";
 import { resolveExecutionMode, type GateInput } from "./config";
-import { fragileVenueFirstOrder, shouldSequenceFragileVenuePair } from "./executor";
-import type { OrderRequest } from "./types";
+import { allSubmittedSizesFilled, fragileVenueFirstOrder, shouldSequenceFragileVenuePair } from "./executor";
+import type { OrderRequest, OrderResult } from "./types";
 
 // The gate must FAIL CLOSED: live only when every independent (UI-driven) switch passes.
 // No environment variables — arming is the agent Live toggle + risk kill switch + risk
@@ -101,9 +102,43 @@ describe("live execution sequencing", () => {
     expect(fragileVenueFirstOrder(requests)).toEqual([1, 0]);
   });
 
-  it("places kalshi before sx.bet so a kalshi IOC miss cannot leave an sx-only fill", () => {
+  it("places sx.bet before kalshi (fragile on-chain leg first) so an sx.bet rejection skips the kalshi hedge", () => {
     const requests = [req("sxbet"), req("kalshi")];
     expect(shouldSequenceFragileVenuePair(requests)).toBe(true);
-    expect(fragileVenueFirstOrder(requests)).toEqual([1, 0]);
+    expect(fragileVenueFirstOrder(requests)).toEqual([0, 1]);
+  });
+});
+
+describe("live quote freshness gate", () => {
+  it("uses the tighter stale quote limit from risk or agent settings", () => {
+    expect(maxLiveQuoteAgeMs({ staleQuoteMs: 30_000 }, { staleQuoteMs: 300_000 })).toBe(30_000);
+    expect(maxLiveQuoteAgeMs({ staleQuoteMs: 300_000 }, { staleQuoteMs: 20_000 })).toBe(20_000);
+  });
+
+  it("halts live execution when targeted refresh leaves stale cached quotes", () => {
+    expect(shouldHaltForLiveStaleQuote(30_001, 30_000)).toBe(true);
+    expect(shouldHaltForLiveStaleQuote(30_000, 30_000)).toBe(false);
+  });
+});
+
+describe("submitted-size fill accounting", () => {
+  const request = (sizeContracts: number): OrderRequest => ({
+    venueId: "polymarket",
+    marketId: "polymarket-market",
+    outcome: "home",
+    sizeContracts,
+    limitPriceCents: 50,
+  });
+  const result = (filledContracts: number): OrderResult => ({
+    ok: true,
+    orderId: "order",
+    filledContracts,
+    avgPriceCents: 50,
+    status: "filled",
+  });
+
+  it("judges full fill against the resized submitted order, not the stale preflight size", () => {
+    expect(allSubmittedSizesFilled([result(3), result(3)], [request(3), request(3)])).toBe(true);
+    expect(allSubmittedSizesFilled([result(3), result(2.9)], [request(3), request(3)])).toBe(false);
   });
 });

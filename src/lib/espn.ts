@@ -1,4 +1,5 @@
 import { MLBGame, TeamInfo } from "@/types";
+import { fetchEspnJson } from "./espnFetch";
 
 const ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports/baseball/mlb";
 
@@ -106,13 +107,7 @@ function isCompleted(event: Record<string, unknown>): boolean {
 export async function fetchESPNGames(date: string): Promise<MLBGame[]> {
   // date format: YYYYMMDD
   const url = `${ESPN_BASE}/scoreboard?dates=${date}&limit=50`;
-  const res = await fetch(url, { next: { revalidate: 60 } });
-
-  if (!res.ok) {
-    throw new Error(`ESPN API error: ${res.status}`);
-  }
-
-  const data = await res.json();
+  const data = await fetchEspnJson<{ events?: Record<string, unknown>[] }>(url);
   const events: Record<string, unknown>[] = data.events || [];
 
   return events.filter((event) => !isCompleted(event)).map((event) => {
@@ -139,11 +134,12 @@ export async function fetchESPNGames(date: string): Promise<MLBGame[]> {
 
 export async function fetchESPNGame(gameId: string): Promise<MLBGame | null> {
   const url = `${ESPN_BASE}/summary?event=${gameId}`;
-  const res = await fetch(url, { next: { revalidate: 60 } });
-
-  if (!res.ok) return null;
-
-  const data = await res.json();
+  let data: { header?: { competitions?: Record<string, unknown>[] } };
+  try {
+    data = await fetchEspnJson<{ header?: { competitions?: Record<string, unknown>[] } }>(url);
+  } catch {
+    return null;
+  }
 
   const header = data.header || {};
   const competitions = header.competitions || [];

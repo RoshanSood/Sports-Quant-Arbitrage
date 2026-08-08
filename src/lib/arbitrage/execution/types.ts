@@ -26,6 +26,14 @@ export type OrderResult = {
   raw?: unknown;
 };
 
+export type ExecutableOrderQuote = {
+  ok: boolean;
+  priceCents: number;
+  averagePriceCents: number;
+  availableContracts: number;
+  reason?: string;
+};
+
 // Post-placement settlement confirmation. On-chain venues (SX.bet especially) ack an
 // order before it settles on-chain (PENDING → SUCCESS/FAILED), so the placement result
 // is not final truth — reconciliation re-queries the venue to confirm.
@@ -40,6 +48,9 @@ export interface ExecutionAdapter {
   supportsLive(): boolean;
   // Account balance in USD, or null if unknown/unconfigured.
   getBalanceUsd(): Promise<number | null>;
+  // Read the executable live book immediately before placement. The executor requests
+  // every leg concurrently, then shrinks the basket to one common fillable size.
+  quoteOrder?(req: OrderRequest): Promise<ExecutableOrderQuote>;
   placeOrder(req: OrderRequest): Promise<OrderResult>;
   // Optional: re-query the venue to confirm an order actually settled. Absent ⇒ the
   // placement result is treated as authoritative (e.g. Kalshi IOC, Polymarket FOK).

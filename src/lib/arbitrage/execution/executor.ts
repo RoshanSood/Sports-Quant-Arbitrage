@@ -9,46 +9,28 @@ import { prepareExecution, verifyPostFill, writeLog, type ExecutionOutcome } fro
 import { resolveExecutionMode, SXBET_MIN_TAKER_STAKE_USD, type ExecMode } from "./config";
 import { getAdapter, venueSupportsLive, type ExecCreds } from "./registry";
 import { applyReconciliation, reconcileLegs, type LegReconciliation } from "./reconcile";
-import { checkKalshiFillability } from "./kalshiAdapter";
-import { checkSxFillability } from "./sxbetAdapter";
-import { quotePolymarketFokBuy } from "./polymarketAdapter";
 import { computeFees } from "../feeEngine";
-import { executedEconomics } from "../arbMath";
-import type { ExecutionAdapter, OrderRequest, OrderResult } from "./types";
+import { executedEconomics, venueMinContracts, venueMinStakeUsd } from "../arbMath";
+import type { ExecutableOrderQuote, ExecutionAdapter, OrderRequest, OrderResult } from "./types";
 
 // Re-exported for callers/tests that reference it from the executor module.
 export { SXBET_MIN_TAKER_STAKE_USD };
 
 export function liveVenueMinimumStakeBlockers(legs: ArbLeg[]): string[] {
   return legs.flatMap((leg) => {
-    if (leg.venueId !== "sxbet") return [];
     const stakeUsd = (leg.size * leg.priceCents) / 100;
-    if (stakeUsd >= SXBET_MIN_TAKER_STAKE_USD) return [];
+    const minimum = venueMinStakeUsd(leg.venueId);
     const label = leg.label ? ` ${leg.label}` : "";
-    return [`SX.bet${label} stake $${stakeUsd.toFixed(2)} is below minimum $${SXBET_MIN_TAKER_STAKE_USD}`];
+    const blockers: string[] = [];
+    if (stakeUsd + 1e-9 < minimum) {
+      blockers.push(`${venueLabel(leg.venueId)}${label} stake $${stakeUsd.toFixed(2)} is below minimum $${minimum.toFixed(2)}`);
+    }
+    const minimumContracts = venueMinContracts(leg.venueId);
+    if (leg.size + 1e-9 < minimumContracts) {
+      blockers.push(`${venueLabel(leg.venueId)}${label} size ${leg.size.toFixed(2)} is below minimum ${minimumContracts.toFixed(2)} contracts`);
+    }
+    return blockers;
   });
-}
-
-export async function liveSxFillabilityBlockers(requests: OrderRequest[]): Promise<string[]> {
-  const checks = await Promise.all(
-    requests.map(async (req) => {
-      if (req.venueId !== "sxbet") return null;
-      const result = await checkSxFillability(req);
-      return result.ok ? null : result.reason ?? "SX.bet has no fillable maker liquidity for this leg";
-    })
-  );
-  return checks.filter((b): b is string => Boolean(b));
-}
-
-export async function liveKalshiFillabilityBlockers(requests: OrderRequest[], creds?: ExecCreds): Promise<string[]> {
-  const checks = await Promise.all(
-    requests.map(async (req) => {
-      if (req.venueId !== "kalshi") return null;
-      const result = await checkKalshiFillability(req, creds?.kalshiCreds);
-      return result.ok ? null : result.reason ?? "Kalshi has no fillable top-of-book liquidity for this leg";
-    })
-  );
-  return checks.filter((b): b is string => Boolean(b));
 }
 
 function venueLabel(venueId: string): string {
@@ -77,10 +59,9 @@ export function fragileVenueFirstOrder(requests: OrderRequest[]): number[] {
       if (av === "predictfun" && bv !== "predictfun") return -1;
       if (av !== "predictfun" && bv === "predictfun") return 1;
     }
-    if (hasSx && hasKalshi) {
-      if (av === "kalshi" && bv !== "kalshi") return -1;
-      if (av !== "kalshi" && bv === "kalshi") return 1;
-    }
+    // SX.bet is the fragile on-chain leg, so it is always placed FIRST — including on
+    // SX.bet + Kalshi routes. If the SX order is rejected we skip the Kalshi hedge and never
+    // open a naked Kalshi position; Kalshi's IOC is fast and final, so it fills second.
     if (av === "sxbet" && bv !== "sxbet") return -1;
     if (av !== "sxbet" && bv === "sxbet") return 1;
     return a - b;
@@ -97,6 +78,10 @@ export function shouldSequenceFragileVenuePair(requests: OrderRequest[]): boolea
 
 function skippedBecausePriorLegFailed(req: OrderRequest, error: string): OrderResult {
   return { ok: false, orderId: null, filledContracts: 0, avgPriceCents: req.limitPriceCents, status: "rejected", error };
+}
+
+export function allSubmittedSizesFilled(results: OrderResult[], requests: OrderRequest[]): boolean {
+  return results.every((r, i) => r.filledContracts >= (requests[i]?.sizeContracts ?? Infinity));
 }
 
 export async function runExecution(
@@ -117,9 +102,9 @@ export async function runExecution(
     killSwitch: ctx.risk.killSwitch,
     venues: ctx.venues,
     stakeUsd: ctx.totalStake,
-    // The SX.bet $1-minimum floor overrides the configured live cap: when an arb had to be
-    // sized up so its SX leg clears $1, that (larger) stake must still be allowed to fire.
-    maxLiveStakeUsd: Math.max(ctx.risk.maxLiveStakeUsd, ctx.minLiveStakeFloorUsd),
+    // Minimum-order sizing never bypasses the live risk cap. If making every venue leg
+    // at least $1.01 would make the basket too large, the gate rejects the trade.
+    maxLiveStakeUsd: ctx.risk.maxLiveStakeUsd,
     venuesSupportLive: venueSupportsLive(ctx.venues, creds),
   });
 
@@ -195,11 +180,19 @@ export async function runExecution(
   }));
 
   if (mode === "live") {
-    const [sxBlockers, kalshiBlockers] = await Promise.all([
-      liveSxFillabilityBlockers(requests),
-      liveKalshiFillabilityBlockers(requests, creds),
-    ]);
-    const fillabilityBlockers = [...sxBlockers, ...kalshiBlockers];
+    const quotes: ExecutableOrderQuote[] = await Promise.all(
+      adapters.map((adapter, i): Promise<ExecutableOrderQuote> => adapter.quoteOrder
+        ? adapter.quoteOrder(requests[i])
+        : Promise.resolve({
+            ok: true,
+            priceCents: requests[i].limitPriceCents,
+            averagePriceCents: requests[i].limitPriceCents,
+            availableContracts: requests[i].sizeContracts,
+          }))
+    );
+    const fillabilityBlockers = quotes.flatMap((quote, i) =>
+      quote.availableContracts > 0 ? [] : [quote.reason ?? `${venueLabel(requests[i].venueId)} has no executable depth`]
+    );
     if (fillabilityBlockers.length) {
       const reason = `Live execution blocked - ${fillabilityBlockers.join("; ")}`;
       await writeLog(
@@ -216,54 +209,58 @@ export async function runExecution(
       );
       return { result: "halted", reasonCode: "live_blocked", reason, trade: null, mode: "live", blockers: fillabilityBlockers };
     }
+
+    const commonContracts = Math.floor(
+      Math.min(...quotes.map((q) => q.availableContracts), ...requests.map((r) => r.sizeContracts)) * 100
+    ) / 100;
+    requests = requests.map((request, i) => ({
+      ...request,
+      sizeContracts: commonContracts,
+      limitPriceCents: Math.min(request.limitPriceCents, quotes[i].priceCents),
+    }));
+    const quotedLegs = ctx.executedLegs.map((leg, i) => ({
+      ...leg,
+      size: commonContracts,
+      priceCents: requests[i].limitPriceCents,
+    }));
+    const minimumBlockers = liveVenueMinimumStakeBlockers(quotedLegs);
+    const quotedFees = computeFees(quotedLegs);
+    quotedLegs.forEach((leg, i) => (leg.feeCents = quotedFees[i].feeCents));
+    const quotedEconomics = executedEconomics(quotedLegs);
+    const blockers = [
+      ...minimumBlockers,
+      ...(quotedEconomics.expectedProfit < ctx.risk.minExpectedProfitUsd
+        ? [`executable profit $${quotedEconomics.expectedProfit.toFixed(2)} is below $${ctx.risk.minExpectedProfitUsd.toFixed(2)}`]
+        : []),
+      ...(quotedEconomics.guaranteedPayout <= quotedEconomics.totalCost
+        ? ["live executable prices no longer form an arbitrage"]
+        : []),
+    ];
+    if (blockers.length) {
+      const reason = `Live execution blocked - ${blockers.join("; ")}`;
+      await writeLog(ctx.agent, ctx.opportunityMatchup, ctx.venues, quotedEconomics.netEdge, "halted", "live_blocked", reason, {
+        effectiveMode: "blocked",
+        gateBlockers: blockers,
+        opportunityId: ctx.opportunityId,
+        executableQuotes: quotes,
+        commonContracts,
+        totalCost: quotedEconomics.totalCost,
+        expectedProfit: quotedEconomics.expectedProfit,
+        pipelineSteps: executionSteps,
+      }, date, "live");
+      return { result: "halted", reasonCode: "live_blocked", reason, trade: null, mode: "live", blockers };
+    }
+    executionSteps.push({
+      key: "executable_books",
+      label: "Executable books",
+      status: "pass",
+      detail: `${commonContracts.toFixed(2)} common contracts; $${quotedEconomics.expectedProfit.toFixed(2)} executable profit`,
+    });
   }
 
   let placed: OrderResult[];
   const sequencingOrder = mode === "live" ? fragileVenueFirstOrder(requests) : requests.map((_, i) => i);
   const shouldSequence = mode === "live" && shouldSequenceFragileVenuePair(requests);
-
-  // ── Polymarket anchor preflight: size the FOK to the LIVE book so it actually fills ──
-  // Polymarket is the anchor (placed first). A FOK is killed when it asks for more than the
-  // book holds at our price — that's what left legs unfilled. Read the live ask depth and
-  // resize the anchor (and the hedge, so both legs match) to what's fillable at <= our limit
-  // (+1c cushion for small moves). If nothing is fillable at our price the arb has moved away,
-  // so we leave it: the order won't fill and the hedge is skipped — no naked exposure.
-  const anchorIdx = shouldSequence ? sequencingOrder[0] : -1;
-  if (anchorIdx >= 0 && requests[anchorIdx].venueId === "polymarket") {
-    const maxPrice = Math.min(99, requests[anchorIdx].limitPriceCents + 1);
-    const quote = await quotePolymarketFokBuy(requests[anchorIdx], creds?.polymarket, maxPrice).catch(() => null);
-    const nextSize = quote ? Math.floor(Math.min(requests[anchorIdx].sizeContracts, quote.availableContracts) * 1e4) / 1e4 : 0;
-    // If an SX.bet leg is hedging this anchor, the resized size must still keep the SX leg at
-    // or above its $1 order minimum. Shrinking below that would place a sub-$1 SX order that
-    // SX rejects AFTER the Polymarket anchor already filled — a naked position. So require the
-    // SX floor here: if Polymarket's book can't cover it, skip (anchor left unfilled, no naked).
-    const sxHedge = requests.find((r, i) => i !== anchorIdx && r.venueId.toLowerCase().includes("sx"));
-    const sxFloorContracts = sxHedge && sxHedge.limitPriceCents > 0 ? SXBET_MIN_TAKER_STAKE_USD / (sxHedge.limitPriceCents / 100) : 0;
-    if (quote && nextSize > 0 && nextSize + 1e-9 >= sxFloorContracts) {
-      const nextLimit = Math.min(99, Math.max(requests[anchorIdx].limitPriceCents, quote.limitPriceCents));
-      requests = requests.map((r, i) => ({ ...r, sizeContracts: nextSize, limitPriceCents: i === anchorIdx ? nextLimit : r.limitPriceCents }));
-      executionSteps.push({
-        key: "polymarket_book_preflight",
-        label: "Polymarket book preflight",
-        status: "pass",
-        detail: `resized to ${nextSize.toFixed(4)} fillable contracts at <= ${nextLimit.toFixed(2)}c (both legs matched)`,
-      });
-    } else if (quote && nextSize > 0 && sxHedge) {
-      executionSteps.push({
-        key: "polymarket_book_preflight",
-        label: "Polymarket book preflight",
-        status: "warn",
-        detail: `Polymarket depth ${nextSize.toFixed(4)} ctr below SX.bet $${SXBET_MIN_TAKER_STAKE_USD.toFixed(2)} minimum (needs ${sxFloorContracts.toFixed(4)} ctr) — skipping, anchor left unfilled (no naked)`,
-      });
-    } else {
-      executionSteps.push({
-        key: "polymarket_book_preflight",
-        label: "Polymarket book preflight",
-        status: "warn",
-        detail: `no ask depth at <= ${maxPrice.toFixed(2)}c — arb moved away, order left unfilled (hedge skipped, no naked)`,
-      });
-    }
-  }
 
   if (shouldSequence) {
     placed = new Array<OrderResult>(requests.length);
@@ -296,7 +293,7 @@ export async function runExecution(
 
   // ── Derive position status from per-leg fills ───────────────────────────────
   const filledFlags = results.map((r) => r.filledContracts > 0);
-  const fullyFilled = results.every((r, i) => r.filledContracts >= ctx.executedLegs[i].size);
+  const fullyFilled = allSubmittedSizesFilled(results, requests);
   const anyFilled = filledFlags.some(Boolean);
   const allFilled = filledFlags.every(Boolean);
 

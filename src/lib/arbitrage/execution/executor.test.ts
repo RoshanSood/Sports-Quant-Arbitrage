@@ -18,14 +18,30 @@ function leg(venueId: string, size: number, priceCents: number): ArbLeg {
 }
 
 describe("executor live venue minimum stake guard", () => {
-  it("blocks SX.bet fills below the 1 USDC taker minimum", () => {
+  it("blocks SX.bet fills below the SX.bet taker minimum", () => {
     expect(liveVenueMinimumStakeBlockers([leg("sxbet", 6, 12)])).toEqual([
-      "SX.bet Home stake $0.72 is below minimum $1",
+      "SX.bet Home stake $0.72 is below minimum $1.01",
     ]);
   });
 
-  it("allows SX.bet fills at the minimum and ignores other venues", () => {
-    expect(liveVenueMinimumStakeBlockers([leg("sxbet", 10, 10), leg("polymarket", 6, 12)])).toEqual([]);
+  it("blocks an SX.bet fill at exactly $1.00 (below the $1.01 minimum)", () => {
+    expect(liveVenueMinimumStakeBlockers([leg("sxbet", 10, 10)])).toEqual([
+      "SX.bet Home stake $1.00 is below minimum $1.01",
+    ]);
+  });
+
+  it("requires every venue leg to clear the shared minimum", () => {
+    expect(liveVenueMinimumStakeBlockers([leg("sxbet", 10, 11), leg("polymarket", 6, 12)])).toEqual([
+      "Polymarket Home stake $0.72 is below minimum $1.01",
+    ]);
+    expect(liveVenueMinimumStakeBlockers([leg("sxbet", 10, 11), leg("polymarket", 10, 12)])).toEqual([]);
+  });
+
+  it("also enforces Predict.fun's two-contract venue rule", () => {
+    expect(liveVenueMinimumStakeBlockers([leg("predictfun", 1.5, 80)])).toEqual([
+      "Predict.fun Home size 1.50 is below minimum 2.00 contracts",
+    ]);
+    expect(liveVenueMinimumStakeBlockers([leg("predictfun", 2, 80)])).toEqual([]);
   });
 });
 
@@ -58,7 +74,10 @@ describe("executor SX.bet execution ordering", () => {
     expect(shouldSequenceFragileVenuePair(requests)).toBe(true);
   });
 
-  it("places Kalshi first for SX.bet/Kalshi routes", () => {
-    expect(fragileVenueFirstOrder([req("sxbet"), req("kalshi")])).toEqual([1, 0]);
+  it("places SX.bet first for SX.bet/Kalshi routes (fragile on-chain leg leads)", () => {
+    expect(fragileVenueFirstOrder([req("sxbet"), req("kalshi")])).toEqual([0, 1]);
+    // Order-independent: Kalshi listed first still yields SX.bet placed first.
+    expect(fragileVenueFirstOrder([req("kalshi"), req("sxbet")])).toEqual([1, 0]);
+    expect(shouldSequenceFragileVenuePair([req("sxbet"), req("kalshi")])).toBe(true);
   });
 });

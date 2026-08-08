@@ -10,8 +10,11 @@
 //   • tennis (WTA): 2-way moneyline — CloudBet + others
 
 import { fetchESPNGames } from "@/lib/espn";
-import { fetchWNBAGames } from "@/lib/wnbaEspn";
-import { espnTeamGamesFetcher, espnTennisGamesFetcher } from "@/lib/espnSports";
+// MLB-ONLY FOCUS: the non-MLB sports (WNBA / soccer / tennis) are disabled below to cut
+// ingest load and UI lag while MLB logic is perfected. Re-enable by uncommenting the SPORTS
+// entries at the bottom of this file AND these imports.
+// import { fetchWNBAGames } from "@/lib/wnbaEspn";
+// import { espnTeamGamesFetcher, espnTennisGamesFetcher } from "@/lib/espnSports";
 import type { Sport } from "@/types/arbitrage";
 
 // Minimal structural game shape the venue adapters need (MLBGame + WNBAGame both satisfy it).
@@ -69,6 +72,9 @@ export const SPORTS: SportConfig[] = [
     predictfun: true,
     spreadFixedLine: 1.5,
   },
+  // ── NON-MLB SPORTS DISABLED (MLB-only focus: less ingest load + UI lag) ──────────────
+  // Re-enable by uncommenting this block AND the fetcher imports at the top of this file.
+  /*
   {
     sport: "basketball",
     league: "wnba",
@@ -133,4 +139,5 @@ export const SPORTS: SportConfig[] = [
     // CloudBet WTA is per-tournament (tennis-wta-*); enumerate + read the 2-way winner.
     cloudbet: { sport: "tennis", competitionMatch: /tennis-wta-/i, moneyline: "tennis.winner" },
   },
+  */
 ];

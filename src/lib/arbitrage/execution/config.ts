@@ -13,14 +13,17 @@
 // FAILED with the reasons and places NO order. It does NOT silently fall back to paper.
 // Paper (dry-run/simulated) only happens when the caller explicitly requests paper mode.
 
+import { venueMinStakeUsd } from "../arbMath";
+
 export type ExecMode = "dry_run" | "live";
 
-// SX.bet enforces a $1 minimum on every taker order. An arb whose SX leg would stake less
-// is sized UP (equal-profit sizing buys the same contract count on every leg, so scaling
-// all legs by one factor keeps the hedge ratio and the edge% unchanged) until the SX leg
-// clears $1. That $1 floor OVERRIDES the risk stake cap and the agent's target size: a
-// sub-$1 SX order simply cannot be placed, so the choice is "trade it larger" or "skip it".
-export const SXBET_MIN_TAKER_STAKE_USD = 1;
+// SX.bet enforces a minimum on every taker order. An arb whose SX leg would stake less is
+// sized UP (equal-profit sizing buys the same contract count on every leg, so scaling all
+// legs by one factor keeps the hedge ratio and the edge% unchanged) until the SX leg clears
+// it. The floor can raise the agent's target size but never overrides the live risk cap: an
+// oversized basket is skipped. Derived from
+// venueMinStakeUsd so the sizing path and this blocker safety-net never disagree.
+export const SXBET_MIN_TAKER_STAKE_USD = venueMinStakeUsd("sxbet");
 
 // Default per-trade live cap (dollars) used to SEED risk settings on first run. After
 // that it's edited in the Risk panel (UI), not here — kept low on purpose so the whole

@@ -26,9 +26,12 @@ export async function getOpportunities(date: string): Promise<ArbOpportunity[]> 
 }
 
 export async function saveOpportunities(date: string, list: ArbOpportunity[]): Promise<void> {
-  memStore.set(date, list);
   await fs.mkdir(DATA_DIR, { recursive: true });
-  await fs.writeFile(oppFile(date), JSON.stringify(list, null, 2), "utf-8");
+  const target = oppFile(date);
+  const temporary = `${target}.${process.pid}.${Date.now()}.tmp`;
+  await fs.writeFile(temporary, JSON.stringify(list, null, 2), "utf-8");
+  await fs.rename(temporary, target);
+  memStore.set(date, list);
 }
 
 export function isRunning(date: string): boolean {

@@ -47,11 +47,20 @@ export type ExecResponse = {
 // states) â€” never mock fixtures. Venues start from the seed so the arena has nodes.
 const USE_MOCK = false;
 
-// Floor gap between completed scans. Each scan re-ingests all venues, so the effective
-// cadence is "scan duration + 1s" and never overlaps a still-running ingestion.
-const SCAN_MIN_GAP_MS = 1000;
 const INGEST_POLL_MS = 120;
-const AUTO_BATCH_LIMIT = 4;
+
+type ScannerHealth = {
+  enabled: boolean;
+  running: boolean;
+  lastCompletedAt: string | null;
+  lastSuccessfulTradeAt: string | null;
+  lastDurationMs: number | null;
+  marketCount: number;
+  opportunityCount: number;
+  executedCount: number;
+  lastReason: string | null;
+  lastError: string | null;
+};
 
 export default function ArbitrageClient() {
   const [venues, setVenues] = useState<Venue[]>(DEFAULT_VENUES);
@@ -75,13 +84,12 @@ export default function ArbitrageClient() {
   const [playOpp, setPlayOpp] = useState<ArbOpportunity | null>(null);
 
   const [scanning, setScanning] = useState(false);
+  const [scannerHealth, setScannerHealth] = useState<ScannerHealth | null>(null);
   const [soundOn, setSoundOn] = useState(false);
   const [killSwitch, setKillSwitch] = useState(false);
   const [agentTrade, setAgentTrade] = useState<AgentTrade | null>(null);
   const [executingOppIds, setExecutingOppIds] = useState<Set<string>>(() => new Set());
   const tradeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const autoFiredRef = useRef<Set<string>>(new Set());
-  const autoInFlightRef = useRef<Set<string>>(new Set());
 
   // Live score updates for the games the engine currently maps (Activity â†’ SCORES tab).
   const [scoreFeed, setScoreFeed] = useState<ScoreEvent[]>([]);
@@ -398,27 +406,6 @@ export default function ArbitrageClient() {
     [refreshPortfolio]
   );
 
-  const fireAutoBatch = useCallback(
-    async (nextOpps: ArbOpportunity[]) => {
-      if (!agent.autoTrade || killSwitch) return;
-      const batch = nextOpps
-        .filter((o) => !autoFiredRef.current.has(o.id) && !autoInFlightRef.current.has(o.id))
-        .slice(0, AUTO_BATCH_LIMIT);
-      if (batch.length === 0) return;
-
-      for (const opp of batch) autoInFlightRef.current.add(opp.id);
-
-      const mode = agent.live ? "live" : "paper";
-      const results = await Promise.allSettled(batch.map((opp) => executeOpportunity(opp, mode, { refreshAfter: false })));
-      results.forEach((result, i) => {
-        if (result.status === "fulfilled" && result.value?.result) autoFiredRef.current.add(batch[i].id);
-      });
-      for (const opp of batch) autoInFlightRef.current.delete(opp.id);
-      await refreshPortfolio();
-    },
-    [agent.autoTrade, agent.live, killSwitch, executeOpportunity, refreshPortfolio]
-  );
-
   // Re-run the scan: re-ingest fresh quotes, then re-derive match map + opportunities
   // + the main-line watch board. Lets the user refresh the live prices on demand.
   const refreshScan = useCallback(async () => {
@@ -428,12 +415,12 @@ export default function ArbitrageClient() {
       // GET with refresh=1 re-triggers ingestion server-side (no admin password).
       await fetch(`/api/arbitrage/markets?date=${date}&refresh=1`).catch(() => null);
 
-      // Poll until ingestion settles, then pull derived data. Tight granularity so a
-      // finished scan is picked up fast (the loop below re-scans immediately after).
-      for (let i = 0; i < 40; i++) {
+      // Wait for the complete atomic snapshot. There is deliberately no UI deadline: a slow
+      // venue must not make this refresh fall back to an older, less relevant quote set.
+      while (true) {
         await new Promise((r) => setTimeout(r, INGEST_POLL_MS));
         const m = await fetch(`/api/arbitrage/markets?date=${date}`).then((r) => r.json()).catch(() => null);
-        if (m && !m.running && m.markets?.length) break;
+        if (m && !m.running) break;
       }
       const [mm, op] = await Promise.all([
         fetch(`/api/arbitrage/match-map?date=${date}`).then((r) => r.json()).catch(() => null),
@@ -441,58 +428,68 @@ export default function ArbitrageClient() {
       ]);
       if (mm?.stats) setMatchMap({ matched: mm.matched, rejects: mm.rejects, stats: mm.stats });
       if (Array.isArray(op?.opportunities)) {
-        const nextOpps = op.opportunities as ArbOpportunity[];
-        setOpportunities(nextOpps);
+        setOpportunities(op.opportunities as ArbOpportunity[]);
         setWatch(Array.isArray(op.watch) ? op.watch : []);
         setOppsLive(true);
-        await fireAutoBatch(nextOpps);
       }
     } finally {
       setRefreshing(false);
     }
-  }, [fireAutoBatch]);
+  }, []);
 
-  // Auto-execute: when auto-trade is on, fire each qualifying
-  // opportunity once (dedup via a fired-set). Mode is LIVE when the agent's Live toggle is
-  // on; otherwise paper. A live fire still passes the
-  // server gate (agent.live, kill switch, stake cap, per-venue creds); if it can't fire it
-  // is reported FAILED with the blocking reasons â€” never run as paper. Kill switch / Stop halts it.
+  // The server owns scanning and auto-execution. Poll its health plus the completed atomic
+  // snapshot so reloading/closing this dashboard never stops the trading loop.
   useEffect(() => {
-    if (!agent.autoTrade || killSwitch) return;
-    const pending = opportunities.filter((o) => !autoFiredRef.current.has(o.id) && !autoInFlightRef.current.has(o.id));
-    if (pending.length === 0) return;
     let cancelled = false;
-    (async () => {
-      if (!cancelled) await fireAutoBatch(pending);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [opportunities, agent.autoTrade, killSwitch, fireAutoBatch]);
-
-  // Auto-scan: while Scanning is on, re-ingest fresh quotes back-to-back (a new scan
-  // starts as soon as the previous finishes) so prices â€” and auto-execution â€” stay as
-  // fresh as the venues allow, for catching short-lived arbs. A small floor prevents a
-  // busy-loop; Stop / kill switch halts it.
-  useEffect(() => {
-    if (!scanning || killSwitch) return;
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const tick = async () => {
-      if (cancelled) return;
-      try {
-        await Promise.all([refreshScan(), refreshPortfolio()]);
-      } catch {
-        // keep looping through transient errors
+    let lastCompleted: string | null = null;
+    const poll = async () => {
+      const status = await fetch("/api/arbitrage/scanner").then((r) => r.json()).catch(() => null);
+      if (cancelled || !status?.scanner) return;
+      const next = status.scanner as ScannerHealth;
+      setScannerHealth(next);
+      setScanning(next.enabled);
+      if (next.lastCompletedAt && next.lastCompletedAt !== lastCompleted) {
+        lastCompleted = next.lastCompletedAt;
+        const date = pacificTodayDateStr();
+        const [m, mm, op] = await Promise.all([
+          fetch(`/api/arbitrage/markets?date=${date}`).then((r) => r.json()).catch(() => null),
+          fetch(`/api/arbitrage/match-map?date=${date}`).then((r) => r.json()).catch(() => null),
+          fetch(`/api/arbitrage/opportunities?date=${date}`).then((r) => r.json()).catch(() => null),
+        ]);
+        if (cancelled) return;
+        if (Array.isArray(m?.markets)) {
+          setMarkets(m.markets);
+          setMarketsLive(true);
+        }
+        if (mm?.stats) setMatchMap({ matched: mm.matched, rejects: mm.rejects, stats: mm.stats });
+        if (Array.isArray(op?.opportunities)) {
+          setOpportunities(op.opportunities);
+          setWatch(Array.isArray(op.watch) ? op.watch : []);
+          setOppsLive(true);
+        }
+        void refreshPortfolio();
       }
-      if (!cancelled) timer = setTimeout(tick, SCAN_MIN_GAP_MS);
     };
-    tick();
+    void poll();
+    const timer = setInterval(() => void poll(), 2000);
     return () => {
       cancelled = true;
-      if (timer) clearTimeout(timer);
+      clearInterval(timer);
     };
-  }, [scanning, killSwitch, refreshScan, refreshPortfolio]);
+  }, [refreshPortfolio]);
+
+  const toggleScanner = useCallback(async () => {
+    if (killSwitch) return;
+    const response = await fetch("/api/arbitrage/scanner", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: !scanning }),
+    }).then((r) => r.json()).catch(() => null);
+    if (response?.scanner) {
+      setScannerHealth(response.scanner);
+      setScanning(Boolean(response.scanner.enabled));
+    }
+  }, [killSwitch, scanning]);
 
   const openVenue = venues.find((v) => v.id === openVenueId) ?? null;
 
@@ -503,9 +500,15 @@ export default function ArbitrageClient() {
         soundOn={soundOn}
         agentCount={1}
         pnl={pnl}
+        trades={trades}
+        scannerDetail={scannerHealth?.lastError ?? (scannerHealth?.running
+          ? `Scanning ${scannerHealth.marketCount} markets`
+          : scannerHealth?.lastCompletedAt
+            ? `${scannerHealth.opportunityCount} arbs · ${scannerHealth.lastDurationMs ?? 0}ms`
+            : "Starting")}
         killSwitch={killSwitch}
         autoTrade={agent.autoTrade}
-        onToggleScanning={() => !killSwitch && setScanning((s) => !s)}
+        onToggleScanning={toggleScanner}
         onToggleSound={() => setSoundOn((s) => !s)}
         onToggleAuto={() => !killSwitch && updateAgent({ autoTrade: !agent.autoTrade })}
         onOpenPanel={(k) => {

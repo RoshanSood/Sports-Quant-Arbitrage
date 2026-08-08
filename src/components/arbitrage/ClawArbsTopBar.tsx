@@ -3,7 +3,9 @@
 import Link from "next/link";
 import { ArrowLeft, Square, Radio, Volume2, RotateCcw, Bot } from "lucide-react";
 import type { PanelKey } from "./ArbitrageClient";
+import type { Trade } from "@/types/arbitrage";
 import { formatSignedDollars } from "./arbFormat";
+import WalletBalances from "./WalletBalances";
 
 const NAV_BUTTONS: { key: PanelKey; label: string }[] = [
   { key: "arbs", label: "Arbs" },
@@ -19,6 +21,8 @@ export default function ClawArbsTopBar({
   soundOn,
   agentCount,
   pnl,
+  trades,
+  scannerDetail,
   killSwitch,
   autoTrade = false,
   onToggleScanning,
@@ -32,6 +36,8 @@ export default function ClawArbsTopBar({
   soundOn: boolean;
   agentCount: number;
   pnl: number;
+  trades: Trade[];
+  scannerDetail?: string;
   killSwitch: boolean;
   autoTrade?: boolean;
   onToggleScanning: () => void;
@@ -68,7 +74,7 @@ export default function ClawArbsTopBar({
         <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" /> {agentCount} agents
       </span>
       <span className="flex items-center gap-1 px-2 py-1 rounded text-[11px] shrink-0" style={{ background: "#12151d", color: "#9ca3af" }}>
-        <span className="w-1.5 h-1.5 rounded-full" style={{ background: scanning && !killSwitch ? "#22c55e" : "#6b7280" }} /> Fast loop
+        <span className="w-1.5 h-1.5 rounded-full" style={{ background: scanning && !killSwitch ? "#22c55e" : "#6b7280" }} /> {scannerDetail ?? "Scanner idle"}
       </span>
 
       <div className="flex items-center gap-1 shrink-0">
@@ -95,6 +101,7 @@ export default function ClawArbsTopBar({
         <span className="px-2 py-1 rounded text-[11px] font-bold" style={{ color: pnl >= 0 ? "#34d399" : "#f87171" }}>
           PnL: {formatSignedDollars(pnl)}
         </span>
+        <WalletBalances trades={trades} />
       </div>
     </div>
   );

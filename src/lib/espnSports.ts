@@ -7,6 +7,7 @@
 // All reads are public (no key) and never throw — a failure yields an empty fixture list.
 
 import type { ArbGame } from "./arbitrage/sports";
+import { fetchEspnJson } from "./espnFetch";
 
 const ESPN = "https://site.api.espn.com/apis/site/v2/sports";
 
@@ -53,9 +54,7 @@ function notCompleted(s?: EspnStatus): boolean {
 
 async function getScoreboard(path: string, date?: string): Promise<EspnEvent[]> {
   const url = `${ESPN}/${path}/scoreboard${date ? `?dates=${date}&limit=100` : "?limit=100"}`;
-  const res = await fetch(url, { next: { revalidate: 60 } });
-  if (!res.ok) return [];
-  const j = (await res.json()) as { events?: EspnEvent[] };
+  const j = await fetchEspnJson<{ events?: EspnEvent[] }>(url);
   return j.events ?? [];
 }
 

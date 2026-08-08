@@ -27,9 +27,12 @@ export async function getMarkets(date: string): Promise<NormalizedMarket[]> {
 }
 
 export async function saveMarkets(date: string, list: NormalizedMarket[]): Promise<void> {
-  memStore.set(date, list);
   await fs.mkdir(DATA_DIR, { recursive: true });
-  await fs.writeFile(marketFile(date), JSON.stringify(list, null, 2), "utf-8");
+  const target = marketFile(date);
+  const temporary = `${target}.${process.pid}.${Date.now()}.tmp`;
+  await fs.writeFile(temporary, JSON.stringify(list, null, 2), "utf-8");
+  await fs.rename(temporary, target);
+  memStore.set(date, list);
 }
 
 export function isRunning(date: string): boolean {

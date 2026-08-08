@@ -2,6 +2,7 @@ import { GameMarket, MLBGame, OddsOption } from "@/types";
 import { teamMatchesTitle } from "./teamNormalization";
 import { kalshiGet } from "./kalshiAuth";
 import type { ArbGame } from "./arbitrage/sports";
+import { isFullGameMarketTitle } from "./arbitrage/marketSegment";
 
 const MLB_GAME_SERIES   = "KXMLBGAME";
 const MLB_SPREAD_SERIES = "KXMLBSPREAD";
@@ -142,6 +143,14 @@ function eventSearchText(event: KalshiEvent): string {
   return [event.title, event.sub_title].filter(Boolean).join(" ");
 }
 
+// Combined market text for segment detection. Only full-game markets are tradeable; a
+// segment (1st 5 innings, single inning, half, period, quarter) must never be matched
+// against another book's full-game line. Kalshi's MLB series are full-game today, so this
+// is a defensive guard that keeps the invariant if a segment series ever slips in.
+function isSegmentMarket(m: KalshiMarket): boolean {
+  return !isFullGameMarketTitle(`${m.title ?? ""} ${m.subtitle ?? ""} ${m.yes_sub_title ?? ""}`);
+}
+
 function kalshiTickerIsoDate(ticker: string | undefined): string | null {
   const m = ticker?.match(/-(\d{2})([A-Z]{3})(\d{2})/);
   if (!m) return null;
@@ -223,6 +232,7 @@ function buildMoneyline(markets: KalshiMarket[], game: MLBGame): OddsOption[] {
 
   for (const m of markets) {
     if (!isUsable(m)) continue;
+    if (isSegmentMarket(m)) continue;
     const yesSide = marketYesSide(m, game);
     if (!yesSide) continue;
     const { bid, ask } = readBidAsk(m);
@@ -268,6 +278,7 @@ function buildSpread(
 
   for (const m of markets) {
     if (m.status === "settled" || m.status === "closed") continue;
+    if (isSegmentMarket(m)) continue;
     const { bid, ask } = readBidAsk(m);
     if (bid == null || ask == null || bid < 0.05) continue;
     const line = extractSpreadLine(m);
@@ -328,6 +339,7 @@ function buildTotal(markets: KalshiMarket[]): OddsOption[] {
 
   for (const m of markets) {
     if (m.status === "settled" || m.status === "closed") continue;
+    if (isSegmentMarket(m)) continue;
     const { bid, ask } = readBidAsk(m);
     if (bid == null || ask == null || bid < 0.05) continue;
     const line = extractTotalLine(m);

@@ -140,25 +140,42 @@ export function executedEconomics(
   return { totalCost, guaranteedPayout, expectedProfit, netEdge };
 }
 
-// ── SX.bet $1 minimum-order sizing ────────────────────────────────────────────
+// ── Per-venue minimum-order sizing ─────────────────────────────────────────────
 //
-// SX.bet rejects taker orders below $1. Equal-profit sizing buys the SAME contract count on
-// every leg, so scaling all legs by ONE factor keeps the hedge ratio and the edge% identical
-// — it just trades a larger (still fully guaranteed) arb. Given the arb legs, return the
-// uniform scale needed for the SX leg to stake >= minStakeUsd (1 = no change: already >= $1,
-// no SX leg, or unpriced), plus the total stake at that floor (what the live cap must allow).
-export function sxbetMinStakeScale(
-  legs: Pick<ArbLeg, "venueId" | "priceCents" | "size">[],
-  minStakeUsd = 1
+// Some venues reject orders below a fixed dollar minimum. Returns the dollar order minimum
+// for a venue, 0 if none. Single source of truth for these floors (the execution config's
+// SXBET_MIN_TAKER_STAKE_USD derives from this).
+export function venueMinStakeUsd(venueId: string): number {
+  return venueId.trim() ? 1.01 : 0;
+}
+
+// Predict.fun rejects orders below two shares even when their dollar value clears the
+// shared minimum. Other venue-specific contract floors are already implied by $1.01.
+export function venueMinContracts(venueId: string): number {
+  return venueId === "predictfun" ? 2 : 0;
+}
+
+// An arb whose leg on a $-minimum venue would stake less than that minimum is sized UP.
+// Equal-profit sizing buys the SAME contract count on every leg, so scaling all legs by ONE
+// factor keeps the hedge ratio and the edge% identical — it just trades a larger (still fully
+// guaranteed) arb. Returns the uniform scale needed so EVERY min-venue leg clears its minimum
+// (1 = no change), plus the total stake at that floor (what the live cap must be allowed up to).
+export function venueMinStakeScale(
+  legs: Pick<ArbLeg, "venueId" | "priceCents" | "size">[]
 ): { scale: number; floorTotalUsd: number } {
-  const sx = legs.find((l) => l.venueId.toLowerCase().includes("sx"));
-  if (!sx || sx.size <= 0) return { scale: 1, floorTotalUsd: 0 };
-  const sxPrice = centsToDollars(sx.priceCents);
-  if (sxPrice <= 0 || sxPrice * sx.size >= minStakeUsd) return { scale: 1, floorTotalUsd: 0 };
-  // Contracts on every leg for the SX leg to clear the minimum; round UP so 4-dp size
-  // rounding downstream can't leave it a hair under $1.
-  const floorContracts = Math.ceil((minStakeUsd / sxPrice) * 1e4) / 1e4;
-  const scale = floorContracts / sx.size;
+  let scale = 1;
+  for (const l of legs) {
+    const min = venueMinStakeUsd(l.venueId);
+    const minContracts = venueMinContracts(l.venueId);
+    if ((min <= 0 && minContracts <= 0) || l.size <= 0) continue;
+    const price = centsToDollars(l.priceCents);
+    if (price <= 0 || (price * l.size >= min && l.size >= minContracts)) continue;
+    // Contracts for THIS leg to clear its minimum; round UP so 4-dp size rounding downstream
+    // can't leave it a hair under. Take the largest scale so every min-venue leg clears.
+    const floorContracts = Math.max(minContracts, Math.ceil((min / price) * 1e4) / 1e4);
+    scale = Math.max(scale, floorContracts / l.size);
+  }
+  if (scale <= 1) return { scale: 1, floorTotalUsd: 0 };
   const floorTotalUsd = round(
     legs.reduce((s, l) => s + centsToDollars(l.priceCents) * round(l.size * scale, 4), 0),
     2

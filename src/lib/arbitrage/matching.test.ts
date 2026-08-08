@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { matchTotals, matchMoneyline, matchMarkets } from "./matching";
+import { buildEventKey, matchTotals, matchMoneyline, matchMarkets } from "./matching";
 import type { MarketType, NormalizedMarket, Outcome } from "@/types/arbitrage";
 
 function nm(
@@ -7,14 +7,14 @@ function nm(
   marketType: MarketType,
   outcome: Outcome,
   priceCents: number,
-  opts: { line?: number | null; teams?: [string, string]; liquidityUsd?: number } = {}
+  opts: { line?: number | null; teams?: [string, string]; liquidityUsd?: number; sport?: "baseball" | "soccer"; league?: string } = {}
 ): NormalizedMarket {
-  const { line = null, teams = ["Reds", "Phillies"], liquidityUsd = 100 } = opts;
+  const { line = null, teams = ["Reds", "Phillies"], liquidityUsd = 100, sport = "baseball", league = "mlb" } = opts;
   return {
     venueId: venue,
     marketId: `${venue}:401:${marketType}:${line ?? 0}:${outcome}`,
-    sport: "baseball",
-    league: "mlb",
+    sport,
+    league,
     startTime: "2026-07-10",
     teams,
     marketType,
@@ -62,6 +62,20 @@ describe("matching — totals", () => {
       nm("kalshi", "total", "under", 49, { line: 6.5 }),
     ]);
     expect(matched).toHaveLength(0);
+  });
+});
+
+describe("matching - sport-aware team normalization", () => {
+  it("keeps MLS Seattle as Sounders instead of the MLB Mariners", () => {
+    const key = buildEventKey(
+      nm("polymarket", "moneyline", "home", 49, {
+        sport: "soccer",
+        league: "mls",
+        teams: ["Seattle", "Portland"],
+      })
+    );
+    expect(key).toContain("seattle sounders fc");
+    expect(key).not.toContain("seattle mariners");
   });
 });
 

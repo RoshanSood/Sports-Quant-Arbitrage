@@ -8,6 +8,7 @@
 
 import { getCached, isRunning } from "@/lib/valuePlaysCache";
 import { runValuePlaysForDate } from "@/lib/valuePlaysRunner";
+import { resumeArbitrageScanner } from "@/lib/arbitrage/scannerWorker";
 
 function dateStr(offset = 0): string {
   const d = new Date();
@@ -29,6 +30,16 @@ async function runIfMissing(date: string) {
 }
 
 export async function registerNode() {
+  // The arbitrage scanner is a server-owned worker. It survives dashboard reloads and
+  // starts from its persisted enabled state instead of depending on React component state.
+  if (
+    process.env.NEXT_PHASE !== "phase-production-build"
+    && process.env.npm_lifecycle_event !== "build"
+    && process.env.ARB_SCANNER_DISABLED !== "1"
+  ) {
+    resumeArbitrageScanner().catch((e) => console.error("[arbitrage/scanner] startup failed:", e));
+  }
+
   // 1. Run immediately on startup if today has no cache
   runIfMissing(dateStr(0)).catch(console.error);
 

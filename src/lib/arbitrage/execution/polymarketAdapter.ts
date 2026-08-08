@@ -22,7 +22,7 @@ import { Wallet } from "ethers";
 import { POLYGON_CHAIN_ID, polymarketClobHost, polygonUsdcAddress } from "./chains";
 import type { PolymarketCreds } from "./onchainCreds";
 import { deriveEoa, providerFor, usdcBalance } from "./wallet";
-import type { ExecutionAdapter, FillConfirmation, OrderRequest, OrderResult } from "./types";
+import type { ExecutableOrderQuote, ExecutionAdapter, FillConfirmation, OrderRequest, OrderResult } from "./types";
 import { clobSignerShim, walletKey } from "./wallet";
 
 // Which signature scheme the funded wallet uses. Default EOA (direct wallet). Users
@@ -136,11 +136,6 @@ export function avgCentsFrom(resp: PostOrderResponse, limitCents: number): numbe
     return roundTo((paid / shares) * 100, 2);
   }
   return limitCents;
-}
-
-function floorTo(value: number, decimals: number): number {
-  const scale = 10 ** decimals;
-  return Math.floor((value + Number.EPSILON) * scale) / scale;
 }
 
 function roundTo(value: number, decimals: number): number {
@@ -277,6 +272,20 @@ export class PolymarketExecutionAdapter implements ExecutionAdapter {
     }
   }
 
+  async quoteOrder(req: OrderRequest): Promise<ExecutableOrderQuote> {
+    const quote = await quotePolymarketFokBuy(req, this.creds, req.limitPriceCents);
+    if (!quote) {
+      return { ok: false, priceCents: req.limitPriceCents, averagePriceCents: req.limitPriceCents, availableContracts: 0, reason: `Polymarket has no ask depth at or below ${req.limitPriceCents.toFixed(2)}c` };
+    }
+    return {
+      ok: quote.availableContracts + 1e-9 >= req.sizeContracts,
+      priceCents: quote.limitPriceCents,
+      averagePriceCents: quote.avgPriceCents,
+      availableContracts: quote.availableContracts,
+      reason: quote.availableContracts + 1e-9 >= req.sizeContracts ? undefined : `Polymarket fillable size ${quote.availableContracts.toFixed(2)} < ${req.sizeContracts.toFixed(2)}`,
+    };
+  }
+
   async placeOrder(req: OrderRequest): Promise<OrderResult> {
     const key = this.key();
     if (!key) return reject(req, "Polymarket wallet key not configured");
@@ -288,11 +297,10 @@ export class PolymarketExecutionAdapter implements ExecutionAdapter {
     const price = req.limitPriceCents / 100; // probability price 0..1
     try {
       const client = await buildClient(key, this.funder(), this.sigType());
-      const amount = polymarketFokBuyAmount(req.sizeContracts, req.limitPriceCents);
-      if (amount <= 0) return reject(req, "Polymarket order cost rounds below $0.01");
-      // createMarketOrder keeps FOK buy maker amounts at cent precision and derives
-      // the CLOB token amount at Polymarket's required precision.
-      const signed = await client.createMarketOrder({ tokenID, amount, price, side: Side.BUY, orderType: OrderType.FOK });
+      // A limit FOK expresses the hedge in exact SHARES. The previous market-order path
+      // expressed BUY amount in rounded dollars, which could request too many/few shares
+      // and was the source of repeated all-or-nothing kills.
+      const signed = await client.createOrder({ tokenID, price, size: req.sizeContracts, side: Side.BUY });
       const resp = (await client.postOrder(signed, OrderType.FOK)) as PostOrderResponse;
 
       // Decide fill from ACTUAL shares received, not from success+orderID (see helper).

@@ -27,9 +27,8 @@ import { getRiskSettings } from "./riskStore";
 import { getTradesByDate, saveTrade } from "./tradeStore";
 import { appendLog } from "./arbLogStore";
 import { DEFAULT_AGENT } from "./seed";
-import { centsToDollars, sxbetMinStakeScale } from "./arbMath";
+import { centsToDollars, venueMinStakeScale } from "./arbMath";
 import { computeFees, feeFractionOfStake } from "./feeEngine";
-import { SXBET_MIN_TAKER_STAKE_USD } from "./execution/config";
 import { getVenues } from "./venueStore";
 import { filterMarketsForAgent } from "./venueFilters";
 import { dateParamToIsoDate } from "./date";
@@ -51,6 +50,15 @@ const LIVE_REFRESH_RETRY_DELAY_MS = 250;
 // fresh. When they're fresher than this (clamped to staleQuoteMs) we skip the pre-trade
 // network refresh entirely and go straight to the gates — the single biggest speedup.
 const LIVE_QUOTE_FRESH_MS = 2500;
+
+export function maxLiveQuoteAgeMs(risk: Pick<RiskSettings, "staleQuoteMs">, agent: Pick<Agent, "staleQuoteMs">): number {
+  const limits = [risk.staleQuoteMs, agent.staleQuoteMs].filter((v) => Number.isFinite(v) && v > 0);
+  return limits.length ? Math.min(...limits) : LIVE_QUOTE_FRESH_MS;
+}
+
+export function shouldHaltForLiveStaleQuote(ageMs: number, maxAgeMs: number): boolean {
+  return ageMs > maxAgeMs;
+}
 
 function nowIso() {
   return new Date().toISOString();
@@ -157,7 +165,12 @@ export async function prepareExecution(opportunityId: string, date: string, requ
   const detect = async () => {
     const markets = filterMarketsForAgent(await getMarkets(date), configuredVenues, agent);
     const { matched } = matchMarkets(markets);
-    const { opportunities } = detectArbs(matched, agent, { minLiquidityUsd: risk.minLiquidityUsd, staleDivergenceCents: risk.staleDivergenceCents });
+    const { opportunities } = detectArbs(matched, agent, {
+      minLiquidityUsd: risk.minLiquidityUsd,
+      minExpectedProfitUsd: risk.minExpectedProfitUsd,
+      liquidityStakeBufferMultiple: risk.liquidityStakeBufferMultiple,
+      staleDivergenceCents: risk.staleDivergenceCents,
+    });
     return { markets, opp: opportunities.find((o) => o.id === opportunityId) };
   };
   // Age (ms) of the oldest quote backing the opportunity's legs.
@@ -231,14 +244,30 @@ export async function prepareExecution(opportunityId: string, date: string, requ
     });
   }
 
-  // Live execution trusts the targeted final refresh: if the refreshed opportunity is
-  // still an arb, continue with its updated prices. Paper still uses the wider stale
-  // cache window because it can operate from stored snapshots.
+  // Live execution needs the targeted final refresh to actually produce fresh rows. If a
+  // venue times out and the merged opportunity is still backed by stale cache, fail closed
+  // before sending orders; paper can still use the same stale gate without fill risk.
   const oldestMs = legAgeMs(opp, markets);
+  const maxQuoteAgeMs = maxLiveQuoteAgeMs(risk, agent);
   if (requestedMode === "live") {
-    addStep("stale_quote", "Quote freshness", "pass", `${oldestMs}ms oldest quote after targeted refresh; using refreshed arb prices`);
+    const isStale = shouldHaltForLiveStaleQuote(oldestMs, maxQuoteAgeMs);
+    addStep(
+      "stale_quote",
+      "Quote freshness",
+      isStale ? "halt" : "pass",
+      `${oldestMs}ms oldest quote after targeted refresh; max ${maxQuoteAgeMs}ms`
+    );
+    if (isStale) {
+      return asHalt(
+        "stale_quote",
+        `quote age ${oldestMs}ms exceeds ${maxQuoteAgeMs}ms after targeted refresh`,
+        opp.matchup,
+        venues,
+        opp.netEdge,
+        { oldestMs, maxQuoteAgeMs }
+      );
+    }
   } else {
-    const maxQuoteAgeMs = risk.staleQuoteMs;
     addStep("stale_quote", "Quote freshness", oldestMs <= maxQuoteAgeMs ? "pass" : "halt", `${oldestMs}ms oldest quote`);
     if (oldestMs > maxQuoteAgeMs) {
       return asHalt("stale_quote", `quote age ${oldestMs}ms exceeds ${maxQuoteAgeMs}ms (venue feed not refreshing fast enough)`, opp.matchup, venues, opp.netEdge, { oldestMs, maxQuoteAgeMs });
@@ -281,24 +310,23 @@ export async function prepareExecution(opportunityId: string, date: string, requ
     return { ...l, priceCents: executedCents, decimalOdds: 100 / executedCents, impliedProbability: executedCents / 100 };
   });
 
-  // ── SX.bet $1 minimum order: size the WHOLE arb up so the SX leg clears $1 ──────────
-  // A sub-$1 SX order cannot be placed at all, so this $1 floor overrides the agent's target
-  // size AND the risk live-stake cap (runExecution raises the cap to minLiveStakeFloorUsd).
+  // ── Venue $1 minimum order: size the WHOLE arb up so every min-venue leg clears $1 ──────
+  // Every configured venue must receive at least $1.01. A leg
+  // below its venue minimum cannot be placed at all, so this floor overrides the agent's target
+  // size, but never the risk live-stake cap (runExecution rejects an oversized basket).
   // Scaling every leg by the same factor preserves the hedge ratio and edge% — see the helper.
-  // Example: Polymarket ~$3 / SX ~$0.68 → SX is bumped to $1 and Polymarket scales with it
-  // (~$4.4) so the arb still holds.
+  // Example: Polymarket 1 contract @ 90c = $0.90 (rejected) → the arb is scaled ~1.12x so the
+  // Polymarket leg stakes $1 and every other leg scales with it, so the arb still holds.
   let minLiveStakeFloorUsd = 0;
-  const { scale: sxScale, floorTotalUsd } = sxbetMinStakeScale(executedLegs, SXBET_MIN_TAKER_STAKE_USD);
-  if (sxScale > 1) {
-    executedLegs.forEach((l) => (l.size = round(l.size * sxScale, 4)));
+  const { scale: minVenueScale, floorTotalUsd } = venueMinStakeScale(executedLegs);
+  if (minVenueScale > 1) {
+    executedLegs.forEach((l) => (l.size = round(l.size * minVenueScale, 4)));
     minLiveStakeFloorUsd = floorTotalUsd;
-    const sxLeg = executedLegs.find((l) => l.venueId.toLowerCase().includes("sx"));
-    const sxStakeNow = sxLeg ? centsToDollars(sxLeg.priceCents) * sxLeg.size : 0;
     addStep(
-      "sxbet_min_order",
-      "SX.bet $1 minimum",
+      "venue_min_order",
+      "Venue $1 minimum",
       "warn",
-      `sized arb up ${sxScale.toFixed(2)}x so SX.bet stakes $${sxStakeNow.toFixed(2)} (>= $${SXBET_MIN_TAKER_STAKE_USD.toFixed(2)} min); overrides target size & live cap`
+      `sized arb up ${minVenueScale.toFixed(2)}x so every venue leg stakes at least $1.01; live cap still applies`
     );
   }
 
@@ -378,7 +406,12 @@ export async function verifyPostFill(opportunityId: string, date: string, entryN
     const configuredVenues = await getVenues();
     const markets = filterMarketsForAgent(await getMarkets(date), configuredVenues, agent);
     const { matched } = matchMarkets(markets);
-    const { opportunities } = detectArbs(matched, agent, { minLiquidityUsd: risk.minLiquidityUsd, staleDivergenceCents: risk.staleDivergenceCents });
+    const { opportunities } = detectArbs(matched, agent, {
+      minLiquidityUsd: risk.minLiquidityUsd,
+      minExpectedProfitUsd: risk.minExpectedProfitUsd,
+      liquidityStakeBufferMultiple: risk.liquidityStakeBufferMultiple,
+      staleDivergenceCents: risk.staleDivergenceCents,
+    });
     const same = opportunities.find((o) => o.id === opportunityId);
     if (!same) {
       return {
