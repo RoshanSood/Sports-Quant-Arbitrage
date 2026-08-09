@@ -28,6 +28,7 @@ import PlayModal from "./PlayModal";
 import AnalyticsPanel from "./AnalyticsPanel";
 import { allAuthHeaders } from "./venueCreds";
 import { pacificTodayDateStr } from "@/lib/arbitrage/date";
+import { isScannerSnapshotFresh } from "@/lib/arbitrage/scannerFreshness";
 
 export type PanelKey = "arbs" | "portfolio" | "risk" | "log" | "matchmap" | "analytics";
 
@@ -47,11 +48,16 @@ export type ExecResponse = {
 // states) â€” never mock fixtures. Venues start from the seed so the arena has nodes.
 const USE_MOCK = false;
 
-// Floor gap between completed scans. Each scan re-ingests all venues, so the effective
-// cadence is "scan duration + 1s" and never overlaps a still-running ingestion.
-const SCAN_MIN_GAP_MS = 1000;
-const INGEST_POLL_MS = 120;
-const AUTO_BATCH_LIMIT = 4;
+// How often the client polls the server-side scanner for its latest cached result. The
+// actual ingest/match/detect work runs continuously in a background loop on the server
+// (scannerWorker.ts) — this is just a cheap read, not a trigger, so it can be fast without
+// re-doing any heavy compute per poll.
+const SCANNER_POLL_MS = 800;
+// This limits the age of a computed trading signal; it does not time out venue feeds.
+const SCANNER_SNAPSHOT_MAX_AGE_MS = 10_000;
+// Portfolio/logs are a periodic safety-net refresh (every trade-placing action already
+// triggers its own immediate refresh), so this can be far slower than the opportunity poll.
+const PORTFOLIO_REFRESH_MS = 20000;
 
 export default function ArbitrageClient() {
   const [venues, setVenues] = useState<Venue[]>(DEFAULT_VENUES);
@@ -75,19 +81,27 @@ export default function ArbitrageClient() {
   const [playOpp, setPlayOpp] = useState<ArbOpportunity | null>(null);
 
   const [scanning, setScanning] = useState(false);
+  const [scannerSynced, setScannerSynced] = useState(false);
   const [soundOn, setSoundOn] = useState(false);
-  const [killSwitch, setKillSwitch] = useState(false);
   const [agentTrade, setAgentTrade] = useState<AgentTrade | null>(null);
   const [executingOppIds, setExecutingOppIds] = useState<Set<string>>(() => new Set());
   const tradeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const autoFiredRef = useRef<Set<string>>(new Set());
+  // Ids currently being placed — prevents firing the SAME opportunity twice concurrently
+  // while a placement is in flight. Deliberately NOT a permanent "already fired" set: an id
+  // is never retired for the session, so a failed/halted attempt is retried on the next poll.
   const autoInFlightRef = useRef<Set<string>>(new Set());
+  // Invalidates unsent baskets whenever the scan run changes.
+  const autoBatchGenerationRef = useRef(0);
+  const scanActivatedAtRef = useRef(0);
+  const lastAutoSnapshotUpdatedAtRef = useRef(0);
 
   // Live score updates for the games the engine currently maps (Activity â†’ SCORES tab).
   const [scoreFeed, setScoreFeed] = useState<ScoreEvent[]>([]);
   const prevScores = useRef<Map<string, { home: number; away: number; period: number; state: string }>>(new Map());
 
   const pnl = trades.reduce((s, t) => s + (t.realizedPnl ?? 0), 0);
+  const todayDate = pacificTodayDateStr();
+  const todayTrades = useMemo(() => trades.filter((trade) => trade.date === todayDate), [trades, todayDate]);
 
   // One live edge per active venue pair (best net edge), drawn book-to-book in the arena.
   const edges = useMemo<BookEdge[]>(() => {
@@ -283,11 +297,9 @@ export default function ArbitrageClient() {
     }
   }, [agent.id]);
 
-  // Persist risk changes server-side â€” the execution gate reads server risk.json, so a
-  // UI-only change (kill switch, live stake cap) must be PATCHed or it won't be enforced.
+  // Persist risk changes server-side so the execution gate sees the current live stake cap.
   const updateRisk = useCallback((partial: Partial<RiskSettings>) => {
     setRisk((prev) => ({ ...prev, ...partial }));
-    if (typeof partial.killSwitch === "boolean") setKillSwitch(partial.killSwitch);
     if (!USE_MOCK) {
       fetch("/api/arbitrage/risk", {
         method: "PATCH",
@@ -297,46 +309,35 @@ export default function ArbitrageClient() {
     }
   }, []);
 
-  const toggleKill = useCallback((v: boolean) => {
-    updateRisk({ killSwitch: v });
-    if (v) setScanning(false);
-  }, [updateRisk]);
-
   // Pull real paper positions + logs written by the execution pipeline. First run
-  // auto-settlement so any finished games close out and land in realized P&L.
-  const refreshPortfolio = useCallback(async () => {
+  // auto-settlement so any finished games close out and land in realized P&L. Scoped to
+  // TODAY by default — positions settle same-day (confirmed: no multi-day open positions),
+  // so there's no need to reload every trade/log file ever written (33MB+ of logs after a
+  // couple weeks) on every refresh. "all" is used only when the user is actively looking at
+  // history (the Portfolio/Analytics panels), not on the hot/background paths.
+  const refreshPortfolio = useCallback(async (scope: "today" | "all" = "today") => {
     await fetch("/api/arbitrage/settle", { method: "POST" }).catch(() => null);
-    // Load all positions/logs (across dates) so multi-day open positions show + settle.
+    const dateParam = scope === "today" ? `?date=${pacificTodayDateStr()}` : "";
     const [tr, lg] = await Promise.all([
-      fetch(`/api/arbitrage/trades`).then((r) => r.json()).catch(() => null),
-      fetch(`/api/arbitrage/logs`).then((r) => r.json()).catch(() => null),
+      fetch(`/api/arbitrage/trades${dateParam}`).then((r) => r.json()).catch(() => null),
+      fetch(`/api/arbitrage/logs${dateParam}`).then((r) => r.json()).catch(() => null),
     ]);
-    if (Array.isArray(tr?.trades) && tr.trades.length) {
+    if (Array.isArray(tr?.trades)) {
       setTrades(tr.trades);
-      setPortfolioLive(true);
+      if (tr.trades.length) setPortfolioLive(true);
     }
-    if (Array.isArray(lg?.logs) && lg.logs.length) setLogs(lg.logs);
+    if (Array.isArray(lg?.logs)) setLogs(lg.logs);
   }, []);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      // Auto-settle finished games before loading positions.
-      await fetch("/api/arbitrage/settle", { method: "POST" }).catch(() => null);
-      const [tr, lg] = await Promise.all([
-        fetch(`/api/arbitrage/trades`).then((r) => r.json()).catch(() => null),
-        fetch(`/api/arbitrage/logs`).then((r) => r.json()).catch(() => null),
-      ]);
-      if (cancelled) return;
-      if (Array.isArray(tr?.trades) && tr.trades.length) {
-        setTrades(tr.trades);
-        setPortfolioLive(true);
-      }
-      if (Array.isArray(lg?.logs) && lg.logs.length) setLogs(lg.logs);
+      if (!cancelled) await refreshPortfolio("today");
     })();
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Execute an opportunity â€” animate the agent sliding to leg A + edge to leg B, run the
@@ -400,99 +401,159 @@ export default function ArbitrageClient() {
 
   const fireAutoBatch = useCallback(
     async (nextOpps: ArbOpportunity[]) => {
-      if (!agent.autoTrade || killSwitch) return;
-      const batch = nextOpps
-        .filter((o) => !autoFiredRef.current.has(o.id) && !autoInFlightRef.current.has(o.id))
-        .slice(0, AUTO_BATCH_LIMIT);
+      if (!agent.autoTrade) return;
+      const generation = autoBatchGenerationRef.current;
+      // Fire EVERY currently-detected opportunity that isn't already being placed. An id is
+      // never permanently retired: a failed/halted attempt (arb momentarily vanished, thin
+      // depth, a stale quote) leaves it eligible, so it keeps getting retried on every poll
+      // until it actually places. autoInFlightRef only stops firing the SAME id twice
+      // concurrently while one placement is still running.
+      const batch = nextOpps.filter((o) => !autoInFlightRef.current.has(o.id));
       if (batch.length === 0) return;
 
       for (const opp of batch) autoInFlightRef.current.add(opp.id);
-
       const mode = agent.live ? "live" : "paper";
-      const results = await Promise.allSettled(batch.map((opp) => executeOpportunity(opp, mode, { refreshAfter: false })));
-      results.forEach((result, i) => {
-        if (result.status === "fulfilled" && result.value?.result) autoFiredRef.current.add(batch[i].id);
-      });
-      for (const opp of batch) autoInFlightRef.current.delete(opp.id);
+      try {
+        // Submit one basket at a time. A scan toggle invalidates all baskets not submitted
+        // yet. Naked outcomes are recorded but do not pause this batch or the scanner.
+        for (const opp of batch) {
+          if (generation !== autoBatchGenerationRef.current) break;
+          await executeOpportunity(opp, mode, { refreshAfter: false });
+          if (generation !== autoBatchGenerationRef.current) break;
+        }
+      } finally {
+        for (const opp of batch) autoInFlightRef.current.delete(opp.id);
+      }
       await refreshPortfolio();
     },
-    [agent.autoTrade, agent.live, killSwitch, executeOpportunity, refreshPortfolio]
+    [agent.autoTrade, agent.live, executeOpportunity, refreshPortfolio]
   );
 
-  // Re-run the scan: re-ingest fresh quotes, then re-derive match map + opportunities
-  // + the main-line watch board. Lets the user refresh the live prices on demand.
-  const refreshScan = useCallback(async () => {
-    const date = pacificTodayDateStr();
-    setRefreshing(true);
-    try {
-      // GET with refresh=1 re-triggers ingestion server-side (no admin password).
-      await fetch(`/api/arbitrage/markets?date=${date}&refresh=1`).catch(() => null);
-
-      // Poll until ingestion settles, then pull derived data. Tight granularity so a
-      // finished scan is picked up fast (the loop below re-scans immediately after).
-      for (let i = 0; i < 40; i++) {
-        await new Promise((r) => setTimeout(r, INGEST_POLL_MS));
-        const m = await fetch(`/api/arbitrage/markets?date=${date}`).then((r) => r.json()).catch(() => null);
-        if (m && !m.running && m.markets?.length) break;
-      }
-      const [mm, op] = await Promise.all([
-        fetch(`/api/arbitrage/match-map?date=${date}`).then((r) => r.json()).catch(() => null),
-        fetch(`/api/arbitrage/opportunities?date=${date}`).then((r) => r.json()).catch(() => null),
-      ]);
-      if (mm?.stats) setMatchMap({ matched: mm.matched, rejects: mm.rejects, stats: mm.stats });
-      if (Array.isArray(op?.opportunities)) {
-        const nextOpps = op.opportunities as ArbOpportunity[];
-        setOpportunities(nextOpps);
-        setWatch(Array.isArray(op.watch) ? op.watch : []);
-        setOppsLive(true);
+  // Read the server's cached scan result (scannerWorker.ts runs the actual ingest/match/
+  // detect continuously in the background — this is a plain GET, no compute triggered here).
+  const pollScanner = useCallback(async () => {
+    const res = await fetch("/api/arbitrage/scanner").then((r) => r.json()).catch(() => null);
+    if (!res) return;
+    const maxSnapshotAgeMs = Math.max(1_000, Math.min(risk.staleQuoteMs, SCANNER_SNAPSHOT_MAX_AGE_MS));
+    if (!isScannerSnapshotFresh(res, scanActivatedAtRef.current, Date.now(), maxSnapshotAgeMs)) {
+      setOpportunities([]);
+      setWatch([]);
+      setOppsLive(false);
+      return;
+    }
+    if (res.matchMap?.stats) setMatchMap(res.matchMap);
+    if (Array.isArray(res.opportunities)) {
+      const nextOpps = res.opportunities as ArbOpportunity[];
+      setOpportunities(nextOpps);
+      setWatch(Array.isArray(res.watch) ? res.watch : []);
+      setOppsLive(true);
+      // Rendering polls are faster than full venue scans. Execute a completed server
+      // snapshot once, not once per 800ms GET; a later scan gets a new updatedAt and may
+      // retry if the opportunity still genuinely exists.
+      const snapshotUpdatedAt = Number(res.updatedAt);
+      if (snapshotUpdatedAt !== lastAutoSnapshotUpdatedAtRef.current) {
+        lastAutoSnapshotUpdatedAtRef.current = snapshotUpdatedAt;
         await fireAutoBatch(nextOpps);
       }
-    } finally {
-      setRefreshing(false);
     }
-  }, [fireAutoBatch]);
+  }, [fireAutoBatch, risk.staleQuoteMs]);
 
-  // Auto-execute: when auto-trade is on, fire each qualifying
-  // opportunity once (dedup via a fired-set). Mode is LIVE when the agent's Live toggle is
-  // on; otherwise paper. A live fire still passes the
-  // server gate (agent.live, kill switch, stake cap, per-venue creds); if it can't fire it
-  // is reported FAILED with the blocking reasons â€” never run as paper. Kill switch / Stop halts it.
+  // Sync local Scanning state from the server once on mount — the background scan is
+  // persistent server-side, so a page reload (or a second tab) should reflect whatever's
+  // already running rather than assume it's off.
   useEffect(() => {
-    if (!agent.autoTrade || killSwitch) return;
-    const pending = opportunities.filter((o) => !autoFiredRef.current.has(o.id) && !autoInFlightRef.current.has(o.id));
-    if (pending.length === 0) return;
-    let cancelled = false;
-    (async () => {
-      if (!cancelled) await fireAutoBatch(pending);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [opportunities, agent.autoTrade, killSwitch, fireAutoBatch]);
+    fetch("/api/arbitrage/scanner")
+      .then((r) => r.json())
+      .then((res) => {
+        if (res?.scanning) {
+          scanActivatedAtRef.current = Number(res.startedAt) || Date.now();
+          setScanning(true);
+        }
+        setScannerSynced(true);
+      })
+      .catch(() => setScannerSynced(true));
+  }, []);
 
-  // Auto-scan: while Scanning is on, re-ingest fresh quotes back-to-back (a new scan
-  // starts as soon as the previous finishes) so prices â€” and auto-execution â€” stay as
-  // fresh as the venues allow, for catching short-lived arbs. A small floor prevents a
-  // busy-loop; Stop / kill switch halts it.
+  // Start/stop the SERVER's background scan loop when the local toggle changes (the actual
+  // work runs in scannerWorker.ts, not here — this is just the on/off switch).
   useEffect(() => {
-    if (!scanning || killSwitch) return;
+    if (!scannerSynced) return;
+    autoBatchGenerationRef.current += 1;
+    lastAutoSnapshotUpdatedAtRef.current = 0;
+    const active = scanning;
+    const action = active ? "start" : "stop";
+    scanActivatedAtRef.current = active ? Date.now() : 0;
+    fetch("/api/arbitrage/scanner", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action }),
+    })
+      .then((r) => r.json())
+      .then((res) => {
+        if (active && Number(res?.startedAt) > scanActivatedAtRef.current) {
+          scanActivatedAtRef.current = Number(res.startedAt);
+        }
+      })
+      .catch(() => null);
+  }, [scanning, scannerSynced]);
+
+  // Poll the cached scan result while Scanning is on. This is a cheap read (no ingest, no
+  // match/detect on the client or on this request) — the UI lag that used to come from
+  // re-triggering + waiting on full ingestion every ~1s is gone; this just renders whatever
+  // the background loop has already computed. Deliberately does NOT call refreshPortfolio
+  // here (see the slower effect below) — that reloads EVERY trade/log file ever written
+  // (33MB+ of logs alone after a couple weeks), and doing that every 800ms was the actual
+  // dominant cause of the ongoing lag, well beyond anything ingest/matching accounted for.
+  useEffect(() => {
+    if (!scanning) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const tick = async () => {
       if (cancelled) return;
+      setRefreshing(true);
       try {
-        await Promise.all([refreshScan(), refreshPortfolio()]);
+        await pollScanner();
       } catch {
-        // keep looping through transient errors
+        // keep polling through transient errors
+      } finally {
+        setRefreshing(false);
       }
-      if (!cancelled) timer = setTimeout(tick, SCAN_MIN_GAP_MS);
+      if (!cancelled) timer = setTimeout(tick, SCANNER_POLL_MS);
     };
     tick();
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [scanning, killSwitch, refreshScan, refreshPortfolio]);
+  }, [scanning, pollScanner]);
+
+  // Portfolio/logs refresh on a MUCH slower cadence than the opportunity poll above — full
+  // history (all dates, needed so multi-day open positions still show + settle) doesn't need
+  // sub-second freshness the way live prices do. Every actual trade-placing action
+  // (executeOpportunity, fireAutoBatch, settleTrade) already calls refreshPortfolio directly
+  // right after it fires, so this is just a periodic safety-net catch-all, not the primary
+  // freshness path.
+  useEffect(() => {
+    if (!scanning) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const tick = async () => {
+      if (cancelled) return;
+      try {
+        // Analytics is the only full-history consumer. Portfolio intentionally remains a
+        // today-only operational view regardless of whether scanning is running.
+        await refreshPortfolio(panel === "analytics" ? "all" : "today");
+      } catch {
+        // keep polling through transient errors
+      }
+      if (!cancelled) timer = setTimeout(tick, PORTFOLIO_REFRESH_MS);
+    };
+    timer = setTimeout(tick, PORTFOLIO_REFRESH_MS); // first refresh already ran on mount
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [scanning, refreshPortfolio, panel]);
 
   const openVenue = venues.find((v) => v.id === openVenueId) ?? null;
 
@@ -503,14 +564,15 @@ export default function ArbitrageClient() {
         soundOn={soundOn}
         agentCount={1}
         pnl={pnl}
-        killSwitch={killSwitch}
+        trades={trades}
         autoTrade={agent.autoTrade}
-        onToggleScanning={() => !killSwitch && setScanning((s) => !s)}
+        onToggleScanning={() => setScanning((s) => !s)}
         onToggleSound={() => setSoundOn((s) => !s)}
-        onToggleAuto={() => !killSwitch && updateAgent({ autoTrade: !agent.autoTrade })}
+        onToggleAuto={() => updateAgent({ autoTrade: !agent.autoTrade })}
         onOpenPanel={(k) => {
           setPanel(k);
-          if (k === "portfolio" || k === "analytics") refreshPortfolio(); // settle finished games on open
+          if (k === "analytics") refreshPortfolio("all");
+          else if (k === "portfolio") refreshPortfolio("today");
         }}
         onOpenAgent={() => setAgentOpen(true)}
         onReset={() => {
@@ -526,11 +588,11 @@ export default function ArbitrageClient() {
           opportunities={opportunities}
           trades={trades}
           scores={scoreFeed}
-          edges={scanning && !killSwitch ? edges : []}
+          edges={scanning ? edges : []}
           agentName={agent.name}
           agentTrade={agentTrade}
           marketsLive={marketsLive}
-          scanning={scanning && !killSwitch}
+          scanning={scanning}
           onSelectVenue={(id) => setOpenVenueId(id)}
         />
 
@@ -544,19 +606,17 @@ export default function ArbitrageClient() {
             agentName={agent.name}
             live={oppsLive}
             refreshing={refreshing}
-            onRefresh={refreshScan}
+            onRefresh={pollScanner}
             onClose={() => setPanel(null)}
             onPlay={(opp) => setPlayOpp(opp)}
           />
         )}
         {panel === "portfolio" && (
-          <PortfolioPanel trades={trades} live={portfolioLive} onSettle={settleTrade} onClose={() => setPanel(null)} />
+          <PortfolioPanel trades={todayTrades} live={portfolioLive} onSettle={settleTrade} onClose={() => setPanel(null)} />
         )}
         {panel === "risk" && (
           <RiskPanel
             risk={risk}
-            killSwitch={killSwitch}
-            onToggleKill={toggleKill}
             onUpdateRisk={updateRisk}
             agentMaxStake={agent.maxStake}
             onUpdateAgentStake={(maxStake) => updateAgent({ maxStake })}

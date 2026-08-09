@@ -2,7 +2,7 @@
 // marketable **FILL_OR_KILL** limit BUY on the central order book: fills fully at ≤ our
 // price or is killed — no resting/naked leg. The leg's nativeMarketId is the market slug
 // and nativeSide is yes/no (long/Over = YES). Credentials (Key ID + Ed25519 secret) are
-// per-request from the UI or server env; the gate (agent Live toggle + kill switch + UI
+// per-request from the UI or server env; the gate (agent Live toggle + UI
 // stake cap + admin auth) decides whether it fires.
 //
 // NOTE: validate against a $1 live order before trusting it — the exact create-order enum

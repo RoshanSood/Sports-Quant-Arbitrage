@@ -42,8 +42,12 @@ export type SportConfig = {
   espnScorePath?: string;
   // Which market types to ingest. Soccer/tennis are moneyline-only for now.
   markets: { totals?: boolean; spread?: boolean; moneyline?: boolean };
-  // Per-venue league identifiers — omit a venue that doesn't carry the sport.
-  kalshi?: { game: string; total: string; spread: string };
+  // Per-venue league identifiers — omit a venue that doesn't carry the sport. total/spread
+  // are optional because tennis only wires up `game` (a match-winner series, e.g.
+  // KXWTAMATCH) — Kalshi has no tennis totals/spread markets, and ingestSportMarkets never
+  // reads total/spread unless `markets.totals`/`markets.spread` is also set, which tennis's
+  // moneyline-only `markets` config leaves off.
+  kalshi?: { game: string; total?: string; spread?: string };
   polyTag?: string;
   sxLeagueId?: number; // fixed SX league (MLB/WNBA totals+ml+spread)
   // SX moneyline for sports whose leagues are ephemeral/per-tournament (soccer, tennis):
@@ -53,6 +57,14 @@ export type SportConfig = {
   predictfun?: boolean; // predict.fun currently lists MLB moneyline only
   // Fixed run-line for the spread market (MLB = 1.5). Undefined = variable point spread.
   spreadFixedLine?: number;
+  // First-5-innings (F5) ladder — MLB only. A parallel series/tag to the full-game ones
+  // above; ingested and matched as its own segment (see marketSegment.ts) so it can never
+  // be paired with a full-game market of the same line. F5 run-line is always the 1.5
+  // fixed line (same convention as the full-game run-line).
+  f5?: {
+    kalshi?: { game: string; total: string; spread: string };
+    polyTag?: string;
+  };
 };
 
 export const SPORTS: SportConfig[] = [
@@ -68,6 +80,10 @@ export const SPORTS: SportConfig[] = [
     cloudbet: { competition: "baseball-usa-mlb", moneyline: "baseball.moneyline" },
     predictfun: true,
     spreadFixedLine: 1.5,
+    f5: {
+      kalshi: { game: "KXMLBF5", total: "KXMLBF5TOTAL", spread: "KXMLBF5SPREAD" },
+      polyTag: "mlb",
+    },
   },
   {
     sport: "basketball",
@@ -119,6 +135,9 @@ export const SPORTS: SportConfig[] = [
     league: "atp",
     fetchGames: espnTennisGamesFetcher("tennis/atp"),
     markets: { moneyline: true },
+    // KXATPMATCH: match-winner series, one ticker PER PLAYER (mutually exclusive), not one
+    // ticker + NO-complement — see fetchKalshiPlayerMatchByGame's comment in kalshi.ts.
+    kalshi: { game: "KXATPMATCH" },
     polyTag: "tennis",
     sxDynamic: { sportId: 6, leagueMatch: /atp/i }, // all active ATP tournament leagues (2-way)
     cloudbet: { sport: "tennis", competitionMatch: /tennis-atp-/i, moneyline: "tennis.winner" },
@@ -128,6 +147,7 @@ export const SPORTS: SportConfig[] = [
     league: "wta",
     fetchGames: espnTennisGamesFetcher("tennis/wta"),
     markets: { moneyline: true },
+    kalshi: { game: "KXWTAMATCH" }, // same per-player-ticker shape as KXATPMATCH above
     polyTag: "tennis",
     sxDynamic: { sportId: 6, leagueMatch: /wta/i }, // all active WTA tournament leagues (2-way)
     // CloudBet WTA is per-tournament (tennis-wta-*); enumerate + read the 2-way winner.

@@ -15,7 +15,7 @@ import { ChainId, OrderBuilder, Side, type Book } from "@predictdotfun/sdk";
 import { JsonRpcProvider, Wallet, formatUnits, parseUnits } from "ethers";
 import { BNB_USDT_DECIMALS, bnbRpcUrl } from "./chains";
 import type { PredictFunCreds } from "./onchainCreds";
-import type { ExecutionAdapter, OrderRequest, OrderResult } from "./types";
+import type { ExecutableOrderQuote, ExecutionAdapter, OrderRequest, OrderResult } from "./types";
 
 const API = "https://api.predict.fun";
 
@@ -216,6 +216,44 @@ export async function pfAccountAddress(c: PredictFunCreds): Promise<string | nul
   }
 }
 
+export async function quotePredictFunOrder(req: OrderRequest, creds?: PredictFunCreds): Promise<ExecutableOrderQuote> {
+  const apiKey = pfApiKey(creds);
+  const marketId = req.nativeMarketId;
+  if (!apiKey || !marketId || !req.nativeSide) {
+    return { ok: false, priceCents: req.limitPriceCents, averagePriceCents: req.limitPriceCents, availableContracts: 0, reason: "missing predict.fun credentials/market/token id" };
+  }
+  try {
+    const book = await orderbook(marketId, apiKey);
+    let remaining = req.sizeContracts;
+    let availableContracts = 0;
+    let costCents = 0;
+    let worstPriceCents = 0;
+    for (const [price, quantity] of book.asks) {
+      const priceCents = price * 100;
+      if (priceCents > req.limitPriceCents + 1e-9) break;
+      if (!(quantity > 0)) continue;
+      const take = Math.min(remaining, quantity);
+      availableContracts += take;
+      costCents += take * priceCents;
+      worstPriceCents = Math.max(worstPriceCents, priceCents);
+      remaining -= take;
+      if (remaining <= 0) break;
+    }
+    if (availableContracts <= 0) {
+      return { ok: false, priceCents: req.limitPriceCents, averagePriceCents: req.limitPriceCents, availableContracts: 0, reason: "predict.fun has no ask depth at or below the limit" };
+    }
+    return {
+      ok: availableContracts + 1e-9 >= req.sizeContracts,
+      priceCents: worstPriceCents,
+      averagePriceCents: costCents / availableContracts,
+      availableContracts,
+      reason: availableContracts + 1e-9 >= req.sizeContracts ? undefined : `predict.fun executable depth ${availableContracts.toFixed(2)} < ${req.sizeContracts}`,
+    };
+  } catch (e) {
+    return { ok: false, priceCents: req.limitPriceCents, averagePriceCents: req.limitPriceCents, availableContracts: 0, reason: `predict.fun order book check failed: ${String(e).slice(0, 120)}` };
+  }
+}
+
 // One-time on-chain approvals (ERC-1155 CTF + ERC-20 USDT to the exchanges) via the SDK's
 // setApprovals(), which approves everything the protocol may need in a single call. The
 // signer needs a little BNB for gas unless the ZeroDev smart account sponsors it. Returns
@@ -256,6 +294,10 @@ export class PredictFunExecutionAdapter implements ExecutionAdapter {
     } catch {
       return null;
     }
+  }
+
+  quoteOrder(req: OrderRequest): Promise<ExecutableOrderQuote> {
+    return quotePredictFunOrder(req, this.creds);
   }
 
   async placeOrder(req: OrderRequest): Promise<OrderResult> {

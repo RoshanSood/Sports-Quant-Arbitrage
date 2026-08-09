@@ -243,13 +243,11 @@ The **Risk** tab controls the guardrails for execution.
 
 Use it to manage:
 
-- The kill switch.
 - Maximum live stake per trade.
 - Minimum liquidity requirement.
 - Minimum expected profit requirement.
 - Depth buffer settings.
 - Maximum open positions.
-- Naked-position protection.
 - Auto-trade readiness.
 
 Live trading will not happen just because an arb exists. The Risk tab settings are part of the execution gate, and the app blocks or downgrades trades when the stake, liquidity, or safety state is not acceptable.
@@ -297,7 +295,7 @@ Use it to configure:
 - Whether live execution is armed.
 - Activity for the agent.
 
-The app defaults to paper behavior. For a real order to fire, the agent must be in Live mode, the Risk kill switch must be off, the admin password must be supplied where required, and every venue in the route must have valid credentials.
+The app defaults to paper behavior. For a real order to fire, the agent must be in Live mode, the admin password must be supplied where required, and every venue in the route must have valid credentials.
 
 ---
 
@@ -321,7 +319,6 @@ Live orders fail closed. A real trade only fires when all of these are true:
 
 - You requested live execution.
 - The agent is switched to Live in Settings.
-- The Risk kill switch is off.
 - The stake is under the Risk tab's live stake cap.
 - Each venue supports live execution for that route.
 - Credentials are present for every live venue.
@@ -329,6 +326,8 @@ Live orders fail closed. A real trade only fires when all of these are true:
 - The admin password is supplied for protected actions.
 
 If any check fails, the app reports the blocker instead of silently sending an unsafe order.
+
+Naked positions are recorded and surfaced for review, but they do not pause the scanner or stop subsequent opportunities from executing.
 
 Validate each venue with a very small trade before increasing size.
 

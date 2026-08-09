@@ -155,7 +155,7 @@ export default function PortfolioPanel({
   const exportName = `arbitrage-${mode}-trades-${new Date().toISOString().slice(0, 10)}.csv`;
 
   return (
-    <FloatingPanel title="Portfolio" onClose={onClose} width="max-w-5xl">
+    <FloatingPanel title="Portfolio" subtitle="Today's trades" onClose={onClose} width="max-w-5xl">
       <div className="flex items-center gap-2 mb-3">
         <span
           className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold"

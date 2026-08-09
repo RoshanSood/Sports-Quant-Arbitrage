@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import type { ArbLog, ArbOpportunity, Trade } from "@/types/arbitrage";
-import { formatClock, formatEdgePct } from "./arbFormat";
+import { formatClock, formatEdgePct, formatMatchup } from "./arbFormat";
 
 type FeedFilter = "ALL" | "TRADES" | "SCORES" | "SYSTEM";
 
@@ -67,7 +67,7 @@ function buildFeed(logs: ArbLog[], scores: ScoreEvent[], opportunities: ArbOppor
     id: l.id,
     time: l.time,
     kind: "TRADES",
-    text: `${l.pair} — ${l.reason}`,
+    text: `${formatMatchup(l.pair)} — ${l.reason}`,
     edge: l.edge,
     result: l.result,
   }));

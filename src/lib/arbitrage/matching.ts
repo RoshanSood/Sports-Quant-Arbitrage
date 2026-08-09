@@ -43,7 +43,11 @@ export function startBucket(startTime: string, windowMinutes = START_WINDOW_MINU
   return new Date(Math.round(ms / windowMs) * windowMs).toISOString();
 }
 
-// eventKey = sport + league + sorted canonical teams + start bucket (manual §5).
+// eventKey = sport + league + sorted canonical teams + start bucket (manual §5), plus a
+// segment suffix for anything other than a full game. A full-game key is left UNCHANGED
+// (no suffix) so every existing full-game code path (caches, opportunity ids) is
+// unaffected; an F5 market gets a distinct key so it can never be grouped with — and
+// therefore never matched against — the full-game market of the same teams/line.
 // Teams are sorted for a stable identity; home/away order is preserved separately
 // on the market for order placement.
 export function buildEventKey(market: NormalizedMarket): string {
@@ -51,7 +55,9 @@ export function buildEventKey(market: NormalizedMarket): string {
   const league = normalizeLeague(market.league);
   const teams = market.teams.map(normalizeTeamName).sort();
   const bucket = startBucket(market.startTime);
-  return `${sport}:${league}:${teams[0]}|${teams[1]}:${bucket}`;
+  const segment = market.segment ?? "full_game";
+  const suffix = segment === "full_game" ? "" : `:${segment}`;
+  return `${sport}:${league}:${teams[0]}|${teams[1]}:${bucket}${suffix}`;
 }
 
 function startDeltaMinutes(a: string, b: string): number {
@@ -253,6 +259,7 @@ function matchLined(
         venues,
         legs,
         confidence,
+        segment: first.segment ?? "full_game",
       });
 
       stats.matched += 1;
@@ -336,6 +343,7 @@ export function matchMoneyline(markets: NormalizedMarket[]): MatchMapData {
       venues,
       legs: group.map(toLeg),
       confidence: 1,
+      segment: first.segment ?? "full_game",
     });
     stats.matched += 1;
     for (const v of venues) stats.byVenue[v] = (stats.byVenue[v] ?? 0) + 1;

@@ -1,15 +1,12 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { ShieldAlert } from "lucide-react";
 import type { RiskSettings } from "@/types/arbitrage";
 import { FloatingPanel } from "./ui";
 import { formatDollars, formatEdgePct, formatSignedDollars } from "./arbFormat";
 
 export default function RiskPanel({
   risk,
-  killSwitch,
-  onToggleKill,
   onUpdateRisk,
   agentMaxStake,
   onUpdateAgentStake,
@@ -18,8 +15,6 @@ export default function RiskPanel({
   onClose,
 }: {
   risk: RiskSettings;
-  killSwitch: boolean;
-  onToggleKill: (v: boolean) => void;
   onUpdateRisk: (partial: Partial<RiskSettings>) => void;
   agentMaxStake: number;
   onUpdateAgentStake: (maxStake: number) => void;
@@ -31,7 +26,10 @@ export default function RiskPanel({
   const [targetStakeInput, setTargetStakeInput] = useState(String(agentMaxStake ?? 50));
   const [stakeInput, setStakeInput] = useState(String(risk.maxLiveStakeUsd ?? 5));
 
+  // These inputs intentionally mirror settings that can also change through another panel.
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => setTargetStakeInput(String(agentMaxStake ?? 50)), [agentMaxStake]);
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => setStakeInput(String(risk.maxLiveStakeUsd ?? 5)), [risk.maxLiveStakeUsd]);
 
   function applyTargetStake(n: number) {
@@ -68,8 +66,8 @@ export default function RiskPanel({
 
   const STAKE_PRESETS = [5, 10, 25, 50, 100];
 
-  // Max concurrent open positions on the SAME arb (match + line). 0 = unlimited — you can
-  // re-enter as long as fresh quotes still show edge + depth.
+  // Max concurrent real positions on the same physical match, across every market/line.
+  // 0 = unlimited. The executor reads this persisted value immediately before execution.
   function setMaxOpen(n: number) {
     const v = Math.max(0, Math.round(n));
     if (v !== risk.maxOpenPositions) onUpdateRisk({ maxOpenPositions: v });
@@ -86,18 +84,6 @@ export default function RiskPanel({
         NOTICE: Claw Arbs is provided &quot;as is&quot; without warranty. The developer is not responsible for
         trading losses, execution failures, naked exposure, API outages, venue actions, or any other financial
         loss. You trade at your own risk.
-      </div>
-
-      <div className="flex items-center justify-between mb-4">
-        <span className="text-sm font-semibold text-white">Kill Switch</span>
-        <button
-          onClick={() => onToggleKill(!killSwitch)}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-bold text-white"
-          style={{ background: killSwitch ? "#dc2626" : "#374151" }}
-        >
-          <ShieldAlert className="w-3.5 h-3.5" />
-          {killSwitch ? "ARMED — STOP ALL" : "KILL SWITCH"}
-        </button>
       </div>
 
       {/* Target arb stake sizes newly detected opportunities before the live gate runs. */}
@@ -242,7 +228,7 @@ export default function RiskPanel({
         </div>
       </div>
 
-      {/* Max open positions per arb — set Unlimited to stack multiple bets on one game. */}
+      {/* Max open real positions per physical match. */}
       <div className="rounded-lg border px-3 py-2.5 mb-4" style={{ borderColor: "#1e2130", background: "#0e1014" }}>
         <div className="flex items-center justify-between gap-2">
           <div>
@@ -322,9 +308,7 @@ export default function RiskPanel({
           <Cell label="Daily P&L" value={formatSignedDollars(risk.dailyPnl)} accent={risk.dailyPnl >= 0 ? "#34d399" : "#f87171"} />
           <Cell label="Max Daily Loss" value={formatDollars(risk.maxDailyLoss)} />
           <Cell label="Min Liquidity" value={`$${risk.minLiquidityUsd ?? 0}`} />
-          <Cell label="Pause on Naked" value={risk.pauseOnNaked ? "On" : "Off"} />
           <Cell label="Stale Quote Age" value={`${risk.staleQuoteMs} ms`} />
-          <Cell label="Status" value={killSwitch ? "HALTED" : "OK"} accent={killSwitch ? "#f87171" : "#34d399"} />
         </div>
         <p className="text-[10px] text-gray-500 pt-2">
           Min edge {formatEdgePct(0.005)} · Max edge {formatEdgePct(0.25)} (default agent). Edges above cap are

@@ -71,6 +71,20 @@ export function formatClock(iso: string): string {
   return d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", second: "2-digit" });
 }
 
+export function formatMatchup(value: string): string {
+  if (!value.includes("|")) return value;
+  const match = value.match(/^(\[[^\]]+\]\s*)?(.*)$/);
+  const prefix = match?.[1] ?? "";
+  const matchup = match?.[2] ?? value;
+  const titleCaseTeam = (team: string) =>
+    team
+      .trim()
+      .split(/\s+/)
+      .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+      .join(" ");
+  return `${prefix}${matchup.split("|").map(titleCaseTeam).join(" vs ")}`;
+}
+
 const REASON_LABELS: Record<ReasonCode, string> = {
   position_dedup: "Position dedup",
   identity_dedup: "Identity dedup",

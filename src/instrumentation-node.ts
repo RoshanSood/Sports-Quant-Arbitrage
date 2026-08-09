@@ -8,6 +8,10 @@
 
 import { getCached, isRunning } from "@/lib/valuePlaysCache";
 import { runValuePlaysForDate } from "@/lib/valuePlaysRunner";
+import { polymarketLiveBook } from "@/lib/arbitrage/polymarketLiveBook";
+import { polymarketRegion } from "@/lib/polymarketRegion";
+import { kalshiLiveBook } from "@/lib/arbitrage/kalshiLiveBook";
+import { sxbetLiveBook } from "@/lib/arbitrage/sxbetLiveBook";
 
 function dateStr(offset = 0): string {
   const d = new Date();
@@ -31,6 +35,19 @@ async function runIfMissing(date: string) {
 export async function registerNode() {
   // 1. Run immediately on startup if today has no cache
   runIfMissing(dateStr(0)).catch(console.error);
+
+  // Open the Polymarket live-book websocket immediately on server startup (persistent for
+  // the life of this process — see polymarketLiveBook.ts) rather than waiting for the first
+  // scan cycle. It has nothing to subscribe to until the first ingest populates the token
+  // list, but the connection itself (and its reconnect loop) starts right away.
+  if (polymarketRegion() !== "us") {
+    polymarketLiveBook.connect();
+  }
+  // No-ops until KALSHI_KEY_ID/KALSHI_PRIVATE_KEY (or per-request UI creds passed later) are
+  // configured — isKalshiConfigured() inside connect() gates it.
+  kalshiLiveBook.connect();
+  // No-op until SX_API_KEY is configured.
+  sxbetLiveBook.connect();
 
   // 2. Schedule daily at 9:57 PM PT — generates next day's plays the night before
   const cron = (await import("node-cron")).default;

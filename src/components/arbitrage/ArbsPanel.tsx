@@ -131,13 +131,18 @@ export default function ArbsPanel({
                     {opp.line != null && <div className="text-[10px] text-gray-500">O/U {opp.line}</div>}
                   </td>
                   <td className="py-3 pr-3">
-                    <Pill>
-                      {opp.marketType === "moneyline"
-                        ? "ML"
-                        : opp.marketType === "spread"
-                        ? `RL ${opp.line}`
-                        : `total_${opp.line}`}
-                    </Pill>
+                    <span className="inline-flex items-center gap-1">
+                      <Pill>
+                        {opp.marketType === "moneyline"
+                          ? "ML"
+                          : opp.marketType === "spread"
+                          ? `RL ${opp.line}`
+                          : `total_${opp.line}`}
+                      </Pill>
+                      {opp.segment === "f5" && (
+                        <Pill color="#a855f7" text="#e9d5ff">F5</Pill>
+                      )}
+                    </span>
                   </td>
                   <LegCell leg={a} />
                   <LegCell leg={b} />

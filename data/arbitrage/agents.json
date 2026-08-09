@@ -10,7 +10,7 @@
     "minEdge": 0.001,
     "maxEdge": 0.25,
     "sizingMethod": "equal_profit",
-    "maxStake": 3,
+    "maxStake": 6,
     "venues": [
       "kalshi",
       "polymarket",

@@ -305,7 +305,7 @@ const STATUS_STYLE: Record<string, { color: string; label: string }> = {
   error: { color: "#ef4444", label: "Error" },
 };
 
-type ExecGate = { agentLive?: boolean; killSwitch?: boolean; maxLiveStakeUsd?: number; polymarketRegion?: "intl" | "us" };
+type ExecGate = { agentLive?: boolean; maxLiveStakeUsd?: number; polymarketRegion?: "intl" | "us" };
 
 function SaveRow({ onSave, disabled, hasKey, onCancel }: { onSave: () => void; disabled: boolean; hasKey: boolean; onCancel: () => void }) {
   return (
@@ -447,7 +447,7 @@ function OnchainStatus({ venueId }: { venueId: string }) {
   }
 
   const s = status ? STATUS_STYLE[status.status] ?? STATUS_STYLE.error : null;
-  const armed = gate?.agentLive === true && gate?.killSwitch !== true;
+  const armed = gate?.agentLive === true;
 
   return (
     <div className="space-y-3">
@@ -483,8 +483,8 @@ function OnchainStatus({ venueId }: { venueId: string }) {
               {isPoly && " Export it from your Polygon wallet (MetaMask) or from Polymarket → Cash/Settings → Export Private Key."}
             </>
           )}{" "}
-          A live order only fires when the agent&apos;s <strong>Live</strong> toggle (Settings) is on, the kill switch is
-          off, and the stake is under the Risk cap.
+          A live order only fires when the agent&apos;s <strong>Live</strong> toggle (Settings) is on and the stake is
+          under the Risk cap.
         </p>
       </div>
 

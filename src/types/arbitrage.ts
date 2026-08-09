@@ -88,6 +88,12 @@ export type ExecutionStep = {
 
 export type FeeModel = "kalshi_tier" | "polymarket_flat" | "sxbet_flat" | "placeholder";
 
+// Which portion of the game a market covers. "full_game" is the whole contest; "f5" is
+// first-5-innings (MLB only — a tie after 5 is possible, unlike a full 9-inning game).
+// Markets with DIFFERENT segments must never be matched against each other (a full-game
+// total and an F5 total share line numbers but settle on completely different scores).
+export type MarketSegment = "full_game" | "f5";
+
 export type FeeBreakdown = {
   venueId: VenueId;
   feeCents: number; // fee attributable to this leg, in cents
@@ -169,6 +175,9 @@ export type NormalizedMarket = {
   live: boolean;
   status: "open" | "suspended" | "closed" | "settled";
   lastUpdated: string; // ISO timestamp
+  // Which portion of the game this market covers. Omitted = "full_game" (the default for
+  // every existing ingest path); only the F5 ingest rows set this to "f5".
+  segment?: MarketSegment;
 };
 
 export type MatchKey = {
@@ -222,6 +231,8 @@ export type MatchedEvent = {
   venues: VenueId[];
   legs: MatchedLeg[];
   confidence: number; // 0-1
+  // Omitted = "full_game" (see NormalizedMarket.segment).
+  segment?: MarketSegment;
 };
 
 export type MatchReject = {
@@ -279,6 +290,10 @@ export type ArbOpportunity = {
   agentId: string;
   status: OpportunityStatus;
   detectedAt: string; // ISO timestamp
+  // Which portion of the game this arb covers — "full_game" or "f5" (first 5 innings, MLB
+  // only). Surface this in the UI before placing: two legs on the same numeric line can
+  // cover DIFFERENT segments if something upstream is wrong, and that's not a real hedge.
+  segment: MarketSegment;
 };
 
 export type Trade = {
@@ -339,13 +354,11 @@ export type Agent = {
 };
 
 export type RiskSettings = {
-  killSwitch: boolean;
   maxExposure: number; // dollars across all open positions
   currentExposure: number; // dollars
   maxDailyLoss: number; // dollars
   dailyPnl: number; // dollars
   maxOpenPositions: number;
-  pauseOnNaked: boolean;
   staleQuoteMs: number;
   minLiquidityUsd: number; // drop legs with less executable $ than this (manual section 13)
   minExpectedProfitUsd: number; // drop tiny arbs whose profit cushion is likely to vanish

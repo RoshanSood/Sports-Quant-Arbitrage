@@ -9,7 +9,7 @@ import { DEFAULT_AGENT } from "@/lib/arbitrage/seed";
 
 // Execution readiness per venue: masked wallet identity + USDC balance/allowance +
 // verification status, plus the UI-driven gate state (live arming is the agent's
-// Paper/Live toggle + the risk kill switch + the risk stake cap — no env vars). Reads
+// Paper/Live toggle + the risk stake cap — no env vars). Reads
 // only — never places an order and never returns raw keys.
 function maskAddress(a: string | null): string | null {
   if (!a || a.length < 10) return a;
@@ -31,7 +31,6 @@ export async function GET(request: Request) {
       gate: {
         // "Armed" for live orders = the agent's Live switch is on and not kill-switched.
         agentLive: agent.live && !agent.paper,
-        killSwitch: risk.killSwitch,
         maxLiveStakeUsd: risk.maxLiveStakeUsd,
         polymarketRegion: polymarketRegion(), // drives the Polymarket credential form
       },

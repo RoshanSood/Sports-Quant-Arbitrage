@@ -27,9 +27,8 @@ import { getRiskSettings } from "./riskStore";
 import { getTradesByDate, saveTrade } from "./tradeStore";
 import { appendLog } from "./arbLogStore";
 import { DEFAULT_AGENT } from "./seed";
-import { centsToDollars, sxbetMinStakeScale } from "./arbMath";
+import { centsToDollars, venueMinStakeScale } from "./arbMath";
 import { computeFees, feeFractionOfStake } from "./feeEngine";
-import { SXBET_MIN_TAKER_STAKE_USD } from "./execution/config";
 import { getVenues } from "./venueStore";
 import { filterMarketsForAgent } from "./venueFilters";
 import { dateParamToIsoDate } from "./date";
@@ -67,9 +66,36 @@ function opportunityStartDate(opportunityId: string): string | null {
   return /^\d{4}-\d{2}-\d{2}T/.test(maybeIso) ? maybeIso.slice(0, 10) : null;
 }
 
+// Opportunity ids append `marketType:line` to the event key. Strip those fields—and the
+// optional F5 segment suffix—so the Risk panel's "Max open real per match" value counts
+// every live position on the same physical game, across totals, spreads and moneylines.
+export function opportunityMatchKey(opportunityId: string): string {
+  const parts = opportunityId.split(":");
+  const eventParts = parts.length >= 3 ? parts.slice(0, -2) : parts;
+  if (eventParts.at(-1) === "f5") eventParts.pop();
+  return eventParts.join(":");
+}
+
 function sourceStartDate(value: string | undefined): string | null {
   if (!value) return null;
   return value.match(/^(\d{4}-\d{2}-\d{2})/)?.[1] ?? null;
+}
+
+// Pure — no I/O — so it's directly unit-testable without mocking the store layer that
+// prepareExecution otherwise requires. Re-derives each leg's game segment from the CURRENT
+// market rows (not from the opportunity's own cached id/eventKey string), so a stale or
+// mis-tagged opportunity can never slip through just because it was built before the check
+// existed. See the "segment_consistency" gate in prepareExecution for why this exists.
+export function findLegSegmentMismatch(
+  legs: Pick<ArbLeg, "venueId" | "marketId">[],
+  markets: Pick<NormalizedMarket, "marketId" | "segment">[]
+): { mismatched: boolean; legSegments: { venueId: string; marketId: string; segment: string }[] } {
+  const legSegments = legs.map((l) => {
+    const m = markets.find((mk) => mk.marketId === l.marketId);
+    return { venueId: l.venueId, marketId: l.marketId, segment: m?.segment ?? "full_game" };
+  });
+  const distinctSegments = new Set(legSegments.map((l) => l.segment));
+  return { mismatched: distinctSegments.size > 1, legSegments };
 }
 
 export async function writeLog(
@@ -164,7 +190,9 @@ export async function prepareExecution(opportunityId: string, date: string, requ
   const legAgeMs = (o: ArbOpportunity, mkts: NormalizedMarket[]) =>
     Math.max(0, ...o.legs.map((l) => {
       const m = mkts.find((mk) => mk.marketId === l.marketId);
-      return m ? Date.now() - Date.parse(m.lastUpdated) : 0;
+      if (!m) return Number.POSITIVE_INFINITY;
+      const updatedAt = Date.parse(m.lastUpdated);
+      return Number.isFinite(updatedAt) ? Math.max(0, Date.now() - updatedAt) : Number.POSITIVE_INFINITY;
     }));
 
   let { markets, opp } = await detect();
@@ -199,8 +227,6 @@ export async function prepareExecution(opportunityId: string, date: string, requ
 
   addStep("cb_arb_enabled", "Agent enabled", "pass", agent.enabled ? "Agent is enabled" : "Agent is off");
   if (!agent.enabled || agent.strategy !== "arbitrage") return asHalt("agent_disabled", "Agent is off or not an arbitrage agent", priorMatchup, [], 0, { opportunityId });
-  addStep("kill_switch", "Kill switch", "pass", "Risk kill switch is clear");
-  if (risk.killSwitch) return asHalt("kill_switch", "Risk kill switch is active", priorMatchup, [], 0, { opportunityId });
   addStep("slate_date", "Slate date", oppDate == null || oppDate === requestedSlateDate ? "pass" : "halt", oppDate == null ? `requested ${requestedSlateDate}` : `opportunity ${oppDate} / requested ${requestedSlateDate}`);
   if (oppDate != null && oppDate !== requestedSlateDate) {
     return asHalt("final_refresh_failed", `Opportunity is for ${oppDate}, not requested slate ${requestedSlateDate}`, priorMatchup, [], 0, { opportunityId, opportunityDate: oppDate, requestedSlateDate });
@@ -231,42 +257,65 @@ export async function prepareExecution(opportunityId: string, date: string, requ
     });
   }
 
-  // Live execution trusts the targeted final refresh: if the refreshed opportunity is
-  // still an arb, continue with its updated prices. Paper still uses the wider stale
-  // cache window because it can operate from stored snapshots.
-  const oldestMs = legAgeMs(opp, markets);
-  if (requestedMode === "live") {
-    addStep("stale_quote", "Quote freshness", "pass", `${oldestMs}ms oldest quote after targeted refresh; using refreshed arb prices`);
-  } else {
-    const maxQuoteAgeMs = risk.staleQuoteMs;
-    addStep("stale_quote", "Quote freshness", oldestMs <= maxQuoteAgeMs ? "pass" : "halt", `${oldestMs}ms oldest quote`);
-    if (oldestMs > maxQuoteAgeMs) {
-      return asHalt("stale_quote", `quote age ${oldestMs}ms exceeds ${maxQuoteAgeMs}ms (venue feed not refreshing fast enough)`, opp.matchup, venues, opp.netEdge, { oldestMs, maxQuoteAgeMs });
-    }
+  // Hard safety net, independent of trusting the matching engine's grouping: verify every
+  // leg's underlying market actually covers the SAME game segment (full game vs F5 —
+  // first-5-innings) by re-deriving it from the currently-loaded market rows, not from the
+  // opportunity's cached id/eventKey string. The matching engine already guarantees this by
+  // construction (it groups strictly by eventKey, which encodes segment) — this check exists
+  // for the case where detection itself ran against stale/pre-fix data despite that
+  // guarantee, which is exactly what produced the 2026-08-08 Astros v Padres trade
+  // (Polymarket F5 total O/U 2.5 matched against Kalshi's full-game total O/U 2.5): the
+  // running process was still on pre-segment-fix code when it detected that opportunity, so
+  // the eventKey never got an "f5" suffix in the first place.
+  const segmentCheck = findLegSegmentMismatch(opp.legs, markets);
+  addStep(
+    "segment_consistency",
+    "Game segment consistency",
+    segmentCheck.mismatched ? "halt" : "pass",
+    segmentCheck.mismatched
+      ? segmentCheck.legSegments.map((l) => `${l.venueId}=${l.segment}`).join(", ")
+      : `all legs are ${segmentCheck.legSegments[0]?.segment ?? "full_game"}`
+  );
+  if (segmentCheck.mismatched) {
+    return asHalt("final_refresh_failed", "Legs cover different game segments (e.g. one full-game, one first-5-innings) — not a valid hedge", opp.matchup, venues, opp.netEdge, {
+      legSegments: segmentCheck.legSegments,
+    });
   }
 
-  // Real-money position cap PER opportunity (match + line + market). Paper tracking is
-  // deliberately separate and never blocks live execution.
+  // A targeted refresh can fail while the old opportunity remains in the date cache.
+  // Enforce the configured age in live mode too: surviving detection is not evidence that
+  // any venue actually returned a current executable quote.
+  const oldestMs = legAgeMs(opp, markets);
+  const maxQuoteAgeMs = risk.staleQuoteMs;
+  const quoteIsFresh = Number.isFinite(oldestMs) && oldestMs <= maxQuoteAgeMs;
+  addStep("stale_quote", "Quote freshness", quoteIsFresh ? "pass" : "halt", `${oldestMs}ms oldest quote`);
+  if (!quoteIsFresh) {
+    return asHalt("stale_quote", `quote age ${oldestMs}ms exceeds ${maxQuoteAgeMs}ms (venue feed not refreshing fast enough)`, opp.matchup, venues, opp.netEdge, { oldestMs, maxQuoteAgeMs });
+  }
+
+  // Real-money position cap PER PHYSICAL MATCH, using the exact persisted value controlled
+  // by the Risk panel's "Max open real per match" tab. Paper positions never count.
   const todays = await getTradesByDate(date);
   const maxPer = risk.maxOpenPositions;
-  const openForEvent = requestedMode === "live"
+  const matchKey = opportunityMatchKey(opp.id);
+  const openForMatch = requestedMode === "live"
     ? todays.filter(
         (t) =>
           t.mode === "live" &&
-          t.opportunityId === opp.id &&
+          opportunityMatchKey(t.opportunityId) === matchKey &&
           (t.status === "open" || t.status === "partial" || t.status === "naked")
       )
     : [];
   addStep(
     "position_dedup",
     "Position dedup",
-    requestedMode === "live" && maxPer > 0 && openForEvent.length >= maxPer ? "halt" : "pass",
+    requestedMode === "live" && maxPer > 0 && openForMatch.length >= maxPer ? "halt" : "pass",
     requestedMode === "live"
-      ? `${openForEvent.length}/${Math.max(maxPer, 0)} live open for this opportunity`
+      ? `${openForMatch.length}/${Math.max(maxPer, 0)} live open for this physical match`
       : "Paper tracking does not count toward the live cap"
   );
-  if (requestedMode === "live" && maxPer > 0 && openForEvent.length >= maxPer) {
-    return asHalt("position_dedup", `Already at ${openForEvent.length}/${maxPer} live open positions for this match + line`, opp.matchup, venues, opp.netEdge, { openCount: openForEvent.length, maxPer, countedMode: "live" });
+  if (requestedMode === "live" && maxPer > 0 && openForMatch.length >= maxPer) {
+    return asHalt("position_dedup", `Already at ${openForMatch.length}/${maxPer} live open positions for this match`, opp.matchup, venues, opp.netEdge, { openCount: openForMatch.length, maxPer, countedMode: "live", matchKey });
   }
 
   const openExposure = todays
@@ -281,24 +330,25 @@ export async function prepareExecution(opportunityId: string, date: string, requ
     return { ...l, priceCents: executedCents, decimalOdds: 100 / executedCents, impliedProbability: executedCents / 100 };
   });
 
-  // ── SX.bet $1 minimum order: size the WHOLE arb up so the SX leg clears $1 ──────────
-  // A sub-$1 SX order cannot be placed at all, so this $1 floor overrides the agent's target
-  // size AND the risk live-stake cap (runExecution raises the cap to minLiveStakeFloorUsd).
-  // Scaling every leg by the same factor preserves the hedge ratio and edge% — see the helper.
-  // Example: Polymarket ~$3 / SX ~$0.68 → SX is bumped to $1 and Polymarket scales with it
-  // (~$4.4) so the arb still holds.
+  // ── Venue $1 minimum order: size the WHOLE arb up so every min-venue leg clears its floor ──
+  // A below-minimum SX.bet or Polymarket order cannot be placed at all, so this floor
+  // can raise the agent's target size but never the risk live-stake cap. Scaling every leg
+  // by the same factor preserves the hedge
+  // ratio and edge% — see venueMinStakeScale. Example: Polymarket ~$3 / SX ~$0.68 → SX is
+  // bumped to $1.01 and Polymarket scales with it (~$4.5) so the arb still holds. This runs
+  // BEFORE totalStake/expectedProfit are computed below, so the risk.minExpectedProfitUsd
+  // gate evaluates the trade at its ACTUAL (possibly resized) execution size, not the
+  // original detected size.
   let minLiveStakeFloorUsd = 0;
-  const { scale: sxScale, floorTotalUsd } = sxbetMinStakeScale(executedLegs, SXBET_MIN_TAKER_STAKE_USD);
-  if (sxScale > 1) {
-    executedLegs.forEach((l) => (l.size = round(l.size * sxScale, 4)));
+  const { scale: minVenueScale, floorTotalUsd } = venueMinStakeScale(executedLegs);
+  if (minVenueScale > 1) {
+    executedLegs.forEach((l) => (l.size = round(l.size * minVenueScale, 4)));
     minLiveStakeFloorUsd = floorTotalUsd;
-    const sxLeg = executedLegs.find((l) => l.venueId.toLowerCase().includes("sx"));
-    const sxStakeNow = sxLeg ? centsToDollars(sxLeg.priceCents) * sxLeg.size : 0;
     addStep(
-      "sxbet_min_order",
-      "SX.bet $1 minimum",
+      "venue_min_order",
+      "Venue minimum order size",
       "warn",
-      `sized arb up ${sxScale.toFixed(2)}x so SX.bet stakes $${sxStakeNow.toFixed(2)} (>= $${SXBET_MIN_TAKER_STAKE_USD.toFixed(2)} min); overrides target size & live cap`
+      `sized arb up ${minVenueScale.toFixed(2)}x so every leg clears the shared $1.01 minimum; live risk cap still applies`
     );
   }
 

@@ -7,8 +7,10 @@ import {
   grossEdge,
   impliedProbFromCents,
   netEdge,
-  sxbetMinStakeScale,
   totalCostCents,
+  venueMinContracts,
+  venueMinStakeScale,
+  venueMinStakeUsd,
 } from "./arbMath";
 
 describe("arbMath — conversions", () => {
@@ -104,50 +106,88 @@ describe("arbMath — executedEconomics (portfolio truth of the fill)", () => {
   });
 });
 
-describe("arbMath — sxbetMinStakeScale (SX.bet $1 minimum order)", () => {
+describe("arbMath — venueMinStakeUsd", () => {
+  it("requires a $1.01 leg on every venue and two Predict.fun contracts", () => {
+    for (const venue of ["sxbet", "polymarket", "kalshi", "predictfun", "cloudbet"]) {
+      expect(venueMinStakeUsd(venue)).toBeCloseTo(1.01, 4);
+    }
+    expect(venueMinContracts("predictfun")).toBe(2);
+    expect(venueMinContracts("kalshi")).toBe(0);
+  });
+});
+
+describe("arbMath — venueMinStakeScale (every venue has a $1.01 minimum order)", () => {
   const applyScale = (
     legs: { venueId: string; priceCents: number; size: number }[],
     scale: number
   ) => legs.map((l) => ({ ...l, size: Math.round(l.size * scale * 1e4) / 1e4 }));
 
-  it("scales the whole arb up so the SX leg clears $1 (68c leg, 1 contract → $0.68)", () => {
+  it("scales the whole arb up so the SX leg clears $1.01 (68c leg, 1 contract → $0.68)", () => {
     const legs = [
-      { venueId: "polymarket", priceCents: 30, size: 1 },
+      { venueId: "kalshi", priceCents: 30, size: 1 },
       { venueId: "sxbet", priceCents: 68, size: 1 },
     ];
-    const { scale, floorTotalUsd } = sxbetMinStakeScale(legs, 1);
+    const { scale, floorTotalUsd } = venueMinStakeScale(legs);
     expect(scale).toBeGreaterThan(1);
-    // After scaling, the SX leg stakes >= $1 and the hedge ratio is preserved.
+    // After scaling, the SX leg stakes >= $1.01 and the hedge ratio is preserved.
     const scaled = applyScale(legs, scale);
     const sx = scaled.find((l) => l.venueId === "sxbet")!;
-    expect(centsToDollars(sx.priceCents) * sx.size).toBeGreaterThanOrEqual(1);
+    expect(centsToDollars(sx.priceCents) * sx.size).toBeGreaterThanOrEqual(1.01);
     // Both legs kept equal contract counts (still a valid hedge).
     expect(scaled[0].size).toBeCloseTo(scaled[1].size, 4);
-    expect(floorTotalUsd).toBeCloseTo(1.44, 2); // 1.4706 ctr × (0.30 + 0.68)
+    expect(floorTotalUsd).toBeCloseTo(3.30, 2); // the cheaper 30c Kalshi leg dominates
   });
 
-  it("no size-up when the SX leg already stakes >= $1", () => {
+  it("scales the whole arb up so a Polymarket leg clears its $1 minimum (this session's reported case)", () => {
+    // Reported: a $0.90 Polymarket order (1 contract @ 90c) was rejected — "invalid amount
+    // for a marketable BUY order ($0.9), min size: 1".
     const legs = [
-      { venueId: "polymarket", priceCents: 30, size: 2 },
-      { venueId: "sxbet", priceCents: 68, size: 2 }, // $1.36
+      { venueId: "kalshi", priceCents: 10, size: 1 },
+      { venueId: "polymarket", priceCents: 90, size: 1 },
     ];
-    expect(sxbetMinStakeScale(legs, 1)).toEqual({ scale: 1, floorTotalUsd: 0 });
+    const { scale } = venueMinStakeScale(legs);
+    expect(scale).toBeGreaterThan(1);
+    const scaled = applyScale(legs, scale);
+    const poly = scaled.find((l) => l.venueId === "polymarket")!;
+    expect(centsToDollars(poly.priceCents) * poly.size).toBeGreaterThanOrEqual(1);
   });
 
-  it("no SX leg → no change", () => {
+  it("takes the LARGER scale when both venues' legs are under their minimums", () => {
     const legs = [
-      { venueId: "polymarket", priceCents: 30, size: 1 },
-      { venueId: "kalshi", priceCents: 68, size: 1 },
+      { venueId: "polymarket", priceCents: 90, size: 1 }, // needs ~1.11x
+      { venueId: "sxbet", priceCents: 5, size: 1 }, // needs 20.2x — this dominates
     ];
-    expect(sxbetMinStakeScale(legs, 1)).toEqual({ scale: 1, floorTotalUsd: 0 });
+    const { scale } = venueMinStakeScale(legs);
+    const scaled = applyScale(legs, scale);
+    for (const l of scaled) expect(centsToDollars(l.priceCents) * l.size).toBeGreaterThanOrEqual(venueMinStakeUsd(l.venueId));
+  });
+
+  it("no size-up when every min-venue leg already clears its floor", () => {
+    const legs = [
+      { venueId: "kalshi", priceCents: 30, size: 4 },
+      { venueId: "sxbet", priceCents: 68, size: 4 },
+    ];
+    expect(venueMinStakeScale(legs)).toEqual({ scale: 1, floorTotalUsd: 0 });
+  });
+
+  it("also scales Kalshi and Predict.fun while preserving equal contracts", () => {
+    const legs = [
+      { venueId: "kalshi", priceCents: 30, size: 1 },
+      { venueId: "predictfun", priceCents: 68, size: 1 },
+    ];
+    const { scale } = venueMinStakeScale(legs);
+    const scaled = applyScale(legs, scale);
+    expect(scale).toBeGreaterThan(1);
+    expect(scaled[0].size).toBeCloseTo(scaled[1].size, 4);
+    expect(scaled[1].size).toBeGreaterThanOrEqual(2);
   });
 
   it("thin/cheap SX leg needs a large scale (5c leg, 1 contract → $0.05)", () => {
     const legs = [
-      { venueId: "polymarket", priceCents: 90, size: 1 },
+      { venueId: "kalshi", priceCents: 90, size: 1 },
       { venueId: "sxbet", priceCents: 5, size: 1 },
     ];
-    const { scale } = sxbetMinStakeScale(legs, 1);
-    expect(scale).toBeCloseTo(20, 4); // $1 / $0.05
+    const { scale } = venueMinStakeScale(legs);
+    expect(scale).toBeCloseTo(20.2, 1); // ~$1.01 / $0.05
   });
 });

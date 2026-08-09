@@ -20,7 +20,11 @@ type EspnEvent = {
   date?: string;
   status?: EspnStatus;
   competitions?: EspnCompetition[];
-  groupings?: { competitions?: EspnCompetition[] }[];
+  // ESPN nests a tennis tournament's brackets — men's/women's singles AND doubles — under
+  // ONE shared event when a tour stop is co-hosted (e.g. National Bank Open runs ATP+WTA
+  // the same week). `grouping.slug` ("mens-singles" | "womens-singles" | "*-doubles") is
+  // the only field that tells them apart — there is nothing else per-competition.
+  groupings?: { grouping?: { slug?: string }; competitions?: EspnCompetition[] }[];
 };
 
 function abbr(s: string): string {
@@ -146,13 +150,32 @@ export async function fetchEspnScores(path: string, sport: string, league: strin
 
 // Tennis scoreboard: flatten the tournament tree (groupings → competitions) into
 // individual player-vs-player matches. `path` e.g. "tennis/wta".
+//
+// Co-hosted stops (ATP+WTA the same week, e.g. National Bank Open) put BOTH tours' brackets
+// under one ESPN event — querying either "tennis/atp" or "tennis/wta" returns the exact same
+// event with groupings for men's-singles, women's-singles, men's-doubles, AND women's-doubles
+// all present. Filtering only by path was a live bug: it silently mixed men's matches into
+// the WTA fixture list (and vice versa) and pulled in DOUBLES matches (2-a-side, a different
+// market entirely) alongside singles — verified live 2026-08-09 against the National Bank
+// Open event, which listed 111 men's-singles + 111 women's-singles + 31/31 doubles
+// competitions all under both the /atp and /wta scoreboard responses. Must filter to exactly
+// the singles bracket for the tour this fetcher was built for.
+function expectedSinglesSlug(path: string): "mens-singles" | "womens-singles" | null {
+  if (path.endsWith("/atp")) return "mens-singles";
+  if (path.endsWith("/wta")) return "womens-singles";
+  return null; // unknown tour — filtering can't be trusted, so skip everything rather than guess
+}
+
 export function espnTennisGamesFetcher(path: string): (date: string) => Promise<ArbGame[]> {
+  const wantSlug = expectedSinglesSlug(path);
   return async (date) => {
+    if (!wantSlug) return [];
     try {
       const events = await getScoreboard(path, date);
       const games: ArbGame[] = [];
       for (const e of events) {
         for (const grp of e.groupings ?? []) {
+          if (grp.grouping?.slug !== wantSlug) continue;
           for (const comp of grp.competitions ?? []) {
             const g = gameFromCompetition(comp, String(comp.id ?? `${e.id}`), date);
             if (g) games.push(g);

@@ -9,46 +9,118 @@ import { prepareExecution, verifyPostFill, writeLog, type ExecutionOutcome } fro
 import { resolveExecutionMode, SXBET_MIN_TAKER_STAKE_USD, type ExecMode } from "./config";
 import { getAdapter, venueSupportsLive, type ExecCreds } from "./registry";
 import { applyReconciliation, reconcileLegs, type LegReconciliation } from "./reconcile";
-import { checkKalshiFillability } from "./kalshiAdapter";
-import { checkSxFillability } from "./sxbetAdapter";
-import { quotePolymarketFokBuy } from "./polymarketAdapter";
 import { computeFees } from "../feeEngine";
-import { executedEconomics } from "../arbMath";
-import type { ExecutionAdapter, OrderRequest, OrderResult } from "./types";
+import { executedEconomics, venueMinContracts, venueMinStakeUsd } from "../arbMath";
+import { polymarketLiveBook } from "../polymarketLiveBook";
+import { kalshiLiveBook } from "../kalshiLiveBook";
+import type { ExecutableOrderQuote, ExecutionAdapter, OrderRequest, OrderResult } from "./types";
+
+// Live-book reads for checkLiveFillability, keyed off the real singletons (ingest.ts keeps
+// both connected + subscribed to today's markets). A thin adapter over each venue's own
+// key shape — see LiveBookReader's doc comment for why the two venues are keyed differently.
+function liveAskCentsFor(req: OrderRequest): number | null {
+  if (req.venueId === "polymarket" && req.nativeSide) {
+    return polymarketLiveBook.getQuote(req.nativeSide)?.bestAskCents ?? null;
+  }
+  if (req.venueId === "kalshi" && req.nativeMarketId && req.nativeSide) {
+    const q = kalshiLiveBook.getQuote(req.nativeMarketId);
+    if (!q) return null;
+    return req.nativeSide.toLowerCase() === "no" ? q.noAskCents : q.yesAskCents;
+  }
+  return null;
+}
+
+function liveDepthAtOrBetter(req: OrderRequest, limitPriceCents: number): number | null {
+  if (req.venueId === "polymarket" && req.nativeSide) {
+    return polymarketLiveBook.getDepth(req.nativeSide, "ask", limitPriceCents);
+  }
+  if (req.venueId === "kalshi" && req.nativeMarketId && req.nativeSide) {
+    const side = req.nativeSide.toLowerCase() === "no" ? "no" : "yes";
+    return kalshiLiveBook.getDepth(req.nativeMarketId, side, limitPriceCents);
+  }
+  return null;
+}
+
+// Max extra we'll pay per contract to match a live ask that moved since detection, using the
+// ALREADY-CONNECTED live-book websocket caches (in-memory reads, ~0ms) instead of a fresh
+// network call. The old Polymarket "book preflight" (removed) did a REST order-book read
+// right before firing, and THAT round-trip's latency is what let the book move even further
+// and killed ~100% of Polymarket fills when it was live. This is different in kind: no
+// network call, just a fresher price/size for the exact same single-shot order. The price
+// nudge is bounded to a couple cents so a real arb-invalidating move (not a routine tick) is
+// left to abort rather than blindly chased past what the edge can absorb.
+export const LIVE_PRICE_CUSHION_CENTS = 2;
+
+// One leg's live-book read, keyed off the OrderRequest itself (Polymarket's book is keyed by
+// nativeSide alone — it's the CLOB token id; Kalshi's is keyed by nativeMarketId [ticker] +
+// nativeSide [yes/no]). Returns null when there's no live data — callers must treat null as
+// "unknown", never as "zero" (a fail-safe read, not a fail-safe answer).
+export type LiveBookReader = {
+  askCents: (req: OrderRequest) => number | null;
+  depthAtOrBetter: (req: OrderRequest, limitPriceCents: number) => number | null;
+};
+
+export type LiveFillabilityResult = {
+  requests: OrderRequest[]; // price-nudged where the live ask moved within the cushion
+  blockers: string[]; // non-empty => abort the WHOLE trade, don't fire ANY leg
+  adjustments: Array<{ venueId: string; fromCents: number; toCents: number }>;
+};
+
+// Pure — takes live reads as a parameter so it's testable without the singletons. For each
+// Polymarket/Kalshi leg: (1) if the live ask moved against us within the cushion, nudge the
+// limit to match (never loosens an already-favorable limit); if it moved beyond the cushion,
+// block outright rather than chase. (2) if we have a live depth reading at the (possibly
+// nudged) limit and it's short of the required size, block. Missing live data (either check)
+// is not itself a blocker — this supplements the existing REST-based min_depth gate, it
+// doesn't replace it.
+export function checkLiveFillability(requests: OrderRequest[], live: LiveBookReader): LiveFillabilityResult {
+  const blockers: string[] = [];
+  const adjustments: LiveFillabilityResult["adjustments"] = [];
+  const next = requests.map((r) => {
+    if (r.venueId !== "polymarket" && r.venueId !== "kalshi") return r;
+    let limitPriceCents = r.limitPriceCents;
+    const liveAsk = live.askCents(r);
+    if (liveAsk != null && liveAsk > limitPriceCents) {
+      const bumped = Math.min(99, liveAsk);
+      const move = bumped - limitPriceCents;
+      if (move > LIVE_PRICE_CUSHION_CENTS) {
+        blockers.push(
+          `${venueLabel(r.venueId)} live ask moved to ${bumped}c (from ${limitPriceCents}c), beyond the ${LIVE_PRICE_CUSHION_CENTS}c cushion`
+        );
+        return r;
+      }
+      adjustments.push({ venueId: r.venueId, fromCents: limitPriceCents, toCents: bumped });
+      limitPriceCents = bumped;
+    }
+    const depth = live.depthAtOrBetter(r, limitPriceCents);
+    if (depth != null && depth + 1e-9 < r.sizeContracts) {
+      blockers.push(
+        `${venueLabel(r.venueId)} live depth ${depth.toFixed(2)} contracts at <= ${limitPriceCents}c is short of the ${r.sizeContracts} required`
+      );
+    }
+    return limitPriceCents === r.limitPriceCents ? r : { ...r, limitPriceCents };
+  });
+  return { requests: next, blockers, adjustments };
+}
 
 // Re-exported for callers/tests that reference it from the executor module.
 export { SXBET_MIN_TAKER_STAKE_USD };
 
+// Final safety-net check right before placement: every leg on a $-minimum venue (SX.bet,
+// Polymarket) must actually clear that minimum at its EXECUTED size. executionPipeline.ts's
+// venueMinStakeScale already sizes the whole arb up to satisfy this before we get here — this
+// just refuses to fire if that somehow didn't happen (e.g. a caller that skipped prepareExecution).
 export function liveVenueMinimumStakeBlockers(legs: ArbLeg[]): string[] {
   return legs.flatMap((leg) => {
-    if (leg.venueId !== "sxbet") return [];
+    const min = venueMinStakeUsd(leg.venueId);
     const stakeUsd = (leg.size * leg.priceCents) / 100;
-    if (stakeUsd >= SXBET_MIN_TAKER_STAKE_USD) return [];
     const label = leg.label ? ` ${leg.label}` : "";
-    return [`SX.bet${label} stake $${stakeUsd.toFixed(2)} is below minimum $${SXBET_MIN_TAKER_STAKE_USD}`];
+    const blockers: string[] = [];
+    if (stakeUsd + 1e-9 < min) blockers.push(`${venueLabel(leg.venueId)}${label} stake $${stakeUsd.toFixed(2)} is below minimum $${min.toFixed(2)}`);
+    const minContracts = venueMinContracts(leg.venueId);
+    if (leg.size + 1e-9 < minContracts) blockers.push(`${venueLabel(leg.venueId)}${label} size ${leg.size.toFixed(2)} is below minimum ${minContracts.toFixed(2)} contracts`);
+    return blockers;
   });
-}
-
-export async function liveSxFillabilityBlockers(requests: OrderRequest[]): Promise<string[]> {
-  const checks = await Promise.all(
-    requests.map(async (req) => {
-      if (req.venueId !== "sxbet") return null;
-      const result = await checkSxFillability(req);
-      return result.ok ? null : result.reason ?? "SX.bet has no fillable maker liquidity for this leg";
-    })
-  );
-  return checks.filter((b): b is string => Boolean(b));
-}
-
-export async function liveKalshiFillabilityBlockers(requests: OrderRequest[], creds?: ExecCreds): Promise<string[]> {
-  const checks = await Promise.all(
-    requests.map(async (req) => {
-      if (req.venueId !== "kalshi") return null;
-      const result = await checkKalshiFillability(req, creds?.kalshiCreds);
-      return result.ok ? null : result.reason ?? "Kalshi has no fillable top-of-book liquidity for this leg";
-    })
-  );
-  return checks.filter((b): b is string => Boolean(b));
 }
 
 function venueLabel(venueId: string): string {
@@ -59,52 +131,112 @@ function venueLabel(venueId: string): string {
   return venueId;
 }
 
+// SX.bet is the one genuinely slow/fragile leg here (on-chain settlement, real signature +
+// gas latency) — it is always placed FIRST when present, so if its order fails we skip the
+// hedge and never open a naked position on the other (fast, reliable) venue.
+//
+// Polymarket and predict.fun used to ALSO be sequenced first, on the theory that their
+// FOK-or-killed orders were unreliable — but that made the OTHER leg wait on a confirmation
+// round-trip before firing. That wait was fine while Polymarket fills were themselves
+// unreliable (nothing to lose by waiting), but once Polymarket started filling reliably
+// (single-shot placement, no book-preflight — see executor.ts's placement comment) the wait
+// became pure downside: on 2026-08-08, 9 of 15 live trades went naked with the SAME
+// signature — Polymarket (or predict.fun) filled, then Kalshi's IOC came back genuinely
+// unfilled (a real order, a real Kalshi response, no error — the market had simply moved by
+// the time Kalshi's turn came) or was skipped outright because Polymarket's fill was 95%+
+// but not literally 100%. Every failure traced to the SEQUENCING delay itself, not to
+// Kalshi, Polymarket, or the websocket integration (verified: every Kalshi order got a real
+// order id and a real fill-or-no-fill answer from Kalshi's own API — nothing was blocked).
 export function fragileVenueFirstOrder(requests: OrderRequest[]): number[] {
-  const hasSx = requests.some((r) => r.venueId === "sxbet");
-  const hasPredictFun = requests.some((r) => r.venueId === "predictfun");
-  const hasPolymarket = requests.some((r) => r.venueId === "polymarket");
-  const hasKalshi = requests.some((r) => r.venueId === "kalshi");
   const indexes = requests.map((_, i) => i);
-  if (!hasPredictFun && !(hasSx && hasKalshi) && (!hasPolymarket || requests.length < 2)) return indexes;
+  if (!requests.some((r) => r.venueId === "sxbet")) return indexes;
   return indexes.sort((a, b) => {
-    const av = requests[a].venueId;
-    const bv = requests[b].venueId;
-    if (hasPolymarket) {
-      if (av === "polymarket" && bv !== "polymarket") return -1;
-      if (av !== "polymarket" && bv === "polymarket") return 1;
-    }
-    if (!hasPolymarket) {
-      if (av === "predictfun" && bv !== "predictfun") return -1;
-      if (av !== "predictfun" && bv === "predictfun") return 1;
-    }
-    if (hasSx && hasKalshi) {
-      if (av === "kalshi" && bv !== "kalshi") return -1;
-      if (av !== "kalshi" && bv === "kalshi") return 1;
-    }
-    if (av === "sxbet" && bv !== "sxbet") return -1;
-    if (av !== "sxbet" && bv === "sxbet") return 1;
+    const av = requests[a].venueId === "sxbet";
+    const bv = requests[b].venueId === "sxbet";
+    if (av && !bv) return -1;
+    if (!av && bv) return 1;
     return a - b;
   });
 }
 
+// Sequence (SX first) ONLY when SX.bet is a leg. Every other pairing (Polymarket+Kalshi,
+// Polymarket+predict.fun, Kalshi+predict.fun, ...) fires ALL legs concurrently — see the
+// comment on fragileVenueFirstOrder for why sequencing those was net-negative once
+// Polymarket started filling reliably.
 export function shouldSequenceFragileVenuePair(requests: OrderRequest[]): boolean {
-  const hasPredictFun = requests.some((r) => r.venueId === "predictfun");
-  const hasPolymarket = requests.some((r) => r.venueId === "polymarket");
-  const hasSx = requests.some((r) => r.venueId === "sxbet");
-  const hasKalshi = requests.some((r) => r.venueId === "kalshi");
-  return (hasPolymarket && requests.length > 1) || (hasPredictFun && requests.length > 1) || (hasSx && hasKalshi);
+  return requests.length > 1 && requests.some((r) => r.venueId === "sxbet");
 }
 
 function skippedBecausePriorLegFailed(req: OrderRequest, error: string): OrderResult {
   return { ok: false, orderId: null, filledContracts: 0, avgPriceCents: req.limitPriceCents, status: "rejected", error };
 }
 
-export async function runExecution(
+export function commonExecutableRequests(
+  requests: OrderRequest[],
+  quotes: ExecutableOrderQuote[],
+  depthBufferMultiple = 1
+): { requests: OrderRequest[]; commonContracts: number; blockers: string[] } {
+  if (requests.length === 0 || quotes.length !== requests.length) {
+    return { requests, commonContracts: 0, blockers: ["executable quote count does not match order legs"] };
+  }
+  const blockers = quotes.flatMap((quote, i) =>
+    quote.availableContracts > 0
+      ? []
+      : [quote.reason ?? `${venueLabel(requests[i].venueId)} has no executable depth`]
+  );
+  if (blockers.length) return { requests, commonContracts: 0, blockers };
+
+  // Kalshi accepts fixed-point counts to two decimals. Use exactly the same contract
+  // count on every leg so every outcome has the same guaranteed $1-per-share payout.
+  const buffer = Math.max(1, depthBufferMultiple);
+  const rawCommonContracts = Math.min(
+    ...requests.map((r) => r.sizeContracts),
+    ...quotes.map((q) => q.availableContracts / buffer)
+  );
+  const commonContracts = Math.floor((rawCommonContracts + 1e-9) * 100) / 100;
+  if (commonContracts <= 0) return { requests, commonContracts, blockers: ["common executable size rounds to zero"] };
+
+  return {
+    commonContracts,
+    blockers: [],
+    requests: requests.map((request, i) => ({
+      ...request,
+      sizeContracts: commonContracts,
+      limitPriceCents: Math.min(request.limitPriceCents, quotes[i].priceCents),
+    })),
+  };
+}
+
+type RunResult = ExecutionOutcome & { mode: ExecMode; blockers: string[] };
+const executionQueue = globalThis as typeof globalThis & { __arbLiveExecutionTail?: Promise<void> };
+
+function serializeLiveExecution<T>(work: () => Promise<T>): Promise<T> {
+  const tail = executionQueue.__arbLiveExecutionTail ?? Promise.resolve();
+  const run = tail.then(work, work);
+  executionQueue.__arbLiveExecutionTail = run.then(() => undefined, () => undefined);
+  return run;
+}
+
+export function runExecution(
   opportunityId: string,
   date: string,
   requestedMode: ExecMode,
   creds?: ExecCreds
-): Promise<ExecutionOutcome & { mode: ExecMode; blockers: string[] }> {
+): Promise<RunResult> {
+  // One live basket at a time per server process. This ensures the completed trade is saved
+  // before the next queued request checks the Risk panel's per-match open-position limit.
+  // Paper simulations remain concurrent.
+  return requestedMode === "live"
+    ? serializeLiveExecution(() => runExecutionUnlocked(opportunityId, date, requestedMode, creds))
+    : runExecutionUnlocked(opportunityId, date, requestedMode, creds);
+}
+
+async function runExecutionUnlocked(
+  opportunityId: string,
+  date: string,
+  requestedMode: ExecMode,
+  creds?: ExecCreds
+): Promise<RunResult> {
   const prep = await prepareExecution(opportunityId, date, requestedMode);
   if (prep.kind === "halt") return { ...prep.outcome, mode: "dry_run", blockers: [] };
   const ctx = prep.ctx;
@@ -114,12 +246,11 @@ export async function runExecution(
     requestedMode,
     agentPaper: ctx.agent.paper,
     agentLive: ctx.agent.live,
-    killSwitch: ctx.risk.killSwitch,
     venues: ctx.venues,
     stakeUsd: ctx.totalStake,
-    // The SX.bet $1-minimum floor overrides the configured live cap: when an arb had to be
-    // sized up so its SX leg clears $1, that (larger) stake must still be allowed to fire.
-    maxLiveStakeUsd: Math.max(ctx.risk.maxLiveStakeUsd, ctx.minLiveStakeFloorUsd),
+    // Venue minimum sizing must never override the live risk cap. If the valid common
+    // basket is too large, skip it instead of silently increasing real-money exposure.
+    maxLiveStakeUsd: ctx.risk.maxLiveStakeUsd,
     venuesSupportLive: venueSupportsLive(ctx.venues, creds),
   });
 
@@ -195,13 +326,30 @@ export async function runExecution(
   }));
 
   if (mode === "live") {
-    const [sxBlockers, kalshiBlockers] = await Promise.all([
-      liveSxFillabilityBlockers(requests),
-      liveKalshiFillabilityBlockers(requests, creds),
-    ]);
-    const fillabilityBlockers = [...sxBlockers, ...kalshiBlockers];
-    if (fillabilityBlockers.length) {
-      const reason = `Live execution blocked - ${fillabilityBlockers.join("; ")}`;
+    // Fast, in-memory pre-check against the already-connected live-book websocket caches
+    // (polymarketLiveBook / kalshiLiveBook) — zero network cost, unlike the REST-based
+    // "executable books" quote below. Two jobs: (1) nudge a leg's limit up to match a live
+    // ask that ticked against us within a small cushion, so the REST quote right after this
+    // gets a fair shot at the CURRENT price instead of a stale detection-time one; (2) abort
+    // the whole trade before spending time on that REST round-trip at all if the live book
+    // already shows the price moved past the cushion or there isn't enough size resting —
+    // the REST preflight's own latency is exactly what let the book move further and kill
+    // fills before (see the removed single-venue "anchor preflight" this superseded).
+    const liveCheck = checkLiveFillability(requests, {
+      askCents: liveAskCentsFor,
+      depthAtOrBetter: liveDepthAtOrBetter,
+    });
+    requests = liveCheck.requests;
+    for (const adj of liveCheck.adjustments) {
+      executionSteps.push({
+        key: `live_price_${adj.venueId}`,
+        label: `${venueLabel(adj.venueId)} live price check`,
+        status: "warn",
+        detail: `Live ask moved to ${adj.toCents}c — bumped limit from ${adj.fromCents}c to match (in-memory, no added latency)`,
+      });
+    }
+    if (liveCheck.blockers.length) {
+      const reason = `Live execution blocked - ${liveCheck.blockers.join("; ")}`;
       await writeLog(
         ctx.agent,
         ctx.opportunityMatchup,
@@ -210,60 +358,94 @@ export async function runExecution(
         "halted",
         "live_blocked",
         reason,
-        { effectiveMode: "blocked", gateBlockers: fillabilityBlockers, totalCost: ctx.totalStake, expectedProfit: ctx.expectedProfit, pipelineSteps: executionSteps },
+        { effectiveMode: "blocked", gateBlockers: liveCheck.blockers, totalCost: ctx.totalStake, expectedProfit: ctx.expectedProfit, pipelineSteps: executionSteps },
         date,
         "live"
       );
-      return { result: "halted", reasonCode: "live_blocked", reason, trade: null, mode: "live", blockers: fillabilityBlockers };
+      return { result: "halted", reasonCode: "live_blocked", reason, trade: null, mode: "live", blockers: liveCheck.blockers };
     }
+
+    // Quote every venue-native executable book concurrently, then use exactly the same
+    // contract count on every leg. Polymarket walks the real CLOB ask ladder here, so a
+    // three-contract basket proceeds only when all three shares are actually offered at or
+    // below our limit (or all legs are uniformly resized to a smaller valid common count).
+    const depthBuffer = Math.max(1, ctx.risk.liquidityStakeBufferMultiple);
+    const depthProbeRequests = requests.map((request) => ({
+      ...request,
+      sizeContracts: request.sizeContracts * depthBuffer,
+    }));
+    const quotes = await Promise.all(
+      adapters.map((adapter, i): Promise<ExecutableOrderQuote> => adapter.quoteOrder
+        ? adapter.quoteOrder(depthProbeRequests[i])
+        : Promise.resolve({
+            ok: true,
+            priceCents: requests[i].limitPriceCents,
+            averagePriceCents: requests[i].limitPriceCents,
+            availableContracts: depthProbeRequests[i].sizeContracts,
+          }))
+    );
+    const resized = commonExecutableRequests(requests, quotes, depthBuffer);
+    if (resized.blockers.length) {
+      const reason = `Live execution blocked - ${resized.blockers.join("; ")}`;
+      await writeLog(
+        ctx.agent,
+        ctx.opportunityMatchup,
+        ctx.venues,
+        ctx.netAfter,
+        "halted",
+        "live_blocked",
+        reason,
+        { effectiveMode: "blocked", gateBlockers: resized.blockers, executableQuotes: quotes, totalCost: ctx.totalStake, expectedProfit: ctx.expectedProfit, pipelineSteps: executionSteps },
+        date,
+        "live"
+      );
+      return { result: "halted", reasonCode: "live_blocked", reason, trade: null, mode: "live", blockers: resized.blockers };
+    }
+
+    requests = resized.requests;
+    const quotedLegs = ctx.executedLegs.map((leg, i) => ({
+      ...leg,
+      size: resized.commonContracts,
+      priceCents: requests[i].limitPriceCents,
+    }));
+    const minimumBlockers = liveVenueMinimumStakeBlockers(quotedLegs);
+    const quotedFees = computeFees(quotedLegs);
+    quotedLegs.forEach((leg, i) => (leg.feeCents = quotedFees[i].feeCents));
+    const quotedEconomics = executedEconomics(quotedLegs);
+    const economicBlockers = [
+      ...minimumBlockers,
+      ...(quotedEconomics.expectedProfit < ctx.risk.minExpectedProfitUsd
+        ? [`executable profit $${quotedEconomics.expectedProfit.toFixed(2)} is below $${ctx.risk.minExpectedProfitUsd.toFixed(2)}`]
+        : []),
+      ...(quotedEconomics.guaranteedPayout <= quotedEconomics.totalCost
+        ? ["live executable prices no longer form an arbitrage"]
+        : []),
+    ];
+    if (economicBlockers.length) {
+      const reason = `Live execution blocked - ${economicBlockers.join("; ")}`;
+      await writeLog(ctx.agent, ctx.opportunityMatchup, ctx.venues, quotedEconomics.netEdge, "halted", "live_blocked", reason, {
+        effectiveMode: "blocked",
+        gateBlockers: economicBlockers,
+        executableQuotes: quotes,
+        commonContracts: resized.commonContracts,
+        submittedStakesUsd: quotedLegs.map((leg) => Number(((leg.size * leg.priceCents) / 100).toFixed(4))),
+        totalCost: quotedEconomics.totalCost,
+        expectedProfit: quotedEconomics.expectedProfit,
+        pipelineSteps: executionSteps,
+      }, date, "live");
+      return { result: "halted", reasonCode: "live_blocked", reason, trade: null, mode: "live", blockers: economicBlockers };
+    }
+    executionSteps.push({
+      key: "executable_books",
+      label: "Executable books",
+      status: "pass",
+      detail: `${resized.commonContracts.toFixed(2)} exact common contracts across every leg with ${depthBuffer.toFixed(1)}x depth; $${quotedEconomics.expectedProfit.toFixed(2)} executable profit`,
+    });
   }
 
   let placed: OrderResult[];
   const sequencingOrder = mode === "live" ? fragileVenueFirstOrder(requests) : requests.map((_, i) => i);
   const shouldSequence = mode === "live" && shouldSequenceFragileVenuePair(requests);
-
-  // ── Polymarket anchor preflight: size the FOK to the LIVE book so it actually fills ──
-  // Polymarket is the anchor (placed first). A FOK is killed when it asks for more than the
-  // book holds at our price — that's what left legs unfilled. Read the live ask depth and
-  // resize the anchor (and the hedge, so both legs match) to what's fillable at <= our limit
-  // (+1c cushion for small moves). If nothing is fillable at our price the arb has moved away,
-  // so we leave it: the order won't fill and the hedge is skipped — no naked exposure.
-  const anchorIdx = shouldSequence ? sequencingOrder[0] : -1;
-  if (anchorIdx >= 0 && requests[anchorIdx].venueId === "polymarket") {
-    const maxPrice = Math.min(99, requests[anchorIdx].limitPriceCents + 1);
-    const quote = await quotePolymarketFokBuy(requests[anchorIdx], creds?.polymarket, maxPrice).catch(() => null);
-    const nextSize = quote ? Math.floor(Math.min(requests[anchorIdx].sizeContracts, quote.availableContracts) * 1e4) / 1e4 : 0;
-    // If an SX.bet leg is hedging this anchor, the resized size must still keep the SX leg at
-    // or above its $1 order minimum. Shrinking below that would place a sub-$1 SX order that
-    // SX rejects AFTER the Polymarket anchor already filled — a naked position. So require the
-    // SX floor here: if Polymarket's book can't cover it, skip (anchor left unfilled, no naked).
-    const sxHedge = requests.find((r, i) => i !== anchorIdx && r.venueId.toLowerCase().includes("sx"));
-    const sxFloorContracts = sxHedge && sxHedge.limitPriceCents > 0 ? SXBET_MIN_TAKER_STAKE_USD / (sxHedge.limitPriceCents / 100) : 0;
-    if (quote && nextSize > 0 && nextSize + 1e-9 >= sxFloorContracts) {
-      const nextLimit = Math.min(99, Math.max(requests[anchorIdx].limitPriceCents, quote.limitPriceCents));
-      requests = requests.map((r, i) => ({ ...r, sizeContracts: nextSize, limitPriceCents: i === anchorIdx ? nextLimit : r.limitPriceCents }));
-      executionSteps.push({
-        key: "polymarket_book_preflight",
-        label: "Polymarket book preflight",
-        status: "pass",
-        detail: `resized to ${nextSize.toFixed(4)} fillable contracts at <= ${nextLimit.toFixed(2)}c (both legs matched)`,
-      });
-    } else if (quote && nextSize > 0 && sxHedge) {
-      executionSteps.push({
-        key: "polymarket_book_preflight",
-        label: "Polymarket book preflight",
-        status: "warn",
-        detail: `Polymarket depth ${nextSize.toFixed(4)} ctr below SX.bet $${SXBET_MIN_TAKER_STAKE_USD.toFixed(2)} minimum (needs ${sxFloorContracts.toFixed(4)} ctr) — skipping, anchor left unfilled (no naked)`,
-      });
-    } else {
-      executionSteps.push({
-        key: "polymarket_book_preflight",
-        label: "Polymarket book preflight",
-        status: "warn",
-        detail: `no ask depth at <= ${maxPrice.toFixed(2)}c — arb moved away, order left unfilled (hedge skipped, no naked)`,
-      });
-    }
-  }
 
   if (shouldSequence) {
     placed = new Array<OrderResult>(requests.length);
@@ -296,7 +478,7 @@ export async function runExecution(
 
   // ── Derive position status from per-leg fills ───────────────────────────────
   const filledFlags = results.map((r) => r.filledContracts > 0);
-  const fullyFilled = results.every((r, i) => r.filledContracts >= ctx.executedLegs[i].size);
+  const fullyFilled = results.every((r, i) => r.filledContracts + 1e-9 >= requests[i].sizeContracts);
   const anyFilled = filledFlags.some(Boolean);
   const allFilled = filledFlags.every(Boolean);
 
@@ -343,7 +525,7 @@ export async function runExecution(
   const legs: ArbLeg[] = ctx.executedLegs.map((l, i) => {
     const r = results[i];
     const cents = r.avgPriceCents || l.priceCents;
-    return { ...l, priceCents: cents, decimalOdds: 100 / cents, impliedProbability: cents / 100, size: r.filledContracts || (status === "failed" ? 0 : l.size) };
+    return { ...l, priceCents: cents, decimalOdds: 100 / cents, impliedProbability: cents / 100, size: r.filledContracts };
   });
 
   // Recompute economics from what ACTUALLY filled (real avg prices + filled sizes) so the

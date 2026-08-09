@@ -4,7 +4,7 @@ import { useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import type { Agent, ArbLog } from "@/types/arbitrage";
 import { Drawer, Toggle } from "./ui";
-import { formatClock, formatEdgePct, reasonCodeLabel } from "./arbFormat";
+import { formatClock, formatEdgePct, formatMatchup, reasonCodeLabel } from "./arbFormat";
 
 export default function AgentDrawer({
   agent,
@@ -57,7 +57,7 @@ export default function AgentDrawer({
           </SettingRow>
           {agent.autoTrade && (
             <p className="text-[10px] text-amber-400/80 -mt-2">
-              Agent auto-fills qualifying paper arbs while Scanning is on. Turn off Scanning or the kill switch to stop.
+              Agent auto-fills qualifying arbs while Scanning is on. Turn off Scanning or Auto-trade to stop.
             </p>
           )}
 
@@ -113,7 +113,7 @@ export default function AgentDrawer({
                 <span className="font-bold uppercase" style={{ color: l.result === "executed" ? "#4ade80" : "#f87171" }}>{l.result}</span>
                 <span className="text-gray-500">{formatClock(l.time)}</span>
               </div>
-              <div className="text-xs text-white mt-0.5">{l.pair}</div>
+              <div className="text-xs text-white mt-0.5">{formatMatchup(l.pair)}</div>
               <div className="flex items-center justify-between text-[10px] mt-0.5">
                 <span className="text-blue-300">{l.venues.join(" → ")}</span>
                 <span className="text-gray-400">{formatEdgePct(l.edge)}</span>

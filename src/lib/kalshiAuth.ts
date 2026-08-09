@@ -36,7 +36,9 @@ function signPath(
   return sig.toString("base64");
 }
 
-function authHeaders(
+// Exported for the websocket client (kalshiLiveBook.ts) — the WS handshake is authenticated
+// the same way as a REST GET: sign method + path + timestamp (no query string, no body).
+export function authHeaders(
   method: string,
   path: string,
   creds?: KalshiCreds

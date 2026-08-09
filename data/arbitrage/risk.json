@@ -1,16 +1,14 @@
 {
-  "killSwitch": false,
   "maxExposure": 10000,
   "currentExposure": 0,
   "maxDailyLoss": 500,
   "dailyPnl": 0,
   "maxOpenPositions": 0,
-  "pauseOnNaked": true,
   "staleQuoteMs": 30000,
   "minLiquidityUsd": 20,
-  "minExpectedProfitUsd": 0.15,
+  "minExpectedProfitUsd": 0.03,
   "liquidityStakeBufferMultiple": 3,
   "staleDivergenceCents": 40,
-  "maxLiveStakeUsd": 4,
+  "maxLiveStakeUsd": 7,
   "perVenueCap": {}
 }

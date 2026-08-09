@@ -57,7 +57,18 @@ export default function PlayModal({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="px-5 py-3 border-b" style={{ borderColor: "#2a2d35" }}>
-          <h2 className="text-sm font-bold text-white">Execute arbitrage — {opp.matchup}</h2>
+          <h2 className="text-sm font-bold text-white flex items-center gap-2">
+            Execute arbitrage — {opp.matchup}
+            {opp.segment === "f5" ? (
+              <span className="px-1.5 py-0.5 rounded text-[10px] font-bold" style={{ background: "#3b1f5c", color: "#e9d5ff" }}>
+                1ST 5 INNINGS
+              </span>
+            ) : (
+              <span className="px-1.5 py-0.5 rounded text-[10px] font-bold" style={{ background: "#1e2a3b", color: "#93c5fd" }}>
+                FULL GAME
+              </span>
+            )}
+          </h2>
           <p className="text-[11px] text-gray-500">Both legs fired in parallel, then reconciled</p>
         </div>
 
@@ -107,7 +118,7 @@ export default function PlayModal({
                 <TriangleAlert className="w-3.5 h-3.5 mt-px shrink-0" />
                 <span>
                   Real money. This passes through the execution gate — it runs live only if the agent&apos;s
-                  Live toggle is on, the kill switch is off, the stake is under the Risk cap, and each venue has
+                  Live toggle is on, the stake is under the Risk cap, and each venue has
                   credentials. If any check fails the trade is reported <strong>FAILED with the reason</strong> — it
                   will <strong>not</strong> run as a paper trade.
                 </span>

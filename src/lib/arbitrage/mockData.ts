@@ -98,6 +98,7 @@ function buildOpportunity(
     agentId: DEFAULT_AGENT.id,
     status,
     detectedAt,
+    segment: "full_game",
   };
 }
 

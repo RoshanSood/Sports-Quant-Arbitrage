@@ -4,7 +4,7 @@
 // killed — so we never leave a resting (naked) order, matching the arb "both legs or
 // nothing" requirement. The wallet key is read server-side only and never leaves the
 // process. A venue is live-capable once its wallet key is present; whether a live order
-// actually fires is decided by the execution gate (agent Live toggle + kill switch +
+// actually fires is decided by the execution gate (agent Live toggle +
 // UI stake cap + admin auth) — validate with a $1 trade before raising the cap.
 
 import {
@@ -22,7 +22,7 @@ import { Wallet } from "ethers";
 import { POLYGON_CHAIN_ID, polymarketClobHost, polygonUsdcAddress } from "./chains";
 import type { PolymarketCreds } from "./onchainCreds";
 import { deriveEoa, providerFor, usdcBalance } from "./wallet";
-import type { ExecutionAdapter, FillConfirmation, OrderRequest, OrderResult } from "./types";
+import type { ExecutableOrderQuote, ExecutionAdapter, FillConfirmation, OrderRequest, OrderResult } from "./types";
 import { clobSignerShim, walletKey } from "./wallet";
 
 // Which signature scheme the funded wallet uses. Default EOA (direct wallet). Users
@@ -138,18 +138,9 @@ export function avgCentsFrom(resp: PostOrderResponse, limitCents: number): numbe
   return limitCents;
 }
 
-function floorTo(value: number, decimals: number): number {
-  const scale = 10 ** decimals;
-  return Math.floor((value + Number.EPSILON) * scale) / scale;
-}
-
 function roundTo(value: number, decimals: number): number {
   const scale = 10 ** decimals;
   return Math.round((value + Number.EPSILON) * scale) / scale;
-}
-
-export function polymarketFokBuyAmount(sizeContracts: number, limitPriceCents: number): number {
-  return roundTo(sizeContracts * (limitPriceCents / 100), 2);
 }
 
 // A live-book quote for how much a marketable FOK BUY can ACTUALLY fill at/below our price.
@@ -254,7 +245,7 @@ export class PolymarketExecutionAdapter implements ExecutionAdapter {
 
   supportsLive(): boolean {
     // Live-capable once a wallet key is present (entered in the UI or env). The gate
-    // (agent live toggle + kill switch + stake cap + admin auth) decides if it fires.
+    // (agent live toggle + stake cap + admin auth) decides if it fires.
     return Boolean(this.key());
   }
 
@@ -277,6 +268,26 @@ export class PolymarketExecutionAdapter implements ExecutionAdapter {
     }
   }
 
+  async quoteOrder(req: OrderRequest): Promise<ExecutableOrderQuote> {
+    try {
+      const quote = await quotePolymarketFokBuy(req, this.creds, req.limitPriceCents);
+      if (!quote) {
+        return { ok: false, priceCents: req.limitPriceCents, averagePriceCents: req.limitPriceCents, availableContracts: 0, reason: "Polymarket has no ask depth at or below the limit" };
+      }
+      return {
+        ok: quote.availableContracts + 1e-9 >= req.sizeContracts,
+        priceCents: quote.limitPriceCents,
+        averagePriceCents: quote.avgPriceCents,
+        availableContracts: quote.availableContracts,
+        reason: quote.availableContracts + 1e-9 >= req.sizeContracts
+          ? undefined
+          : `Polymarket executable depth ${quote.availableContracts.toFixed(2)} < ${req.sizeContracts}`,
+      };
+    } catch (e) {
+      return { ok: false, priceCents: req.limitPriceCents, averagePriceCents: req.limitPriceCents, availableContracts: 0, reason: `Polymarket order book check failed: ${String(e).slice(0, 120)}` };
+    }
+  }
+
   async placeOrder(req: OrderRequest): Promise<OrderResult> {
     const key = this.key();
     if (!key) return reject(req, "Polymarket wallet key not configured");
@@ -288,11 +299,11 @@ export class PolymarketExecutionAdapter implements ExecutionAdapter {
     const price = req.limitPriceCents / 100; // probability price 0..1
     try {
       const client = await buildClient(key, this.funder(), this.sigType());
-      const amount = polymarketFokBuyAmount(req.sizeContracts, req.limitPriceCents);
-      if (amount <= 0) return reject(req, "Polymarket order cost rounds below $0.01");
-      // createMarketOrder keeps FOK buy maker amounts at cent precision and derives
-      // the CLOB token amount at Polymarket's required precision.
-      const signed = await client.createMarketOrder({ tokenID, amount, price, side: Side.BUY, orderType: OrderType.FOK });
+      if (req.sizeContracts <= 0) return reject(req, "Polymarket order size must be positive");
+      // Submit the exact common share count chosen by the all-venue depth pass. A
+      // dollar-denominated market BUY rounds collateral first and can derive a different
+      // share count, breaking the hedge ratio even when both venues return order ids.
+      const signed = await client.createOrder({ tokenID, price, size: req.sizeContracts, side: Side.BUY });
       const resp = (await client.postOrder(signed, OrderType.FOK)) as PostOrderResponse;
 
       // Decide fill from ACTUAL shares received, not from success+orderID (see helper).

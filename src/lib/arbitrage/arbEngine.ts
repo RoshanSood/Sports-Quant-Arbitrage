@@ -95,11 +95,14 @@ function pickMainLines(matched: MatchedEvent[]): MatchedEvent[] {
 
 // The full set of complementary outcomes a market must cover for a guaranteed arb.
 // Soccer moneyline is 3-way (1X2) — a home/away-only "arb" on a soccer match is NOT an
-// arb, because the draw would lose both legs. Everything else is 2-way.
+// arb, because the draw would lose both legs. MLB F5 (first-5-innings) winner is the same
+// situation: a tie after 5 innings is possible (unlike a full 9-inning game), so an F5
+// home/away-only position loses both legs on a tie. Everything else is 2-way.
 function requiredOutcomes(ev: MatchedEvent): Outcome[] {
   if (ev.marketType === "total") return ["over", "under"];
   if (ev.marketType === "spread") return ["home", "away"];
-  return ev.sport === "soccer" ? ["home", "draw", "away"] : ["home", "away"];
+  const threeWay = ev.sport === "soccer" || ev.segment === "f5";
+  return threeWay ? ["home", "draw", "away"] : ["home", "away"];
 }
 
 // Pick one leg per required outcome, minimizing total cost, subject to the arb spanning
@@ -266,6 +269,7 @@ export function detectArbs(
         agentId: agent.id,
         status: "tracked",
         detectedAt: now,
+        segment: ev.segment ?? "full_game",
       });
     } else if (status === "stale") {
       rejects.push({ eventKey: ev.eventKey, matchup: ev.matchup, line: ev.line, reason: "stale_quote", netEdge: net, detail: `venues disagree ${divergence}c — likely stale` });

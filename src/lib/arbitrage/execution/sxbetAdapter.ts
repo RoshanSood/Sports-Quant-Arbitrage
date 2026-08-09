@@ -5,7 +5,7 @@
 // = EIP712FillHasher from /metadata). The wallet key is server-side only.
 //
 // A venue is live-capable once its wallet key is present; whether a live order actually
-// fires is decided by the execution gate (agent Live toggle + kill switch + UI stake cap
+// fires is decided by the execution gate (agent Live toggle + UI stake cap
 // + admin auth) — validate with a $1 fill before raising the cap.
 //
 // NOTE: the exact HTTP request/response envelope of /orders/fill/v2 must be confirmed
@@ -17,7 +17,7 @@ import { SX_CHAIN_ID } from "./chains";
 import { getSxMetadata } from "./sxMeta";
 import { verifySx } from "./verify";
 import type { SxbetCreds } from "./onchainCreds";
-import type { ExecutionAdapter, FillConfirmation, OrderRequest, OrderResult } from "./types";
+import type { ExecutableOrderQuote, ExecutionAdapter, FillConfirmation, OrderRequest, OrderResult } from "./types";
 import { deriveEoa, signerFor, walletKey } from "./wallet";
 
 const SX_FILL_URL = "https://api.sx.bet/orders/fill/v2";
@@ -126,11 +126,11 @@ type SxBookOrder = {
   isMakerBettingOutcomeOne?: boolean;
 };
 
-export async function checkSxFillability(req: OrderRequest): Promise<{ ok: boolean; reason?: string }> {
+export async function quoteSxOrder(req: OrderRequest): Promise<ExecutableOrderQuote> {
   const marketHash = req.nativeMarketId;
   const side = (req.nativeSide ?? "").toLowerCase();
   if (!marketHash || (side !== "one" && side !== "two")) {
-    return { ok: false, reason: "missing SX.bet marketHash/outcome side" };
+    return { ok: false, priceCents: req.limitPriceCents, averagePriceCents: req.limitPriceCents, availableContracts: 0, reason: "missing SX.bet marketHash/outcome side" };
   }
 
   try {
@@ -138,30 +138,56 @@ export async function checkSxFillability(req: OrderRequest): Promise<{ ok: boole
       cache: "no-store",
       headers: { Accept: "application/json" },
     });
-    if (!res.ok) return { ok: false, reason: `SX.bet order book unavailable (HTTP ${res.status})` };
+    if (!res.ok) return { ok: false, priceCents: req.limitPriceCents, averagePriceCents: req.limitPriceCents, availableContracts: 0, reason: `SX.bet order book unavailable (HTTP ${res.status})` };
 
     const json = (await res.json()) as { data?: SxBookOrder[] };
     const wantsOutcomeOne = side === "one";
-    const requiredStakeUsd = (req.sizeContracts * req.limitPriceCents) / 100;
-
-    for (const order of json.data ?? []) {
+    const levels = (json.data ?? []).flatMap((order) => {
       const availableUsd = (Number(order.totalBetSize) - Number(order.fillAmount)) / 1_000_000;
-      if (!Number.isFinite(availableUsd) || availableUsd < requiredStakeUsd) continue;
+      if (!Number.isFinite(availableUsd) || availableUsd <= 0) return [];
 
       const makerProbability = Number(order.percentageOdds) / 1e20;
-      if (!Number.isFinite(makerProbability) || makerProbability <= 0 || makerProbability >= 1) continue;
+      if (!Number.isFinite(makerProbability) || makerProbability <= 0 || makerProbability >= 1) return [];
 
       const makerBettingOne = Boolean(order.isMakerBettingOutcomeOne);
-      if (wantsOutcomeOne === makerBettingOne) continue;
+      if (wantsOutcomeOne === makerBettingOne) return [];
 
       const takerPriceCents = (1 - makerProbability) * 100;
-      if (takerPriceCents <= req.limitPriceCents) return { ok: true };
+      if (takerPriceCents > req.limitPriceCents || takerPriceCents <= 0) return [];
+      return [{ priceCents: takerPriceCents, contracts: availableUsd / (takerPriceCents / 100) }];
+    }).sort((a, b) => a.priceCents - b.priceCents);
+
+    let remaining = req.sizeContracts;
+    let availableContracts = 0;
+    let cost = 0;
+    let worstPriceCents = 0;
+    for (const level of levels) {
+      if (remaining <= 0) break;
+      const take = Math.min(remaining, level.contracts);
+      availableContracts += take;
+      cost += take * level.priceCents;
+      worstPriceCents = Math.max(worstPriceCents, level.priceCents);
+      remaining -= take;
     }
 
-    return { ok: false, reason: "SX.bet has no maker liquidity at or below the limit price" };
+    if (availableContracts <= 0) {
+      return { ok: false, priceCents: req.limitPriceCents, averagePriceCents: req.limitPriceCents, availableContracts: 0, reason: "SX.bet has no maker liquidity at or below the limit price" };
+    }
+    return {
+      ok: availableContracts + 1e-9 >= req.sizeContracts,
+      priceCents: worstPriceCents,
+      averagePriceCents: cost / availableContracts,
+      availableContracts,
+      reason: availableContracts + 1e-9 >= req.sizeContracts ? undefined : `SX.bet executable depth ${availableContracts.toFixed(2)} < ${req.sizeContracts}`,
+    };
   } catch (e) {
-    return { ok: false, reason: `SX.bet order book check failed: ${String(e).slice(0, 120)}` };
+    return { ok: false, priceCents: req.limitPriceCents, averagePriceCents: req.limitPriceCents, availableContracts: 0, reason: `SX.bet order book check failed: ${String(e).slice(0, 120)}` };
   }
+}
+
+export async function checkSxFillability(req: OrderRequest): Promise<{ ok: boolean; reason?: string }> {
+  const quote = await quoteSxOrder(req);
+  return { ok: quote.ok, reason: quote.reason };
 }
 
 export class SxBetExecutionAdapter implements ExecutionAdapter {
@@ -174,13 +200,17 @@ export class SxBetExecutionAdapter implements ExecutionAdapter {
 
   supportsLive(): boolean {
     // Live-capable once a wallet key is present (entered in the UI or env). The gate
-    // (agent live toggle + kill switch + stake cap + admin auth) decides if it fires.
+    // (agent live toggle + stake cap + admin auth) decides if it fires.
     return Boolean(this.key());
   }
 
   async getBalanceUsd(): Promise<number | null> {
     if (!this.key()) return null;
     return (await verifySx(this.creds)).usdcBalance;
+  }
+
+  quoteOrder(req: OrderRequest): Promise<ExecutableOrderQuote> {
+    return quoteSxOrder(req);
   }
 
   async placeOrder(req: OrderRequest): Promise<OrderResult> {

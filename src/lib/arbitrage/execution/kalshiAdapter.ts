@@ -11,7 +11,7 @@
 
 import crypto from "node:crypto";
 import { isKalshiConfigured, kalshiGet, kalshiPost, type KalshiCreds } from "@/lib/kalshiAuth";
-import type { ExecutionAdapter, OrderRequest, OrderResult } from "./types";
+import type { ExecutableOrderQuote, ExecutionAdapter, OrderRequest, OrderResult } from "./types";
 
 type KalshiBalance = { balance?: number }; // cents
 type KalshiV2OrderResp = {
@@ -42,36 +42,45 @@ function centsFromMaybeDollars(cents?: number, dollars?: string | number): numbe
   return null;
 }
 
-export async function checkKalshiFillability(req: OrderRequest, creds?: KalshiCreds): Promise<{ ok: boolean; reason?: string }> {
+export async function quoteKalshiOrder(req: OrderRequest, creds?: KalshiCreds): Promise<ExecutableOrderQuote> {
   const ticker = req.nativeMarketId;
   const yesNo = (req.nativeSide ?? "").toLowerCase();
   if (!ticker || (yesNo !== "yes" && yesNo !== "no")) {
-    return { ok: false, reason: "missing Kalshi native ticker/side" };
+    return { ok: false, priceCents: req.limitPriceCents, averagePriceCents: req.limitPriceCents, availableContracts: 0, reason: "missing Kalshi native ticker/side" };
   }
 
   try {
     const snapshot = await kalshiGet<KalshiMarketSnapshot>(`/markets/${encodeURIComponent(ticker)}`, {}, creds);
     const market = snapshot.market;
-    if (!market) return { ok: false, reason: "Kalshi market snapshot unavailable" };
+    if (!market) return { ok: false, priceCents: req.limitPriceCents, averagePriceCents: req.limitPriceCents, availableContracts: 0, reason: "Kalshi market snapshot unavailable" };
     if (market.status && !["open", "active"].includes(market.status)) {
-      return { ok: false, reason: `Kalshi market is ${market.status}` };
+      return { ok: false, priceCents: req.limitPriceCents, averagePriceCents: req.limitPriceCents, availableContracts: 0, reason: `Kalshi market is ${market.status}` };
     }
 
     const yesAsk = centsFromMaybeDollars(market.yes_ask, market.yes_ask_dollars);
     const yesBid = centsFromMaybeDollars(market.yes_bid, market.yes_bid_dollars);
     const priceCents = yesNo === "yes" ? yesAsk : yesBid == null ? null : 100 - yesBid;
     const availableContracts = Number(yesNo === "yes" ? market.yes_ask_size_fp : market.yes_bid_size_fp);
-    if (priceCents == null) return { ok: false, reason: "Kalshi top-of-book price unavailable" };
+    if (priceCents == null) return { ok: false, priceCents: req.limitPriceCents, averagePriceCents: req.limitPriceCents, availableContracts: 0, reason: "Kalshi top-of-book price unavailable" };
     if (priceCents > req.limitPriceCents) {
-      return { ok: false, reason: `Kalshi top-of-book moved above limit (${priceCents}c > ${req.limitPriceCents}c)` };
+      return { ok: false, priceCents, averagePriceCents: priceCents, availableContracts: 0, reason: `Kalshi top-of-book moved above limit (${priceCents}c > ${req.limitPriceCents}c)` };
     }
-    if (!Number.isFinite(availableContracts) || availableContracts < req.sizeContracts) {
-      return { ok: false, reason: `Kalshi top-of-book size ${Number.isFinite(availableContracts) ? availableContracts.toFixed(2) : "unknown"} < ${req.sizeContracts}` };
-    }
-    return { ok: true };
+    const available = Number.isFinite(availableContracts) ? Math.max(0, availableContracts) : 0;
+    return {
+      ok: available + 1e-9 >= req.sizeContracts,
+      priceCents,
+      averagePriceCents: priceCents,
+      availableContracts: Math.min(available, req.sizeContracts),
+      reason: available + 1e-9 >= req.sizeContracts ? undefined : `Kalshi top-of-book size ${available.toFixed(2)} < ${req.sizeContracts}`,
+    };
   } catch (e) {
-    return { ok: false, reason: `Kalshi market check failed: ${String(e).slice(0, 120)}` };
+    return { ok: false, priceCents: req.limitPriceCents, averagePriceCents: req.limitPriceCents, availableContracts: 0, reason: `Kalshi market check failed: ${String(e).slice(0, 120)}` };
   }
+}
+
+export async function checkKalshiFillability(req: OrderRequest, creds?: KalshiCreds): Promise<{ ok: boolean; reason?: string }> {
+  const quote = await quoteKalshiOrder(req, creds);
+  return { ok: quote.ok, reason: quote.reason };
 }
 
 export class KalshiExecutionAdapter implements ExecutionAdapter {
@@ -91,6 +100,10 @@ export class KalshiExecutionAdapter implements ExecutionAdapter {
       console.error("[exec/kalshi] balance failed:", e);
       return null;
     }
+  }
+
+  quoteOrder(req: OrderRequest): Promise<ExecutableOrderQuote> {
+    return quoteKalshiOrder(req, this.creds);
   }
 
   async placeOrder(req: OrderRequest): Promise<OrderResult> {
@@ -123,7 +136,7 @@ export class KalshiExecutionAdapter implements ExecutionAdapter {
     try {
       const resp = await kalshiPost<KalshiV2OrderResp>("/portfolio/events/orders", body, this.creds);
       const orderId = resp.order_id ?? null;
-      const filled = Math.round(Number(resp.fill_count) || 0);
+      const filled = Math.floor((Number(resp.fill_count) || 0) * 100) / 100;
       // average_fill_price is the YES fill price; convert back to the outcome's cost.
       const avgYes = Number(resp.average_fill_price);
       const avgPriceCents = Number.isFinite(avgYes) && avgYes > 0

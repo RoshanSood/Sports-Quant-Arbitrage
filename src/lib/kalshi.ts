@@ -6,6 +6,12 @@ import type { ArbGame } from "./arbitrage/sports";
 const MLB_GAME_SERIES   = "KXMLBGAME";
 const MLB_SPREAD_SERIES = "KXMLBSPREAD";
 const MLB_TOTAL_SERIES  = "KXMLBTOTAL";
+// First-5-innings (F5): a parallel series ladder — same shape as full game, but a tie after
+// 5 is possible (unlike a full 9-inning game), so the winner market is a per-team ladder
+// (see fetchKalshiF5MoneylineByGame) rather than a single complementary yes/no ticker.
+export const MLB_F5_GAME_SERIES = "KXMLBF5";
+export const MLB_F5_TOTAL_SERIES = "KXMLBF5TOTAL";
+export const MLB_F5_SPREAD_SERIES = "KXMLBF5SPREAD";
 
 type KalshiMarket = {
   ticker: string;
@@ -174,6 +180,30 @@ function eventMatchesGame(game: ArbGame, event: KalshiEvent): boolean {
     text
   );
   return awayHit && homeHit;
+}
+
+// ── Tennis event matching ────────────────────────────────────────────────────
+// Kalshi's tennis event title/sub_title carry only LAST NAMES ("Samsonova vs Rybakina"),
+// unlike team-sport events which carry full team names/cities that teamMatchesTitle's
+// full-name/short-name/alias checks are built around — those checks never fire on
+// last-name-only text (ESPN's full name "Liudmila Samsonova" and shortName "L. Samsonova"
+// are both absent from "Samsonova vs Rybakina"). Verified live 2026-08-09 against
+// KXWTAMATCH-26AUG09SAMRYB. Each MARKET's own yes_sub_title/no_sub_title, by contrast, DO
+// carry the full player name, so marketYesSide (below) still uses the standard check.
+export function lastNameOf(fullName: string): string {
+  const parts = fullName.trim().split(/\s+/);
+  return parts[parts.length - 1] ?? fullName;
+}
+
+export function eventMatchesTennisGame(game: ArbGame, event: KalshiEvent): boolean {
+  const text = eventSearchText(event).toLowerCase();
+  if (!text) return false;
+  if (!eventMatchesSlateDate(game, event)) return false;
+  const awayLast = lastNameOf(game.awayTeam.name).toLowerCase();
+  const homeLast = lastNameOf(game.homeTeam.name).toLowerCase();
+  // Require a minimum length so a short/common surname fragment can't false-match.
+  if (awayLast.length < 3 || homeLast.length < 3) return false;
+  return text.includes(awayLast) && text.includes(homeLast);
 }
 
 function marketYesSide(market: KalshiMarket, game: ArbGame): "away" | "home" | null {
@@ -485,6 +515,124 @@ export async function fetchKalshiMoneylineByGame(
       marketId: m.ticker,
       yesSide,
       sourceStartTime: kalshiTickerIsoDate(m.ticker) ?? undefined,
+    });
+  }
+
+  return result;
+}
+
+// Kalshi F5 (first-5-innings) winner: THREE independent yes/no markets per game — one
+// ticker for the home team, one for the away team, one for a tie — because a tie after 5
+// innings is possible (unlike full game, where "the other team wins" is the complement of
+// "this team wins"). Each market's own YES ask is that outcome's real price; unlike
+// fetchKalshiMoneylineByGame, we do NOT derive one side from the other's complement
+// (1 - bid) — that assumes only 2 possible outcomes, which is wrong once a tie exists (it
+// would silently fold the tie's probability into whichever side we didn't have a direct
+// quote for). yesSide is left undefined here to signal "read every outcome's own ticker" —
+// see nativeSideFor / normalizeVenueTwoWay in ingest.ts.
+export async function fetchKalshiF5MoneylineByGame(
+  games: ArbGame[],
+  series: string = MLB_F5_GAME_SERIES
+): Promise<Map<string, VenueTwoWay>> {
+  const result = new Map<string, VenueTwoWay>();
+  if (!games.length) return result;
+
+  const events = await fetchEventsBySeries(series);
+
+  for (const game of games) {
+    const markets = events
+      .filter((ev) => eventMatchesGame(game, ev))
+      .flatMap((ev) => ev.markets ?? []);
+
+    let homeM: KalshiMarket | undefined;
+    let awayM: KalshiMarket | undefined;
+    let tieM: KalshiMarket | undefined;
+    for (const m of markets) {
+      if (!isUsable(m)) continue;
+      const side = marketYesSide(m, game);
+      if (side === "home") homeM ??= m;
+      else if (side === "away") awayM ??= m;
+      else if (!tieM && /\btie\b/i.test(m.yes_sub_title ?? m.title ?? "")) tieM = m;
+    }
+    if (!homeM || !awayM) continue; // need both teams priced to hedge; tie is optional
+
+    const readOwnAsk = (m: KalshiMarket) => {
+      const { ask } = readBidAsk(m);
+      if (ask == null) return null;
+      const size = Number(m.yes_ask_size_fp ?? 0);
+      return { askCents: Math.round(ask * 100), usd: size > 0 ? size * ask : 1e9 };
+    };
+    const home = readOwnAsk(homeM);
+    const away = readOwnAsk(awayM);
+    if (!home || !away) continue;
+    const tie = tieM ? readOwnAsk(tieM) : null;
+
+    result.set(game.id, {
+      homeCents: home.askCents,
+      awayCents: away.askCents,
+      homeLiquidityUsd: home.usd,
+      awayLiquidityUsd: away.usd,
+      marketId: homeM.ticker,
+      homeTokenId: homeM.ticker,
+      awayTokenId: awayM.ticker,
+      ...(tie ? { drawCents: tie.askCents, drawLiquidityUsd: tie.usd, drawTokenId: tieM!.ticker } : {}),
+      sourceStartTime: kalshiTickerIsoDate(homeM.ticker) ?? undefined,
+    });
+  }
+
+  return result;
+}
+
+// Kalshi tennis match winner (KXWTAMATCH / KXATPMATCH): TWO INDEPENDENT per-player
+// tickers, mutually exclusive — the SAME shape as fetchKalshiF5MoneylineByGame (read each
+// outcome's own yes ask directly, no 1-bid complement derivation), for the same reason: a
+// generic "one ticker + NO=complement" reader would only coincidentally be right here.
+// Verified live 2026-08-09 against KXWTAMATCH-26AUG09SAMRYB: two markets,
+// "...-SAM" and "...-RYB", each independently priced (13-14c / 88-89c, summing to ~100%
+// but never assumed to). No tie market (unlike F5) — tennis has no draw.
+export async function fetchKalshiPlayerMatchByGame(
+  games: ArbGame[],
+  series: string
+): Promise<Map<string, VenueTwoWay>> {
+  const result = new Map<string, VenueTwoWay>();
+  if (!games.length) return result;
+
+  const events = await fetchEventsBySeries(series);
+
+  for (const game of games) {
+    const markets = events
+      .filter((ev) => eventMatchesTennisGame(game, ev))
+      .flatMap((ev) => ev.markets ?? []);
+
+    let homeM: KalshiMarket | undefined;
+    let awayM: KalshiMarket | undefined;
+    for (const m of markets) {
+      if (!isUsable(m)) continue;
+      const side = marketYesSide(m, game);
+      if (side === "home") homeM ??= m;
+      else if (side === "away") awayM ??= m;
+    }
+    if (!homeM || !awayM) continue; // need both players priced to hedge
+
+    const readOwnAsk = (m: KalshiMarket) => {
+      const { ask } = readBidAsk(m);
+      if (ask == null) return null;
+      const size = Number(m.yes_ask_size_fp ?? 0);
+      return { askCents: Math.round(ask * 100), usd: size > 0 ? size * ask : 1e9 };
+    };
+    const home = readOwnAsk(homeM);
+    const away = readOwnAsk(awayM);
+    if (!home || !away) continue;
+
+    result.set(game.id, {
+      homeCents: home.askCents,
+      awayCents: away.askCents,
+      homeLiquidityUsd: home.usd,
+      awayLiquidityUsd: away.usd,
+      marketId: homeM.ticker,
+      homeTokenId: homeM.ticker,
+      awayTokenId: awayM.ticker,
+      sourceStartTime: kalshiTickerIsoDate(homeM.ticker) ?? undefined,
     });
   }
 

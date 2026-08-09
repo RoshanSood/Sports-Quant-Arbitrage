@@ -24,7 +24,7 @@ export async function GET(request: NextRequest) {
 }
 
 // Execute an opportunity through the full pipeline. Paper requests run dry-run (simulated).
-// A "live" request passes through the execution gate (agent Live toggle, kill switch,
+// A "live" request passes through the execution gate (agent Live toggle,
 // stake cap, adapter credentials) — if any switch fails the trade is
 // reported FAILED with the blocking reasons and NO order is placed. A live request is never
 // silently downgraded to a paper trade.

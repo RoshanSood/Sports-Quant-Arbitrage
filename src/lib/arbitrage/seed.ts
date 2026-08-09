@@ -136,17 +136,15 @@ export const DEFAULT_AGENT: Agent = {
 };
 
 export const DEFAULT_RISK: RiskSettings = {
-  killSwitch: false,
   maxExposure: 10000,
   currentExposure: 0,
   maxDailyLoss: 500,
   dailyPnl: 0,
   maxOpenPositions: 1, // one position per physical match + strategy
-  pauseOnNaked: true,
   staleQuoteMs: 300000, // see DEFAULT_AGENT note — fits the polling/cache cadence
   minLiquidityUsd: 20, // filter thin/tail lines with little executable size
-  minExpectedProfitUsd: 0,
-  liquidityStakeBufferMultiple: 1,
+  minExpectedProfitUsd: 0.03, // volume-oriented floor: smallest acceptable profit is ~3c/trade
+  liquidityStakeBufferMultiple: 3,
   staleDivergenceCents: 15, // skip lines where venues disagree by more than this; raise to capture live cross-venue splits
   maxLiveStakeUsd: DEFAULT_MAX_LIVE_STAKE_USD, // per-trade live cap; raise in the Risk panel after validating
   perVenueCap: {},

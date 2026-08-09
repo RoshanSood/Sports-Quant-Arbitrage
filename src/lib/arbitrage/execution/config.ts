@@ -5,22 +5,31 @@
 //   1. the caller explicitly requested mode "live"        (the "Live" button in Play)
 //   2. the agent is NOT paper (agent.paper === false)      (Settings toggle)
 //   3. the agent's live switch is ON (agent.live === true) (Settings toggle)
-//   4. the risk kill switch is OFF                          (Risk panel)
-//   5. total stake ≤ the risk panel's max live stake        (Risk panel, UI-configured)
-//   6. the venue adapter reports supportsLive() (credentials/signer entered in the UI)
+//   4. the venue adapter reports supportsLive() (credentials/signer entered in the UI)
 //
 // A LIVE request that fails any switch is BLOCKED (blocked:true) — the executor reports
 // FAILED with the reasons and places NO order. It does NOT silently fall back to paper.
 // Paper (dry-run/simulated) only happens when the caller explicitly requests paper mode.
+//
+// NOTE — the per-trade stake cap (maxLiveStakeUsd) is intentionally NOT enforced here as of
+// 2026-08-09, by explicit user request: it was blocking large, real opportunities (e.g. a
+// $20.35 natural stake against a $7 cap) and the user chose to bypass it entirely rather
+// than raise the cap or resize trades down to fit it. The field stays on GateInput/
+// RiskSettings (unused) so re-enabling it later is a one-line change — see git history for
+// the removed blocker line. This means there is NO ceiling on a single live trade's stake
+// beyond the arb's own natural sizing — a future false-arb/stale-quote bug has no backstop.
+
+import { venueMinStakeUsd } from "../arbMath";
 
 export type ExecMode = "dry_run" | "live";
 
-// SX.bet enforces a $1 minimum on every taker order. An arb whose SX leg would stake less
-// is sized UP (equal-profit sizing buys the same contract count on every leg, so scaling
-// all legs by one factor keeps the hedge ratio and the edge% unchanged) until the SX leg
-// clears $1. That $1 floor OVERRIDES the risk stake cap and the agent's target size: a
-// sub-$1 SX order simply cannot be placed, so the choice is "trade it larger" or "skip it".
-export const SXBET_MIN_TAKER_STAKE_USD = 1;
+// SX.bet enforces a minimum on every taker order. An arb whose SX leg would stake less is
+// sized UP (equal-profit sizing buys the same contract count on every leg, so scaling all
+// legs by one factor keeps the hedge ratio and the edge% unchanged) until the SX leg clears
+// it. That floor can raise the target size but never overrides the risk stake cap: a basket
+// that cannot satisfy both the venue minimum and the cap is skipped. Derived from
+// venueMinStakeUsd so the sizing path and this blocker safety-net never disagree.
+export const SXBET_MIN_TAKER_STAKE_USD = venueMinStakeUsd("sxbet");
 
 // Default per-trade live cap (dollars) used to SEED risk settings on first run. After
 // that it's edited in the Risk panel (UI), not here — kept low on purpose so the whole
@@ -31,7 +40,6 @@ export type GateInput = {
   requestedMode: ExecMode;
   agentPaper: boolean;
   agentLive: boolean;
-  killSwitch: boolean;
   venues: string[];
   stakeUsd: number;
   maxLiveStakeUsd: number; // from risk settings (UI-configured)
@@ -54,8 +62,7 @@ export function resolveExecutionMode(g: GateInput): GateDecision {
   const blockers: string[] = [];
   if (g.agentPaper) blockers.push("agent is in paper mode (turn on Live in agent settings)");
   if (!g.agentLive) blockers.push("agent live execution switch is off");
-  if (g.killSwitch) blockers.push("risk kill switch is on");
-  if (g.stakeUsd > g.maxLiveStakeUsd) blockers.push(`stake $${g.stakeUsd} exceeds live cap $${g.maxLiveStakeUsd}`);
+  // maxLiveStakeUsd is intentionally NOT enforced — see the header comment above.
   for (const v of g.venues) {
     if (!g.venuesSupportLive[v]) blockers.push(`venue ${v} has no live credentials/signer`);
   }

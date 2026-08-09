@@ -3,6 +3,8 @@ import { teamMatchesTitle, teamsMatch } from "./teamNormalization";
 import type { VenueTotalLine, VenueTwoWay, VenueSpread } from "./kalshi";
 import type { ArbGame } from "./arbitrage/sports";
 import { pacificDateFromIso } from "./arbitrage/date";
+import { classifyMarketSegment } from "./arbitrage/marketSegment";
+import type { MarketSegment } from "@/types/arbitrage";
 
 const GAMMA_API = "https://gamma-api.polymarket.com";
 
@@ -186,6 +188,10 @@ function formatVolume(vol: string | number | null | undefined): string | null {
 type MarketType = "moneyline" | "spread" | "total" | null;
 
 function classifyMarket(market: PolymarketMarket): MarketType {
+  // Only full-game and F5 markets are tradeable (see marketSegment.ts) — every other
+  // partial-game segment (a single inning, a half, a period, F3/F7) is dropped here so it
+  // can never be matched against a full-game or F5 line it doesn't actually share.
+  if (classifyMarketSegment(market.question) === null) return null;
   const q = market.question.toLowerCase();
   if (/o\/u|over|under/.test(q) && !q.includes("spread")) return "total";
   if (q.startsWith("spread:") || q.includes("spread:")) return "spread";
@@ -401,10 +407,14 @@ export async function fetchPolymarketData(
 // ── Arbitrage support: every total line per game (not just the main line) ─────
 
 // Returns ALL total lines Polymarket offers for each game, keyed by ESPN gameId,
-// so the arb matching engine can pair the same line across venues.
+// so the arb matching engine can pair the same line across venues. A single Polymarket
+// event mixes full-game AND F5 total markets together (verified live — same event object
+// carries both "O/U 8.5" and "1st 5 Innings O/U 8.5"), so `segment` filters to exactly one
+// — without this, full-game and F5 lines would be silently merged by number alone.
 export async function fetchPolymarketTotalsByGame(
   games: ArbGame[],
-  tag: string = "mlb"
+  tag: string = "mlb",
+  segment: MarketSegment = "full_game"
 ): Promise<Map<string, VenueTotalLine[]>> {
   const result = new Map<string, VenueTotalLine[]>();
   if (!games.length) return result;
@@ -423,6 +433,7 @@ export async function fetchPolymarketTotalsByGame(
     >();
     for (const market of event.markets ?? []) {
       if (classifyMarket(market) !== "total") continue;
+      if (classifyMarketSegment(market.question) !== segment) continue;
       const { outcomes, prices, tokenIds } = parseOutcomes(market);
       if (isSettledMarket(prices)) continue;
 
@@ -631,11 +642,75 @@ export async function fetchPolymarketWinnerByGame(
   return result;
 }
 
-// Polymarket MLB runline (spread). Question names one team with a sign, e.g.
-// "Spread: Toronto Blue Jays (-1.5)". Maps to home/away cover + signed home line.
-export async function fetchPolymarketSpreadByGame(
+// Polymarket F5 (first-5-innings) winner: same "3 independent binary markets" shape as
+// fetchKalshiF5MoneylineByGame — one market per team ("{Team} winning after 5 innings?")
+// plus a tie market ("{A} vs. {B}: Tied after 5 innings?"). A tie after 5 is possible, so
+// the tie leg is always attempted (unlike fetchPolymarketWinnerByGame's optional threeWay,
+// F5 has no 2-outcome variant). Dedicated question regex — distinct from
+// fetchPolymarketWinnerByGame's "\bwin\b" (which does not match "winning") so it can't
+// collide with that function's soccer/tennis usage.
+export async function fetchPolymarketF5WinnerByGame(
   games: ArbGame[],
   tag: string = "mlb"
+): Promise<Map<string, VenueTwoWay>> {
+  const result = new Map<string, VenueTwoWay>();
+  if (!games.length) return result;
+  const events = await fetchMLBEvents(tag);
+
+  const yesAsk = (m: PolymarketMarket): number | null => {
+    if (typeof m.bestAsk === "number" && m.bestAsk > 0 && m.bestAsk < 1) return m.bestAsk;
+    const { prices } = parseOutcomes(m);
+    const p = prices[0];
+    return p != null && p > 0 && p < 1 ? p : null;
+  };
+  const yesToken = (m: PolymarketMarket): string | undefined => parseOutcomes(m).tokenIds[0] ?? undefined;
+  const liqOf = (m: PolymarketMarket): number => (typeof m.liquidityNum === "number" ? m.liquidityNum : 0);
+  const namesTeam = (q: string, t: { name: string; shortName: string; abbreviation: string }) =>
+    teamMatchesTitle(t.name, t.shortName, t.abbreviation, q);
+
+  for (const game of games) {
+    const matchedEvents = events.filter((ev) => gameMatchesEvent(game, ev));
+    if (matchedEvents.length === 0) continue;
+    const event = pickBestEvent(matchedEvents, game.date);
+    if (!event) continue;
+    const markets = event.markets ?? [];
+    if (!markets.length) continue;
+
+    const homeM = markets.find((m) => /winning after 5 innings/i.test(m.question) && namesTeam(m.question, game.homeTeam) && !namesTeam(m.question, game.awayTeam));
+    const awayM = markets.find((m) => /winning after 5 innings/i.test(m.question) && namesTeam(m.question, game.awayTeam) && !namesTeam(m.question, game.homeTeam));
+    if (!homeM || !awayM) continue;
+    const homeAsk = yesAsk(homeM);
+    const awayAsk = yesAsk(awayM);
+    if (homeAsk == null || awayAsk == null) continue;
+
+    const tieM = markets.find((m) => /tied after 5 innings/i.test(m.question));
+    const tieAsk = tieM ? yesAsk(tieM) : null;
+    const drawFields: Partial<VenueTwoWay> =
+      tieM && tieAsk != null ? { drawCents: Math.round(tieAsk * 100), drawLiquidityUsd: liqOf(tieM), drawTokenId: yesToken(tieM) } : {};
+
+    result.set(game.id, {
+      homeCents: Math.round(homeAsk * 100),
+      awayCents: Math.round(awayAsk * 100),
+      homeLiquidityUsd: liqOf(homeM),
+      awayLiquidityUsd: liqOf(awayM),
+      marketId: homeM.id,
+      homeTokenId: yesToken(homeM),
+      awayTokenId: yesToken(awayM),
+      sourceStartTime: polymarketGameDate(event) ?? game.date,
+      ...drawFields,
+    });
+  }
+  return result;
+}
+
+// Polymarket MLB runline (spread). Question names one team with a sign, e.g.
+// "Spread: Toronto Blue Jays (-1.5)". Maps to home/away cover + signed home line.
+// `segment` disambiguates full-game vs F5 spread markets, which share the same event
+// object (see fetchPolymarketTotalsByGame).
+export async function fetchPolymarketSpreadByGame(
+  games: ArbGame[],
+  tag: string = "mlb",
+  segment: MarketSegment = "full_game"
 ): Promise<Map<string, VenueSpread>> {
   const result = new Map<string, VenueSpread>();
   if (!games.length) return result;
@@ -648,7 +723,7 @@ export async function fetchPolymarketSpreadByGame(
     const event = pickBestEvent(matched, game.date);
     if (!event) continue;
 
-    const sp = (event.markets ?? []).find((m) => classifyMarket(m) === "spread");
+    const sp = (event.markets ?? []).find((m) => classifyMarket(m) === "spread" && classifyMarketSegment(m.question) === segment);
     if (!sp) continue;
     const { outcomes, prices, tokenIds } = parseOutcomes(sp);
     if (outcomes.length < 2 || isSettledMarket(prices)) continue;
