@@ -151,6 +151,7 @@ export type PolymarketFillQuote = {
   avgPriceCents: number; // volume-weighted fill price
   availableContracts: number; // contracts fillable at <= maxPriceCents
   availableStakeUsd: number;
+  levels: Array<{ priceCents: number; contracts: number }>;
 };
 
 function readAskLevels(asks?: Array<{ price?: string; size?: string }>): Array<{ price: number; size: number }> {
@@ -187,6 +188,7 @@ export function polymarketFillQuoteFromAsks(
     avgPriceCents: (cost / contracts) * 100,
     availableContracts: contracts,
     availableStakeUsd: cost,
+    levels: levels.map((level) => ({ priceCents: level.price * 100, contracts: level.size })),
   };
 }
 
@@ -211,7 +213,10 @@ export async function quotePolymarketFokBuy(
 export function polymarketFillFromResponse(
   resp: PostOrderResponse,
   requestedContracts: number
-): { ok: boolean; filledContracts: number; status: "filled" | "partial" | "unfilled" } {
+): { ok: boolean; filledContracts: number; status: "pending" | "filled" | "partial" | "unfilled" } {
+  if ((resp.status ?? "").toLowerCase() === "delayed" && !resp.error && !resp.errorMsg) {
+    return { ok: true, filledContracts: 0, status: "pending" };
+  }
   const shares = Number(resp.takingAmount);
   const explicitlyUnmatched = /unmatch|cancel|kill|not.?filled|reject/i.test(resp.status ?? "");
   const filled = Number.isFinite(shares) && shares > 0 && !explicitlyUnmatched ? shares : 0;
@@ -279,6 +284,7 @@ export class PolymarketExecutionAdapter implements ExecutionAdapter {
         priceCents: quote.limitPriceCents,
         averagePriceCents: quote.avgPriceCents,
         availableContracts: quote.availableContracts,
+        levels: quote.levels,
         reason: quote.availableContracts + 1e-9 >= req.sizeContracts
           ? undefined
           : `Polymarket executable depth ${quote.availableContracts.toFixed(2)} < ${req.sizeContracts}`,
@@ -333,10 +339,31 @@ export class PolymarketExecutionAdapter implements ExecutionAdapter {
     if (!key || !tokenID || !orderId) return { status: "unknown" };
     try {
       const client = await buildClient(key, this.funder(), this.sigType());
-      const trades = (await client.getTrades({ asset_id: tokenID })) as Array<{ taker_order_id?: string; size?: string; status?: string }>;
-      const ours = (trades ?? []).filter((t) => t.taker_order_id === orderId && !/fail|cancel/i.test(t.status ?? ""));
-      const shares = ours.reduce((sum, t) => sum + (Number(t.size) || 0), 0);
-      if (shares > 0) return { status: "settled", filledContracts: shares };
+      const trades = (await client.getTrades({ asset_id: tokenID })) as Array<{
+        id?: string; taker_order_id?: string; size?: string; price?: string; status?: string; trader_side?: string;
+      }>;
+      const seen = new Set<string>();
+      const ours = (trades ?? []).filter((t) => {
+        if (t.taker_order_id !== orderId || (t.trader_side && t.trader_side !== "TAKER")) return false;
+        const key = t.id ?? `${t.taker_order_id}:${t.size}:${t.price}:${t.status}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+      // MATCHED/MINED is already an executed trade for exposure purposes. Waiting only for
+      // final chain confirmation would temporarily call a real fill "unfilled" and could
+      // create the exact false state seen on the Cardinals order.
+      const matched = ours.filter((t) => /match|mined|confirm/i.test(t.status ?? ""));
+      const shares = Math.min(req.sizeContracts, matched.reduce((sum, t) => sum + (Number(t.size) || 0), 0));
+      const notional = matched.reduce((sum, t) => sum + (Number(t.size) || 0) * (Number(t.price) || 0), 0);
+      if (shares > 0) {
+        const matchedShares = matched.reduce((sum, t) => sum + (Number(t.size) || 0), 0);
+        const avgPriceCents = notional > 0 ? (notional / matchedShares) * 100 : undefined;
+        return { status: "settled", filledContracts: shares, avgPriceCents };
+      }
+      if (ours.some((t) => /fail|cancel/i.test(t.status ?? ""))) {
+        return { status: "failed", filledContracts: 0, error: "Polymarket settlement failed" };
+      }
       return { status: "pending" };
     } catch {
       return { status: "unknown" };

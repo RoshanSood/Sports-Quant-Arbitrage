@@ -114,6 +114,15 @@ export function depthAtOrBetter(oppositeSideBids: Map<number, number>, limitPric
   return total;
 }
 
+// Convert Kalshi's opposite-side bid representation into the executable ask ladder for a
+// buyer. Example: a resting NO bid at 46c is a YES ask at 54c. Cheapest asks sort first.
+export function executableAskLevels(oppositeSideBids: Map<number, number>): Array<{ priceCents: number; contracts: number }> {
+  return [...oppositeSideBids.entries()]
+    .filter(([price, qty]) => price > 0 && price < 100 && qty > 0)
+    .map(([price, contracts]) => ({ priceCents: 100 - price, contracts }))
+    .sort((a, b) => a.priceCents - b.priceCents);
+}
+
 class KalshiLiveBook {
   private ws: WS | null = null;
   private books = new Map<string, { yes: Map<number, number>; no: Map<number, number> }>();
@@ -292,6 +301,13 @@ class KalshiLiveBook {
     const q = this.quotes.get(ticker);
     if (!book || !q || Date.now() - q.updatedAt > LIVE_QUOTE_STALE_MS) return null;
     return depthAtOrBetter(side === "yes" ? book.no : book.yes, limitPriceCents);
+  }
+
+  getAskLevels(ticker: string, side: "yes" | "no"): Array<{ priceCents: number; contracts: number }> | null {
+    const book = this.books.get(ticker);
+    const q = this.quotes.get(ticker);
+    if (!book || !q || Date.now() - q.updatedAt > LIVE_QUOTE_STALE_MS) return null;
+    return executableAskLevels(side === "yes" ? book.no : book.yes);
   }
 
   status(): { connected: boolean; subscribedCount: number; quoteCount: number } {

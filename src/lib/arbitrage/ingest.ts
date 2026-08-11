@@ -8,6 +8,7 @@ import {
   fetchKalshiMoneylineByGame,
   fetchKalshiPlayerMatchByGame,
   fetchKalshiSpreadByGame,
+  fetchKalshiThreeWayMoneylineByGame,
   fetchKalshiTotalsByGame,
   type VenueSpread,
   type VenueTotalLine,
@@ -26,7 +27,7 @@ import { polymarketLiveBook } from "./polymarketLiveBook";
 import { kalshiLiveBook } from "./kalshiLiveBook";
 import { sxbetLiveBook } from "./sxbetLiveBook";
 import { fetchPredictFunMoneylineByGame } from "@/lib/predictFun";
-import { fetchCloudbetMoneylineByGame } from "@/lib/cloudbet";
+import { fetchCloudbetMoneylineByGame, fetchCloudbetSpreadByGame, fetchCloudbetTotalsByGame } from "@/lib/cloudbet";
 import { fetchSxBetMLBMarkets, fetchSxBetMoneylineByGame, fetchSxBetTotalsByGame, type SxBetMarkets } from "@/lib/sxbet";
 import type { MarketSegment, MarketType, NormalizedMarket, Outcome, Sport, VenueId } from "@/types/arbitrage";
 import { decimalOddsFromCents, impliedProbFromCents } from "./arbMath";
@@ -294,7 +295,14 @@ async function ingestSportMarkets(
     ? Promise.all([
         cfg.markets.totals && cfg.kalshi.total && allow("kalshi", "total") ? withFetchedAt(fetchKalshiTotalsByGame(games, cfg.kalshi.total), emptyTotals()) : Promise.resolve(freshEmptyTotals()),
         cfg.markets.moneyline && allow("kalshi", "moneyline")
-          ? withFetchedAt(cfg.sport === "tennis" ? fetchKalshiPlayerMatchByGame(games, cfg.kalshi.game) : fetchKalshiMoneylineByGame(games, cfg.kalshi.game), emptyTwoWay())
+          ? withFetchedAt(
+              cfg.kalshi.threeWay
+                ? fetchKalshiThreeWayMoneylineByGame(games, cfg.kalshi.game)
+                : cfg.sport === "tennis"
+                  ? fetchKalshiPlayerMatchByGame(games, cfg.kalshi.game)
+                  : fetchKalshiMoneylineByGame(games, cfg.kalshi.game),
+              emptyTwoWay()
+            )
           : Promise.resolve(freshEmptyTwoWay()),
         cfg.markets.spread && cfg.kalshi.spread && allow("kalshi", "spread") ? withFetchedAt(fetchKalshiSpreadByGame(games, cfg.kalshi.spread, cfg.spreadFixedLine), emptySpread()) : Promise.resolve(freshEmptySpread()),
       ])
@@ -356,9 +364,21 @@ async function ingestSportMarkets(
       ? withFetchedAt(fetchSxBetTotalsByGame(games, cfg.sxDynamic), emptyTotals())
       : Promise.resolve(freshEmptyTotals());
   const pfP = cfg.predictfun && allow("predictfun", "moneyline") ? withFetchedAt(fetchPredictFunMoneylineByGame(games), emptyTwoWay()) : Promise.resolve(freshEmptyTwoWay());
-  const cbP = cfg.cloudbet && allow("cloudbet", "moneyline") ? withFetchedAt(fetchCloudbetMoneylineByGame(games, cfg.cloudbet), emptyTwoWay()) : Promise.resolve(freshEmptyTwoWay());
+  const cbP = cfg.cloudbet
+    ? Promise.all([
+        cfg.markets.totals && cfg.cloudbet.total && allow("cloudbet", "total")
+          ? withFetchedAt(fetchCloudbetTotalsByGame(games, cfg.cloudbet), emptyTotals())
+          : Promise.resolve(freshEmptyTotals()),
+        cfg.markets.moneyline && allow("cloudbet", "moneyline")
+          ? withFetchedAt(fetchCloudbetMoneylineByGame(games, cfg.cloudbet), emptyTwoWay())
+          : Promise.resolve(freshEmptyTwoWay()),
+        cfg.markets.spread && cfg.cloudbet.spread && allow("cloudbet", "spread")
+          ? withFetchedAt(fetchCloudbetSpreadByGame(games, cfg.cloudbet), emptySpread())
+          : Promise.resolve(freshEmptySpread()),
+      ])
+    : Promise.resolve([freshEmptyTotals(), freshEmptyTwoWay(), freshEmptySpread()] as const);
 
-  const [[kTot, kML, kSp], [kF5Tot, kF5ML, kF5Sp], poly, polyF5, sx, sxDynML, sxDynTotals, pfML, cbML] = await Promise.all([
+  const [[kTot, kML, kSp], [kF5Tot, kF5ML, kF5Sp], poly, polyF5, sx, sxDynML, sxDynTotals, pfML, [cbTot, cbML, cbSp]] = await Promise.all([
     kalshiP,
     kalshiF5P,
     polyP,
@@ -399,7 +419,11 @@ async function ingestSportMarkets(
       ...normalizeVenueTwoWay("sxbet", game, sx.data.spread.get(game.id), "spread", cfg.sport, cfg.league, sx.fetchedAt),
     ];
     const pfRows = normalizeVenueTwoWay("predictfun", game, pfML.data.get(game.id), "moneyline", cfg.sport, cfg.league, pfML.fetchedAt);
-    const cbRows = normalizeVenueTwoWay("cloudbet", game, cbML.data.get(game.id), "moneyline", cfg.sport, cfg.league, cbML.fetchedAt);
+    const cbRows = [
+      ...normalizeVenueTotals("cloudbet", game, cbTot.data.get(game.id), cfg.sport, cfg.league, cbTot.fetchedAt),
+      ...normalizeVenueTwoWay("cloudbet", game, cbML.data.get(game.id), "moneyline", cfg.sport, cfg.league, cbML.fetchedAt),
+      ...normalizeVenueTwoWay("cloudbet", game, cbSp.data.get(game.id), "spread", cfg.sport, cfg.league, cbSp.fetchedAt),
+    ];
     venueCounts.kalshi += kRows.length;
     venueCounts.polymarket += pRows.length;
     venueCounts.sxbet += sRows.length;
@@ -457,7 +481,13 @@ export async function ingestTotals(date: string): Promise<IngestResult> {
   const kalshiTickers = markets.filter((m) => m.venueId === "kalshi" && m.nativeMarketId).map((m) => m.nativeMarketId!);
   kalshiLiveBook.setTickers(kalshiTickers);
   const sxHashes = markets.filter((m) => m.venueId === "sxbet" && m.nativeMarketId).map((m) => m.nativeMarketId!);
-  sxbetLiveBook.setMarkets(sxHashes);
+  // REST ingestion has already succeeded. A supplemental socket failure must not abort
+  // the scan cycle or suppress publication of the newly saved market snapshot.
+  try {
+    sxbetLiveBook.setMarkets(sxHashes);
+  } catch (error) {
+    console.error("[arbitrage/ingest] SX live-book sync failed; continuing with REST books:", error);
+  }
 
   return { date, gameCount, markets, venueCounts };
 }

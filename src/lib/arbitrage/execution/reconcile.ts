@@ -13,15 +13,15 @@ export type LegReconciliation = {
   confirmation: FillConfirmation | null;
 };
 
-const ATTEMPTS = Math.max(1, Number(process.env.ARB_RECON_ATTEMPTS) || 3);
-const DELAY_MS = Math.max(0, Number(process.env.ARB_RECON_DELAY_MS) || 1500);
+const ATTEMPTS = Math.max(1, Number(process.env.ARB_RECON_ATTEMPTS) || 6);
+const DELAY_MS = Math.max(0, Number(process.env.ARB_RECON_DELAY_MS) || 1000);
 
 const isFinalized = (c: FillConfirmation | null): boolean =>
   c != null && c.status !== "pending" && c.status !== "unknown";
 
 // Poll confirmFill for each leg that placed an order, until all resolve or attempts run
-// out. Legs whose adapter has no confirmFill (Kalshi IOC / Polymarket FOK are atomic)
-// are left as-is. Returns one entry per input leg (aligned by index).
+// out. Legs whose adapter has no confirmFill (currently Kalshi IOC) are left as-is.
+// Returns one entry per input leg (aligned by index).
 export async function reconcileLegs(
   adapters: ExecutionAdapter[],
   requests: OrderRequest[],
@@ -38,9 +38,10 @@ export async function reconcileLegs(
     await Promise.all(
       results.map(async (r, i) => {
         const adapter = adapters[i];
-        if (!r.orderId || !adapter?.confirmFill) return; // nothing to reconcile
+        const confirmationId = r.confirmationId ?? r.orderId;
+        if (!confirmationId || !adapter?.confirmFill) return; // nothing to reconcile
         if (isFinalized(recon[i].confirmation)) return; // already resolved
-        const c = await adapter.confirmFill(r.orderId, requests[i]).catch(() => ({ status: "unknown" as const }));
+        const c = await adapter.confirmFill(confirmationId, requests[i]).catch(() => ({ status: "unknown" as const }));
         recon[i].confirmation = c;
         if (c.status === "pending") anyPending = true;
       })
@@ -55,15 +56,24 @@ export async function reconcileLegs(
 // forced to zero fill (so status derivation flips to naked/failed correctly); a leg
 // confirmed settled with a concrete count adopts it. Pending/unknown/no-confirm are
 // left untouched — placement stands.
-export function applyReconciliation(results: OrderResult[], recon: LegReconciliation[]): OrderResult[] {
+export function applyReconciliation(results: OrderResult[], recon: LegReconciliation[], requests?: OrderRequest[]): OrderResult[] {
   return results.map((r, i) => {
     const c = recon[i]?.confirmation;
     if (!c) return r;
     if (c.status === "failed") {
-      return { ...r, ok: false, filledContracts: 0, status: "unfilled", error: r.error ?? "settlement failed on reconciliation" };
+      return { ...r, ok: false, filledContracts: 0, status: "unfilled", error: c.error ?? r.error ?? "settlement failed on reconciliation" };
     }
     if (c.status === "settled" && typeof c.filledContracts === "number") {
-      return { ...r, filledContracts: c.filledContracts };
+      const requested = requests?.[i]?.sizeContracts;
+      const filledContracts = requested == null ? c.filledContracts : Math.min(requested, c.filledContracts);
+      return {
+        ...r,
+        ok: filledContracts > 0,
+        filledContracts,
+        avgPriceCents: c.avgPriceCents ?? r.avgPriceCents,
+        status: requested != null && filledContracts + 1e-9 >= requested ? "filled" : filledContracts > 0 ? "partial" : "unfilled",
+        error: filledContracts > 0 ? undefined : c.error ?? r.error,
+      };
     }
     return r;
   });

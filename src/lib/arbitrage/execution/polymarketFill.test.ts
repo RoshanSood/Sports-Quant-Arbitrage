@@ -24,6 +24,14 @@ describe("polymarketFillFromResponse", () => {
     expect(polymarketFillFromResponse({ success: true, takingAmount: "0" }, 3)).toEqual({ ok: false, filledContracts: 0, status: "unfilled" });
   });
 
+  it("keeps a delayed sports order pending until reconciliation confirms a trade", () => {
+    expect(polymarketFillFromResponse({ success: true, orderID: "0xdelayed", status: "delayed" }, 6)).toEqual({
+      ok: true,
+      filledContracts: 0,
+      status: "pending",
+    });
+  });
+
   it("explicit unmatched/cancelled status -> zero fill even if a stray amount is present", () => {
     expect(polymarketFillFromResponse({ success: true, status: "unmatched", takingAmount: "3" }, 3).ok).toBe(false);
     expect(polymarketFillFromResponse({ success: true, status: "cancelled", takingAmount: "3" }, 3).filledContracts).toBe(0);

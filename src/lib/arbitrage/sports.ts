@@ -28,6 +28,9 @@ export type ArbGame = {
 // the reader emits the draw leg.
 export type CloudbetSportCfg = {
   moneyline: string;
+  total?: string;
+  spread?: string;
+  spreadLine?: number;
   threeWay?: boolean;
   competition?: string;
   sport?: string; // e.g. "tennis" — enumerate /sports/{sport} competitions matching competitionMatch
@@ -47,7 +50,7 @@ export type SportConfig = {
   // KXWTAMATCH) — Kalshi has no tennis totals/spread markets, and ingestSportMarkets never
   // reads total/spread unless `markets.totals`/`markets.spread` is also set, which tennis's
   // moneyline-only `markets` config leaves off.
-  kalshi?: { game: string; total?: string; spread?: string };
+  kalshi?: { game: string; total?: string; spread?: string; threeWay?: boolean };
   polyTag?: string;
   sxLeagueId?: number; // fixed SX league (MLB/WNBA totals+ml+spread)
   // SX moneyline for sports whose leagues are ephemeral/per-tournament (soccer, tennis):
@@ -112,6 +115,27 @@ export const SPORTS: SportConfig[] = [
   },
   {
     sport: "soccer",
+    league: "nwsl",
+    fetchGames: espnTeamGamesFetcher("soccer/usa.nwsl"),
+    espnScorePath: "soccer/usa.nwsl",
+    markets: { totals: true, spread: true, moneyline: true },
+    // Live catalog validation 2026-08-09: Kalshi carries three independent 1X2
+    // outcome tickers plus total-goals and goal-spread series.
+    kalshi: { game: "KXNWSLGAME", total: "KXNWSLTOTAL", spread: "KXNWSLSPREAD", threeWay: true },
+    // Cloudbet currently carries NWSL 1X2, total goals, and Asian handicaps. Only
+    // half-goal totals/handicaps are normalized (no push/quarter-line settlement).
+    cloudbet: {
+      competition: "soccer-usa-national-womens-soccer-league",
+      moneyline: "soccer.match_odds",
+      total: "soccer.total_goals",
+      spread: "soccer.asian_handicap",
+      spreadLine: 1.5,
+      threeWay: true,
+    },
+    spreadFixedLine: 1.5,
+  },
+  {
+    sport: "soccer",
     league: "ucl",
     fetchGames: espnTeamGamesFetcher("soccer/uefa.champions"),
     espnScorePath: "soccer/uefa.champions",
@@ -140,7 +164,7 @@ export const SPORTS: SportConfig[] = [
     kalshi: { game: "KXATPMATCH" },
     polyTag: "tennis",
     sxDynamic: { sportId: 6, leagueMatch: /atp/i }, // all active ATP tournament leagues (2-way)
-    cloudbet: { sport: "tennis", competitionMatch: /tennis-atp-/i, moneyline: "tennis.winner" },
+    cloudbet: { sport: "tennis", competitionMatch: /\batp\b/i, moneyline: "tennis.winner" },
   },
   {
     sport: "tennis",
@@ -151,6 +175,6 @@ export const SPORTS: SportConfig[] = [
     polyTag: "tennis",
     sxDynamic: { sportId: 6, leagueMatch: /wta/i }, // all active WTA tournament leagues (2-way)
     // CloudBet WTA is per-tournament (tennis-wta-*); enumerate + read the 2-way winner.
-    cloudbet: { sport: "tennis", competitionMatch: /tennis-wta-/i, moneyline: "tennis.winner" },
+    cloudbet: { sport: "tennis", competitionMatch: /\bwta\b/i, moneyline: "tennis.winner" },
   },
 ];

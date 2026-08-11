@@ -35,6 +35,16 @@ describe("applyReconciliation", () => {
     expect(out[1].filledContracts).toBe(10); // no confirmation → placement stands
   });
 
+  it("caps confirmation to requested size and replaces the complete status atomically", () => {
+    const pending: OrderResult = { ...filled("predictfun", "display-id", 0), confirmationId: "order-hash", status: "pending", error: "accepted" };
+    const recon: LegReconciliation[] = [
+      { venue: "predictfun", orderId: "display-id", confirmation: { status: "settled", filledContracts: 12, avgPriceCents: 44 } },
+    ];
+    const out = applyReconciliation([pending], recon, [req("predictfun")]);
+    expect(out[0]).toMatchObject({ ok: true, filledContracts: 10, avgPriceCents: 44, status: "filled" });
+    expect(out[0].error).toBeUndefined();
+  });
+
   it("never downgrades on pending/unknown (no false naked flags)", () => {
     const recon: LegReconciliation[] = [
       { venue: "kalshi", orderId: "k1", confirmation: { status: "pending" } },
@@ -72,5 +82,17 @@ describe("reconcileLegs", () => {
     const results = [filled("sxbet", null, 0)]; // rejected, no orderId
     const recon = await reconcileLegs(adapters, requests, results);
     expect(recon[0].confirmation).toBeNull();
+  });
+
+  it("uses a venue confirmation hash instead of treating the display order id as proof", async () => {
+    let seen = "";
+    const a = adapter("predictfun", { status: "failed", filledContracts: 0 });
+    a.confirmFill = async (id) => {
+      seen = id;
+      return { status: "failed", filledContracts: 0 };
+    };
+    const result = { ...filled("predictfun", "numeric-id", 0), confirmationId: "0xorder-hash", status: "pending" as const };
+    await reconcileLegs([a], [req("predictfun")], [result]);
+    expect(seen).toBe("0xorder-hash");
   });
 });

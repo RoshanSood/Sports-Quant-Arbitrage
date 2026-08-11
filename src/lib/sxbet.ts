@@ -90,14 +90,45 @@ async function fetchActiveMarkets(leagueId: number, onlyMainLine = true): Promis
 
 type SxLeague = { leagueId: number; label: string; sportId: number; active: boolean };
 
+const LEAGUE_CACHE_MS = 60_000;
+let leagueCache: { fetchedAt: number; leagues: SxLeague[] } | null = null;
+let leagueFetchInFlight: Promise<SxLeague[]> | null = null;
+
 async function fetchLeagues(): Promise<SxLeague[]> {
+  const now = Date.now();
+  if (leagueCache && now - leagueCache.fetchedAt < LEAGUE_CACHE_MS) return leagueCache.leagues;
+  // Every dynamic league (MLS/NWSL/ATP/WTA/etc.) is ingested concurrently. Coalesce
+  // those callers into one catalog request so SX does not rate-limit the scan before
+  // tournament-specific market reads even begin.
+  if (leagueFetchInFlight) return leagueFetchInFlight;
+
+  leagueFetchInFlight = (async () => {
+    let lastError: unknown = null;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        const res = await fetch(`${SX_API}/leagues`, { cache: "no-store", headers: { Accept: "application/json" } });
+        if (res.ok) {
+          const leagues = ((await res.json())?.data ?? []) as SxLeague[];
+          leagueCache = { fetchedAt: Date.now(), leagues };
+          return leagues;
+        }
+        lastError = new Error(`HTTP ${res.status}`);
+      } catch (error) {
+        lastError = error;
+      }
+      if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
+    }
+    console.error("[sxbet] leagues fetch failed:", lastError);
+    // A recently expired catalog is safer than dropping every SX sport from a scan
+    // because of a transient rate limit. It is discovery data only; each order book is
+    // still fetched fresh below.
+    return leagueCache?.leagues ?? [];
+  })();
+
   try {
-    const res = await fetch(`${SX_API}/leagues`, { cache: "no-store", headers: { Accept: "application/json" } });
-    if (!res.ok) return [];
-    return ((await res.json())?.data ?? []) as SxLeague[];
-  } catch (e) {
-    console.error("[sxbet] leagues fetch failed:", e);
-    return [];
+    return await leagueFetchInFlight;
+  } finally {
+    leagueFetchInFlight = null;
   }
 }
 

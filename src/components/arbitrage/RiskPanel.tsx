@@ -228,6 +228,39 @@ export default function RiskPanel({
         </div>
       </div>
 
+      <div className="rounded-lg border px-3 py-2.5 mb-4" style={{ borderColor: "#3b2448", background: "#160f1b" }}>
+        <div className="text-xs font-semibold text-fuchsia-300 mb-1">Automatic hedge recovery</div>
+        <div className="text-[10px] text-gray-500 mb-2">If exactly one leg confirms, retry the missing hedge within these emergency limits. This does not activate the kill switch.</div>
+        <div className="grid grid-cols-2 gap-2">
+          <label className="text-[10px] text-gray-400">
+            Max extra price (cents)
+            <input
+              key={`recovery-slip-${risk.hedgeRecoveryMaxSlippageCents ?? 10}`}
+              type="number"
+              min={0}
+              step={1}
+              defaultValue={risk.hedgeRecoveryMaxSlippageCents ?? 10}
+              onBlur={(e) => onUpdateRisk({ hedgeRecoveryMaxSlippageCents: Math.max(0, Number(e.target.value) || 0) })}
+              className="mt-1 w-full rounded bg-[#0b0d11] border px-2 py-1 text-sm text-right text-gray-100"
+              style={{ borderColor: "#4a2a58" }}
+            />
+          </label>
+          <label className="text-[10px] text-gray-400">
+            Max locked loss ($)
+            <input
+              key={`recovery-loss-${risk.hedgeRecoveryMaxLossUsd ?? 1}`}
+              type="number"
+              min={0}
+              step={0.25}
+              defaultValue={risk.hedgeRecoveryMaxLossUsd ?? 1}
+              onBlur={(e) => onUpdateRisk({ hedgeRecoveryMaxLossUsd: Math.max(0, Number(e.target.value) || 0) })}
+              className="mt-1 w-full rounded bg-[#0b0d11] border px-2 py-1 text-sm text-right text-gray-100"
+              style={{ borderColor: "#4a2a58" }}
+            />
+          </label>
+        </div>
+      </div>
+
       {/* Max open real positions per physical match. */}
       <div className="rounded-lg border px-3 py-2.5 mb-4" style={{ borderColor: "#1e2130", background: "#0e1014" }}>
         <div className="flex items-center justify-between gap-2">

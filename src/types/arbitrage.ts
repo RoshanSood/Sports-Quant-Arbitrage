@@ -82,6 +82,10 @@ export type ExecutionStep = {
   label: string;
   status: "pass" | "halt" | "warn" | "info";
   detail?: string;
+  // Milliseconds since this execution attempt's pipeline started (NOT since the arb was
+  // originally detected — see Trade.detectedAt for that). Lets a saved trade's
+  // executionSteps show a full per-stage latency breakdown after the fact.
+  tookMs?: number;
 };
 
 // Supporting shapes
@@ -318,6 +322,12 @@ export type Trade = {
   nakedLegIndex?: number; // for naked positions, which leg actually filled
   postFill?: PostFillCheck;
   executionSteps?: ExecutionStep[];
+  // When the underlying opportunity was originally detected (arbEngine.ts's detectArbs),
+  // as opposed to openedAt (when this trade record was finalized). openedAt - detectedAt is
+  // the full detection-to-fill latency; executionSteps[].tookMs breaks down where the time
+  // inside this specific execution attempt went. Undefined for trades placed manually via
+  // the Play button, where "detection" isn't a single well-defined instant.
+  detectedAt?: string;
 };
 
 export type ArbLog = {
@@ -365,6 +375,8 @@ export type RiskSettings = {
   liquidityStakeBufferMultiple: number; // require top-of-book liquidity >= stake * this multiple
   staleDivergenceCents: number; // max cross-venue price disagreement (cents) before a line is skipped as likely-stale
   maxLiveStakeUsd: number; // hard cap on $ any single LIVE trade may commit (UI-configured)
+  hedgeRecoveryMaxSlippageCents?: number; // emergency hedge may move this far beyond the planned limit
+  hedgeRecoveryMaxLossUsd?: number; // maximum guaranteed loss accepted to remove one-leg exposure
   perVenueCap: Record<VenueId, number>;
 };
 

@@ -64,7 +64,7 @@ async function fetchToken(apiKey: string): Promise<string> {
   return data.token;
 }
 
-class SxBetLiveBook {
+export class SxBetLiveBook {
   private client: Centrifuge | null = null;
   private subs = new Map<string, ReturnType<Centrifuge["newSubscription"]>>();
   private orders = new Map<string, Map<string, RawOrder>>(); // marketHash -> orderHash -> order
@@ -102,12 +102,23 @@ class SxBetLiveBook {
   // Update the set of markets we track (today's SX.bet MLB market hashes, refreshed each
   // REST ingest pass). Subscriptions not in the new set are unsubscribed; new ones added.
   setMarkets(marketHashes: string[]): void {
-    if (!this.client) this.connect();
+    try {
+      if (!this.client) this.connect();
+    } catch (error) {
+      console.error("[sxbetLiveBook] connect failed; continuing with REST books:", error);
+      return;
+    }
     if (!this.client) return; // no API key configured — stays inert
     const next = new Set(marketHashes.filter(Boolean));
     for (const [hash, sub] of this.subs) {
       if (!next.has(hash)) {
-        sub.unsubscribe();
+        // unsubscribe() leaves the channel in Centrifuge's internal registry.
+        // removeSubscription() is required before a later A -> B -> A resubscribe.
+        try {
+          this.client.removeSubscription(sub);
+        } catch (error) {
+          console.error(`[sxbetLiveBook] failed to remove subscription ${hash}:`, error);
+        }
         this.subs.delete(hash);
         this.orders.delete(hash);
         this.quotes.delete(hash);
@@ -116,11 +127,20 @@ class SxBetLiveBook {
     for (const hash of next) {
       if (this.subs.has(hash)) continue;
       const channel = `order_book:market_${hash}`;
-      const sub = this.client.newSubscription(channel, { positioned: true, recoverable: true });
-      sub.on("publication", (ctx) => this.handlePublication(hash, ctx.data));
-      sub.on("error", (ctx) => console.error(`[sxbetLiveBook] subscription error ${hash}:`, ctx));
-      sub.subscribe();
-      this.subs.set(hash, sub);
+      try {
+        // Heal a registry/map mismatch left by HMR or an earlier partial failure.
+        const orphan = this.client.getSubscription(channel);
+        if (orphan) this.client.removeSubscription(orphan);
+        const sub = this.client.newSubscription(channel, { positioned: true, recoverable: true });
+        sub.on("publication", (ctx) => this.handlePublication(hash, ctx.data));
+        sub.on("error", (ctx) => console.error(`[sxbetLiveBook] subscription error ${hash}:`, ctx));
+        sub.subscribe();
+        this.subs.set(hash, sub);
+      } catch (error) {
+        // Live sockets only accelerate freshness. Keep REST-backed scanning alive when
+        // an individual channel cannot be managed.
+        console.error(`[sxbetLiveBook] failed to subscribe ${hash}; using REST books:`, error);
+      }
     }
   }
 
@@ -136,10 +156,19 @@ class SxBetLiveBook {
   }
 
   close(): void {
-    for (const sub of this.subs.values()) sub.unsubscribe();
+    for (const [hash, sub] of this.subs) {
+      try {
+        this.client?.removeSubscription(sub);
+      } catch (error) {
+        console.error(`[sxbetLiveBook] failed to remove subscription ${hash} during close:`, error);
+      }
+    }
     this.subs.clear();
+    this.orders.clear();
+    this.quotes.clear();
     this.client?.disconnect();
     this.client = null;
+    this.apiKey = null;
   }
 }
 

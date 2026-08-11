@@ -15,7 +15,7 @@ import { ChainId, OrderBuilder, Side, type Book } from "@predictdotfun/sdk";
 import { JsonRpcProvider, Wallet, formatUnits, parseUnits } from "ethers";
 import { BNB_USDT_DECIMALS, bnbRpcUrl } from "./chains";
 import type { PredictFunCreds } from "./onchainCreds";
-import type { ExecutableOrderQuote, ExecutionAdapter, OrderRequest, OrderResult } from "./types";
+import type { ExecutableOrderQuote, ExecutionAdapter, FillConfirmation, OrderRequest, OrderResult } from "./types";
 
 const API = "https://api.predict.fun";
 
@@ -31,6 +31,22 @@ export function pfWalletKey(c?: PredictFunCreds): string | undefined {
 // Falls back to the signer's own address when not provided.
 export function pfAccount(c?: PredictFunCreds): string | undefined {
   return c?.account?.trim() || process.env.PREDICTFUN_ACCOUNT?.trim() || undefined;
+}
+
+export function predictAmountToContracts(raw: unknown): number {
+  if (typeof raw !== "string" && typeof raw !== "number") return 0;
+  const text = String(raw).trim();
+  if (!text) return 0;
+  if (text.includes(".")) {
+    const decimal = Number(text);
+    return Number.isFinite(decimal) && decimal > 0 ? decimal : 0;
+  }
+  try {
+    const integer = BigInt(text);
+    return integer > BigInt("1000000000000") ? Number(formatUnits(integer, 18)) : Number(integer);
+  } catch {
+    return 0;
+  }
 }
 
 type PfMarketFlags = { feeRateBps: number; isNegRisk: boolean; isYieldBearing: boolean };
@@ -224,6 +240,10 @@ export async function quotePredictFunOrder(req: OrderRequest, creds?: PredictFun
   }
   try {
     const book = await orderbook(marketId, apiKey);
+    const levels = book.asks
+      .map(([price, quantity]) => ({ priceCents: price * 100, contracts: quantity }))
+      .filter((level) => level.priceCents > 0 && level.priceCents <= req.limitPriceCents + 1e-9 && level.contracts > 0)
+      .sort((a, b) => a.priceCents - b.priceCents);
     let remaining = req.sizeContracts;
     let availableContracts = 0;
     let costCents = 0;
@@ -247,6 +267,7 @@ export async function quotePredictFunOrder(req: OrderRequest, creds?: PredictFun
       priceCents: worstPriceCents,
       averagePriceCents: costCents / availableContracts,
       availableContracts,
+      levels,
       reason: availableContracts + 1e-9 >= req.sizeContracts ? undefined : `predict.fun executable depth ${availableContracts.toFixed(2)} < ${req.sizeContracts}`,
     };
   } catch (e) {
@@ -355,7 +376,7 @@ export class PredictFunExecutionAdapter implements ExecutionAdapter {
         }),
       });
       const text = await res.text();
-      let body: { success?: boolean; data?: { orderId?: string; filledSize?: string; status?: string }; message?: string } = {};
+      let body: { success?: boolean; data?: { code?: string; orderId?: string; orderHash?: string }; message?: string } = {};
       try {
         body = text ? JSON.parse(text) : {};
       } catch {
@@ -363,21 +384,45 @@ export class PredictFunExecutionAdapter implements ExecutionAdapter {
       }
       if (!res.ok || body.success === false) return reject(req, body.message || `order rejected (HTTP ${res.status})`);
 
-      // Response envelope unvalidated — treat an accepted order as filled unless it
-      // reports a smaller size; reconciliation/naked detection covers the rest.
-      const filled = Number(body.data?.filledSize);
-      const expectedContracts = Number(formatUnits(amounts.amount, 18));
-      const filledContracts = Number.isFinite(filled) && filled > 0 ? filled : expectedContracts || req.sizeContracts;
+      // Predict.fun returns an acknowledgement here, not proof of execution. Keep the
+      // order pending until GET /v1/orders/{orderHash} reports an actual filled amount.
+      const orderId = body.data?.orderId ?? null;
+      const orderHash = body.data?.orderHash ?? hash;
       return {
         ok: true,
-        orderId: body.data?.orderId ?? hash,
-        filledContracts,
+        orderId,
+        confirmationId: orderHash,
+        filledContracts: 0,
         avgPriceCents: Number(formatUnits(amounts.pricePerShare, 18)) * 100 || req.limitPriceCents,
-        status: filledContracts >= req.sizeContracts ? "filled" : "partial",
+        status: "pending",
         raw: body,
       };
     } catch (e) {
       return reject(req, String(e).slice(0, 200));
+    }
+  }
+
+  async confirmFill(orderHash: string, req: OrderRequest): Promise<FillConfirmation> {
+    const apiKey = pfApiKey(this.creds);
+    const walletKey = pfWalletKey(this.creds);
+    if (!apiKey || !walletKey || !orderHash) return { status: "unknown" };
+    try {
+      const token = await pfJwt(apiKey, walletKey, pfAccount(this.creds));
+      const body = asRecord(await fetchJson(`${API}/v1/orders/${encodeURIComponent(orderHash)}`, {
+        headers: { "x-api-key": apiKey, Authorization: `Bearer ${token}`, Accept: "application/json" },
+      }));
+      const data = asRecord(body?.data) ?? body;
+      const filledContracts = predictAmountToContracts(data?.amountFilled);
+      const status = String(data?.status ?? "").toUpperCase();
+      const terminalFailure = /CANCEL|EXPIRE|REJECT|FAIL|INVALID/.test(status);
+      const terminalSuccess = /FILL|MATCH|EXECUT|COMPLETE|SETTLE|CLOSED/.test(status);
+      if (filledContracts > 0 && (terminalSuccess || terminalFailure)) {
+        return { status: "settled", filledContracts: Math.min(req.sizeContracts, filledContracts) };
+      }
+      if (terminalFailure) return { status: "failed", filledContracts: 0, error: `Predict.fun order ${status.toLowerCase()}` };
+      return { status: "pending", filledContracts };
+    } catch {
+      return { status: "unknown" };
     }
   }
 }

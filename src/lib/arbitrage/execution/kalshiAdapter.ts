@@ -71,6 +71,7 @@ export async function quoteKalshiOrder(req: OrderRequest, creds?: KalshiCreds): 
       priceCents,
       averagePriceCents: priceCents,
       availableContracts: Math.min(available, req.sizeContracts),
+      levels: available > 0 ? [{ priceCents, contracts: available }] : [],
       reason: available + 1e-9 >= req.sizeContracts ? undefined : `Kalshi top-of-book size ${available.toFixed(2)} < ${req.sizeContracts}`,
     };
   } catch (e) {

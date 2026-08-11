@@ -157,6 +157,9 @@ export type PreparedContext = {
   // no size-up was needed.
   minLiveStakeFloorUsd: number;
   executionSteps: ExecutionStep[];
+  // Same clock reference addStep's tookMs was computed against — pass this straight into
+  // any further pushes (executor.ts) so the whole attempt shares one continuous timeline.
+  pipelineStartMs: number;
 };
 
 export type PrepareResult =
@@ -166,13 +169,24 @@ export type PrepareResult =
 // Run the deterministic pre-execution checks + final quote refresh. On any failure it
 // writes the halt log and returns a halt; on success it returns the prepared context.
 // Shared by paper and live so both enforce the exact same safety gates.
-export async function prepareExecution(opportunityId: string, date: string, requestedMode: "dry_run" | "live" = "dry_run"): Promise<PrepareResult> {
+//
+// `pipelineStartMs` is the clock reference every step's tookMs is measured against —
+// defaults to "now" (this call's own start) when the caller doesn't have an earlier
+// reference, but executor.ts passes its own start time so the WHOLE attempt (prepare +
+// place + reconcile) shares one continuous timeline instead of resetting to 0 partway
+// through.
+export async function prepareExecution(
+  opportunityId: string,
+  date: string,
+  requestedMode: "dry_run" | "live" = "dry_run",
+  pipelineStartMs: number = Date.now()
+): Promise<PrepareResult> {
   const agent = (await getAgent(DEFAULT_AGENT.id)) ?? DEFAULT_AGENT;
   const risk: RiskSettings = await getRiskSettings();
   const configuredVenues = await getVenues();
   const executionSteps: ExecutionStep[] = [];
   const addStep = (key: string, label: string, status: ExecutionStep["status"], detail?: string) => {
-    executionSteps.push({ key, label, status, detail });
+    executionSteps.push({ key, label, status, detail, tookMs: Date.now() - pipelineStartMs });
   };
 
   const priorMatchup = opportunityId.split(":")[2] ?? opportunityId;
@@ -412,6 +426,7 @@ export async function prepareExecution(opportunityId: string, date: string, requ
       netAfter,
       minLiveStakeFloorUsd,
       executionSteps,
+      pipelineStartMs,
     },
   };
 }

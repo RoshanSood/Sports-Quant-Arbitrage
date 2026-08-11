@@ -147,5 +147,7 @@ export const DEFAULT_RISK: RiskSettings = {
   liquidityStakeBufferMultiple: 3,
   staleDivergenceCents: 15, // skip lines where venues disagree by more than this; raise to capture live cross-venue splits
   maxLiveStakeUsd: DEFAULT_MAX_LIVE_STAKE_USD, // per-trade live cap; raise in the Risk panel after validating
+  hedgeRecoveryMaxSlippageCents: 10,
+  hedgeRecoveryMaxLossUsd: 1,
   perVenueCap: {},
 };

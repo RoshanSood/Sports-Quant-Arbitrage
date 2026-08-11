@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { applySnapshot, applyDelta, depthAtOrBetter, isSequenceGap } from "./kalshiLiveBook";
+import { applySnapshot, applyDelta, depthAtOrBetter, executableAskLevels, isSequenceGap } from "./kalshiLiveBook";
 
 // Fixtures match the REAL orderbook_snapshot / orderbook_delta schema, live-verified
 // 2026-08-09 against the real feed with real credentials — not the (incorrect) docs. See
@@ -67,6 +67,14 @@ describe("kalshiLiveBook — depthAtOrBetter (liquidity checks)", () => {
     expect(depthAtOrBetter(noBids, 55)).toBe(500); // the 45c and 50c levels (200 + 300)
     expect(depthAtOrBetter(noBids, 50)).toBe(300); // only the 50c level
     expect(depthAtOrBetter(noBids, 30)).toBe(0); // nothing clears a 30c limit
+  });
+
+  it("converts opposite bids into a cheapest-first executable ask ladder", () => {
+    expect(executableAskLevels(noBids)).toEqual([
+      { priceCents: 50, contracts: 300 },
+      { priceCents: 55, contracts: 200 },
+      { priceCents: 60, contracts: 100 },
+    ]);
   });
 });
 

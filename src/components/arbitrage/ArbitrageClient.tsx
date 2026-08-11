@@ -86,14 +86,7 @@ export default function ArbitrageClient() {
   const [agentTrade, setAgentTrade] = useState<AgentTrade | null>(null);
   const [executingOppIds, setExecutingOppIds] = useState<Set<string>>(() => new Set());
   const tradeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Ids currently being placed — prevents firing the SAME opportunity twice concurrently
-  // while a placement is in flight. Deliberately NOT a permanent "already fired" set: an id
-  // is never retired for the session, so a failed/halted attempt is retried on the next poll.
-  const autoInFlightRef = useRef<Set<string>>(new Set());
-  // Invalidates unsent baskets whenever the scan run changes.
-  const autoBatchGenerationRef = useRef(0);
   const scanActivatedAtRef = useRef(0);
-  const lastAutoSnapshotUpdatedAtRef = useRef(0);
 
   // Live score updates for the games the engine currently maps (Activity â†’ SCORES tab).
   const [scoreFeed, setScoreFeed] = useState<ScoreEvent[]>([]);
@@ -399,38 +392,11 @@ export default function ArbitrageClient() {
     [refreshPortfolio]
   );
 
-  const fireAutoBatch = useCallback(
-    async (nextOpps: ArbOpportunity[]) => {
-      if (!agent.autoTrade) return;
-      const generation = autoBatchGenerationRef.current;
-      // Fire EVERY currently-detected opportunity that isn't already being placed. An id is
-      // never permanently retired: a failed/halted attempt (arb momentarily vanished, thin
-      // depth, a stale quote) leaves it eligible, so it keeps getting retried on every poll
-      // until it actually places. autoInFlightRef only stops firing the SAME id twice
-      // concurrently while one placement is still running.
-      const batch = nextOpps.filter((o) => !autoInFlightRef.current.has(o.id));
-      if (batch.length === 0) return;
-
-      for (const opp of batch) autoInFlightRef.current.add(opp.id);
-      const mode = agent.live ? "live" : "paper";
-      try {
-        // Submit one basket at a time. A scan toggle invalidates all baskets not submitted
-        // yet. Naked outcomes are recorded but do not pause this batch or the scanner.
-        for (const opp of batch) {
-          if (generation !== autoBatchGenerationRef.current) break;
-          await executeOpportunity(opp, mode, { refreshAfter: false });
-          if (generation !== autoBatchGenerationRef.current) break;
-        }
-      } finally {
-        for (const opp of batch) autoInFlightRef.current.delete(opp.id);
-      }
-      await refreshPortfolio();
-    },
-    [agent.autoTrade, agent.live, executeOpportunity, refreshPortfolio]
-  );
-
   // Read the server's cached scan result (scannerWorker.ts runs the actual ingest/match/
   // detect continuously in the background — this is a plain GET, no compute triggered here).
+  // Auto-trading fires server-side, directly from scannerWorker.tick(), the instant an
+  // opportunity is detected — no browser round trip, and it runs whether or not this tab is
+  // open. This poll is display-only now: it just reflects whatever the server already did.
   const pollScanner = useCallback(async () => {
     const res = await fetch("/api/arbitrage/scanner").then((r) => r.json()).catch(() => null);
     if (!res) return;
@@ -443,20 +409,11 @@ export default function ArbitrageClient() {
     }
     if (res.matchMap?.stats) setMatchMap(res.matchMap);
     if (Array.isArray(res.opportunities)) {
-      const nextOpps = res.opportunities as ArbOpportunity[];
-      setOpportunities(nextOpps);
+      setOpportunities(res.opportunities as ArbOpportunity[]);
       setWatch(Array.isArray(res.watch) ? res.watch : []);
       setOppsLive(true);
-      // Rendering polls are faster than full venue scans. Execute a completed server
-      // snapshot once, not once per 800ms GET; a later scan gets a new updatedAt and may
-      // retry if the opportunity still genuinely exists.
-      const snapshotUpdatedAt = Number(res.updatedAt);
-      if (snapshotUpdatedAt !== lastAutoSnapshotUpdatedAtRef.current) {
-        lastAutoSnapshotUpdatedAtRef.current = snapshotUpdatedAt;
-        await fireAutoBatch(nextOpps);
-      }
     }
-  }, [fireAutoBatch, risk.staleQuoteMs]);
+  }, [risk.staleQuoteMs]);
 
   // Sync local Scanning state from the server once on mount — the background scan is
   // persistent server-side, so a page reload (or a second tab) should reflect whatever's
@@ -478,8 +435,6 @@ export default function ArbitrageClient() {
   // work runs in scannerWorker.ts, not here — this is just the on/off switch).
   useEffect(() => {
     if (!scannerSynced) return;
-    autoBatchGenerationRef.current += 1;
-    lastAutoSnapshotUpdatedAtRef.current = 0;
     const active = scanning;
     const action = active ? "start" : "stop";
     scanActivatedAtRef.current = active ? Date.now() : 0;

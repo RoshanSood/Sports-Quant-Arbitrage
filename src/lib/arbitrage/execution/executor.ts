@@ -3,9 +3,9 @@
 // then places each leg through its venue adapter and records the Trade + log. Dry-run
 // and live share this exact path — only the adapter differs.
 
-import type { ArbLeg, Trade } from "@/types/arbitrage";
+import type { ArbLeg, ExecutionStep, Trade } from "@/types/arbitrage";
 import { saveTrade } from "../tradeStore";
-import { prepareExecution, verifyPostFill, writeLog, type ExecutionOutcome } from "../executionPipeline";
+import { prepareExecution, verifyPostFill, writeLog, type ExecutionOutcome, type PreparedContext } from "../executionPipeline";
 import { resolveExecutionMode, SXBET_MIN_TAKER_STAKE_USD, type ExecMode } from "./config";
 import { getAdapter, venueSupportsLive, type ExecCreds } from "./registry";
 import { applyReconciliation, reconcileLegs, type LegReconciliation } from "./reconcile";
@@ -82,25 +82,41 @@ export function checkLiveFillability(requests: OrderRequest[], live: LiveBookRea
     const liveAsk = live.askCents(r);
     if (liveAsk != null && liveAsk > limitPriceCents) {
       const bumped = Math.min(99, liveAsk);
-      const move = bumped - limitPriceCents;
-      if (move > LIVE_PRICE_CUSHION_CENTS) {
-        blockers.push(
-          `${venueLabel(r.venueId)} live ask moved to ${bumped}c (from ${limitPriceCents}c), beyond the ${LIVE_PRICE_CUSHION_CENTS}c cushion`
-        );
-        return r;
-      }
       adjustments.push({ venueId: r.venueId, fromCents: limitPriceCents, toCents: bumped });
       limitPriceCents = bumped;
     }
-    const depth = live.depthAtOrBetter(r, limitPriceCents);
-    if (depth != null && depth + 1e-9 < r.sizeContracts) {
-      blockers.push(
-        `${venueLabel(r.venueId)} live depth ${depth.toFixed(2)} contracts at <= ${limitPriceCents}c is short of the ${r.sizeContracts} required`
-      );
-    }
+    // A short websocket cache is an optimization input, not an immediate rejection. The
+    // fresh venue-native ladder pass below may find a profitable smaller common basket.
+    live.depthAtOrBetter(r, limitPriceCents);
     return limitPriceCents === r.limitPriceCents ? r : { ...r, limitPriceCents };
   });
   return { requests: next, blockers, adjustments };
+}
+
+// One leg's live ask ladder, keyed off the OrderRequest — same venue-keying split as
+// LiveBookReader (Polymarket by nativeSide/token id, Kalshi by nativeMarketId + side).
+export type LiveLevelsReader = (req: OrderRequest) => Array<{ priceCents: number; contracts: number }> | null;
+
+export type LiveOnlyQuotesResult = {
+  quotes: Array<ExecutableOrderQuote | null>; // per-leg; null where live data was missing/insufficient
+  canSkipRestProbe: boolean; // true only when EVERY leg got a live quote covering its full size
+};
+
+// Pure — takes the live ladder lookup as a parameter so it's testable without the
+// singletons. For each request, build a fully-executable quote from the live-book ladder
+// ALONE if (and only if) it covers the requested size; otherwise that leg is null. Callers
+// should only trust the whole batch (skip the REST probe) when every leg came back
+// non-null — a partial live picture is not enough to skip verifying the rest via REST,
+// since a mixed basket still needs the REST-quoted legs' real numbers regardless.
+export function buildLiveOnlyQuotes(requests: OrderRequest[], liveLevelsFor: LiveLevelsReader): LiveOnlyQuotesResult {
+  const quotes = requests.map((request): ExecutableOrderQuote | null => {
+    const levels = liveLevelsFor(request);
+    if (!levels?.length) return null;
+    const availableContracts = levels.reduce((sum, level) => sum + level.contracts, 0);
+    if (availableContracts + 1e-9 < request.sizeContracts) return null;
+    return { ok: true, priceCents: levels[0].priceCents, averagePriceCents: levels[0].priceCents, availableContracts, levels };
+  });
+  return { quotes, canSkipRestProbe: quotes.every((q) => q != null) };
 }
 
 // Re-exported for callers/tests that reference it from the executor module.
@@ -207,6 +223,393 @@ export function commonExecutableRequests(
   };
 }
 
+type FillFromLevels = {
+  averagePriceCents: number;
+  worstPriceCents: number;
+  depthAtWorstPrice: number;
+};
+
+export type ExecutableBasketOptimization = {
+  requests: OrderRequest[];
+  commonContracts: number;
+  averagePriceCents: number[];
+  totalCost: number;
+  expectedProfit: number;
+  netEdge: number;
+  evaluatedCount: number;
+  blockers: string[];
+};
+
+export type PriceCushionResult = {
+  requests: OrderRequest[];
+  cushionCents: number;
+  worstCaseProfit: number;
+  safe: boolean;
+};
+
+// Give every concurrently submitted leg the same price headroom, but only while the
+// basket remains profitable if every leg fills at its worst permitted price. Sharing one
+// cushion across all legs prevents us from spending the same edge twice.
+export function applyEconomicPriceCushion(
+  requests: OrderRequest[],
+  legs: ArbLeg[],
+  minExpectedProfitUsd: number,
+  maxCushionCents: number,
+  maxTotalCostUsd = Number.POSITIVE_INFINITY
+): PriceCushionResult {
+  const ceiling = Math.max(0, Math.floor(maxCushionCents));
+  let fallbackProfit = Number.NEGATIVE_INFINITY;
+  for (let cushionCents = ceiling; cushionCents >= 0; cushionCents--) {
+    const cushioned = requests.map((request) => ({
+      ...request,
+      limitPriceCents: Math.min(99, request.limitPriceCents + cushionCents),
+    }));
+    const worstCaseLegs = legs.map((leg, i) => {
+      const priceCents = cushioned[i].limitPriceCents;
+      return {
+        ...leg,
+        size: cushioned[i].sizeContracts,
+        priceCents,
+        impliedProbability: priceCents / 100,
+        decimalOdds: 100 / priceCents,
+      };
+    });
+    const fees = computeFees(worstCaseLegs);
+    worstCaseLegs.forEach((leg, i) => (leg.feeCents = fees[i].feeCents));
+    const economics = executedEconomics(worstCaseLegs);
+    fallbackProfit = economics.expectedProfit;
+    if (
+      economics.totalCost <= maxTotalCostUsd + 1e-9 &&
+      economics.guaranteedPayout > economics.totalCost &&
+      economics.expectedProfit + 1e-9 >= minExpectedProfitUsd
+    ) {
+      return { requests: cushioned, cushionCents, worstCaseProfit: economics.expectedProfit, safe: true };
+    }
+  }
+  return { requests, cushionCents: 0, worstCaseProfit: fallbackProfit, safe: false };
+}
+
+// Before either venue receives an order, prove that either leg could still be bought at
+// the configured emergency ceiling with enough current depth and without exceeding the
+// recovery-loss budget. This cannot reserve cross-venue liquidity, but it prevents firing
+// a basket that has no viable hedge path at the moment of submission.
+export function recoveryPathBlockers(
+  requests: OrderRequest[],
+  quotes: ExecutableOrderQuote[],
+  legs: ArbLeg[],
+  maxSlippageCents: number,
+  maxLossUsd: number
+): string[] {
+  if (requests.length !== 2 || quotes.length !== 2 || legs.length !== 2) {
+    return ["automatic hedge recovery currently requires exactly two aligned legs"];
+  }
+  const blockers: string[] = [];
+  for (let missingIndex = 0; missingIndex < 2; missingIndex++) {
+    const filledIndex = missingIndex === 0 ? 1 : 0;
+    const contracts = requests[missingIndex].sizeContracts;
+    const recoveryCeiling = Math.min(99, requests[missingIndex].limitPriceCents + Math.max(0, maxSlippageCents));
+    const levels = normalizedLevels(requests[missingIndex], quotes[missingIndex])
+      .filter((level) => level.priceCents <= recoveryCeiling + 1e-9);
+    const recoveryFill = fillFromLevels(levels, contracts);
+    if (!recoveryFill) {
+      blockers.push(`${venueLabel(requests[missingIndex].venueId)} lacks ${contracts.toFixed(2)} recovery contracts at <= ${recoveryCeiling.toFixed(2)}c`);
+      continue;
+    }
+    const scenario = legs.map((leg, i) => {
+      const priceCents = i === missingIndex ? recoveryCeiling : requests[filledIndex].limitPriceCents;
+      return { ...leg, size: contracts, priceCents, impliedProbability: priceCents / 100, decimalOdds: 100 / priceCents };
+    });
+    const fees = computeFees(scenario);
+    scenario.forEach((leg, i) => (leg.feeCents = fees[i].feeCents));
+    const economics = executedEconomics(scenario);
+    if (economics.expectedProfit < -Math.max(0, maxLossUsd) - 1e-9) {
+      blockers.push(
+        `${venueLabel(requests[missingIndex].venueId)} recovery could lock $${Math.abs(economics.expectedProfit).toFixed(2)} loss, above $${Math.max(0, maxLossUsd).toFixed(2)}`
+      );
+    }
+  }
+  return blockers;
+}
+
+function normalizedLevels(request: OrderRequest, quote: ExecutableOrderQuote): Array<{ priceCents: number; contracts: number }> {
+  const explicit = (quote.levels ?? [])
+    .filter((level) => Number.isFinite(level.priceCents) && level.priceCents > 0 && level.priceCents < 100 && Number.isFinite(level.contracts) && level.contracts > 0)
+    .sort((a, b) => a.priceCents - b.priceCents);
+  if (explicit.length) return explicit;
+  if (quote.availableContracts > 0) {
+    return [{ priceCents: quote.averagePriceCents || quote.priceCents || request.limitPriceCents, contracts: quote.availableContracts }];
+  }
+  return [];
+}
+
+function fillFromLevels(levels: Array<{ priceCents: number; contracts: number }>, contracts: number): FillFromLevels | null {
+  let remaining = contracts;
+  let costCents = 0;
+  let worstPriceCents = 0;
+  for (const level of levels) {
+    if (remaining <= 1e-9) break;
+    const take = Math.min(remaining, level.contracts);
+    costCents += take * level.priceCents;
+    worstPriceCents = level.priceCents;
+    remaining -= take;
+  }
+  if (remaining > 1e-7 || worstPriceCents <= 0) return null;
+  const depthAtWorstPrice = levels
+    .filter((level) => level.priceCents <= worstPriceCents + 1e-9)
+    .reduce((sum, level) => sum + level.contracts, 0);
+  return { averagePriceCents: costCents / contracts, worstPriceCents, depthAtWorstPrice };
+}
+
+// Search fresh native ladders for the most profitable common-size basket. The detected size
+// is a ceiling, not a requirement: the venue-minimum pass has already increased it when
+// needed, and this pass can reduce every leg uniformly to any two-decimal contract count.
+export function optimizeExecutableBasket(
+  requests: OrderRequest[],
+  quotes: ExecutableOrderQuote[],
+  depthBufferMultiple: number,
+  minExpectedProfitUsd: number
+): ExecutableBasketOptimization {
+  const empty = (blockers: string[], evaluatedCount = 0): ExecutableBasketOptimization => ({
+    requests,
+    commonContracts: 0,
+    averagePriceCents: [],
+    totalCost: 0,
+    expectedProfit: 0,
+    netEdge: 0,
+    evaluatedCount,
+    blockers,
+  });
+  if (!requests.length || requests.length !== quotes.length) return empty(["executable quote count does not match order legs"]);
+
+  const ladders = requests.map((request, i) => normalizedLevels(request, quotes[i]));
+  const missing = ladders.flatMap((levels, i) => levels.length ? [] : [quotes[i].reason ?? `${venueLabel(requests[i].venueId)} has no executable ask depth`]);
+  if (missing.length) return empty(missing);
+
+  const buffer = Math.max(1, depthBufferMultiple);
+  const maximumContracts = Math.min(
+    ...requests.map((request) => request.sizeContracts),
+    ...ladders.map((levels) => levels.reduce((sum, level) => sum + level.contracts, 0) / buffer)
+  );
+  const maximumTicks = Math.floor((maximumContracts + 1e-9) * 100);
+  if (maximumTicks < 1) return empty([`no common executable size remains after the ${buffer.toFixed(1)}x depth buffer`]);
+
+  const strideTicks = Math.max(1, Math.ceil(maximumTicks / 50_000));
+  let evaluatedCount = 0;
+  let best: ExecutableBasketOptimization | null = null;
+  const rejectionCounts = { depth: 0, minimum: 0, profit: 0, notArb: 0 };
+
+  for (let ticks = maximumTicks; ticks >= 1; ticks -= strideTicks) {
+    const commonContracts = ticks / 100;
+    const fills = ladders.map((levels) => fillFromLevels(levels, commonContracts));
+    if (fills.some((fill) => !fill)) continue;
+    evaluatedCount += 1;
+    const completeFills = fills as FillFromLevels[];
+    if (completeFills.some((fill) => fill.depthAtWorstPrice + 1e-9 < commonContracts * buffer)) {
+      rejectionCounts.depth += 1;
+      continue;
+    }
+
+    const legs: ArbLeg[] = requests.map((request, i) => ({
+      venueId: request.venueId,
+      marketId: request.marketId,
+      nativeMarketId: request.nativeMarketId,
+      nativeSide: request.nativeSide,
+      outcome: request.outcome as ArbLeg["outcome"],
+      label: request.outcome,
+      size: commonContracts,
+      priceCents: completeFills[i].averagePriceCents,
+      decimalOdds: 100 / completeFills[i].averagePriceCents,
+      impliedProbability: completeFills[i].averagePriceCents / 100,
+      feeCents: 0,
+    }));
+    if (legs.some((leg) => leg.size + 1e-9 < venueMinContracts(leg.venueId) || (leg.size * leg.priceCents) / 100 + 1e-9 < venueMinStakeUsd(leg.venueId))) {
+      rejectionCounts.minimum += 1;
+      continue;
+    }
+    const fees = computeFees(legs);
+    legs.forEach((leg, i) => (leg.feeCents = fees[i].feeCents));
+    const economics = executedEconomics(legs);
+    if (economics.guaranteedPayout <= economics.totalCost) {
+      rejectionCounts.notArb += 1;
+      continue;
+    }
+    if (economics.expectedProfit + 1e-9 < minExpectedProfitUsd) {
+      rejectionCounts.profit += 1;
+      continue;
+    }
+
+    const candidate: ExecutableBasketOptimization = {
+      requests: requests.map((request, i) => ({
+        ...request,
+        sizeContracts: commonContracts,
+        limitPriceCents: Math.ceil(completeFills[i].worstPriceCents * 100) / 100,
+      })),
+      commonContracts,
+      averagePriceCents: completeFills.map((fill) => fill.averagePriceCents),
+      totalCost: economics.totalCost,
+      expectedProfit: economics.expectedProfit,
+      netEdge: economics.netEdge,
+      evaluatedCount,
+      blockers: [],
+    };
+    if (!best || candidate.expectedProfit > best.expectedProfit + 1e-9 ||
+      (Math.abs(candidate.expectedProfit - best.expectedProfit) < 1e-9 && candidate.commonContracts > best.commonContracts)) {
+      best = candidate;
+    }
+  }
+
+  if (best) return { ...best, evaluatedCount };
+  return empty([
+    `no profitable resized basket after evaluating ${evaluatedCount} common sizes ` +
+    `(depth ${rejectionCounts.depth}, venue minimum ${rejectionCounts.minimum}, ` +
+    `profit below $${minExpectedProfitUsd.toFixed(2)} ${rejectionCounts.profit}, no-arb ${rejectionCounts.notArb})`,
+  ], evaluatedCount);
+}
+
+export async function recoverMissingHedge(
+  ctx: PreparedContext,
+  adapters: ExecutionAdapter[],
+  requests: OrderRequest[],
+  results: OrderResult[]
+): Promise<{ results: OrderResult[]; reconciliations: LegReconciliation[]; step: ExecutionStep | null }> {
+  if (results.length !== 2 || requests.length !== 2 || adapters.length !== 2 || results.some((result) => result.status === "pending")) {
+    return { results, reconciliations: [], step: null };
+  }
+  const working = results.map((result) => ({ ...result }));
+  const largerIndex = working[0].filledContracts >= working[1].filledContracts ? 0 : 1;
+  const missingIndex = largerIndex === 0 ? 1 : 0;
+  // Match what the venue actually filled, including price-improvement shares above the
+  // requested minimum. Capping this at the request hid real residual exposure.
+  const targetContracts = working[largerIndex].filledContracts;
+  if (targetContracts <= 0 || targetContracts - working[missingIndex].filledContracts <= 1e-9) {
+    return { results, reconciliations: [], step: null };
+  }
+
+  const maxSlippage = Math.max(0, ctx.risk.hedgeRecoveryMaxSlippageCents ?? 10);
+  const maxLoss = Math.max(0, ctx.risk.hedgeRecoveryMaxLossUsd ?? 1);
+  const maxPriceCents = Math.min(99, requests[missingIndex].limitPriceCents + maxSlippage);
+  const attempts = 3;
+  let lastReason = "no executable recovery quote";
+  const originalOrderId = results[missingIndex].orderId;
+  const reconciliations: LegReconciliation[] = [];
+  const recoveryOrderIds: string[] = [];
+  let lastModeledProfit = 0;
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const missingContracts = Math.max(0, targetContracts - working[missingIndex].filledContracts);
+    if (missingContracts <= 1e-9) break;
+    const recoveryRequest: OrderRequest = {
+      ...requests[missingIndex],
+      sizeContracts: missingContracts,
+      limitPriceCents: maxPriceCents,
+    };
+    if (
+      missingContracts + 1e-9 < venueMinContracts(recoveryRequest.venueId) ||
+      (missingContracts * maxPriceCents) / 100 + 1e-9 < venueMinStakeUsd(recoveryRequest.venueId)
+    ) {
+      lastReason = `remaining ${missingContracts.toFixed(2)}-contract imbalance is below ${venueLabel(recoveryRequest.venueId)}'s minimum recovery order`;
+      break;
+    }
+    const quote = adapters[missingIndex].quoteOrder ? await adapters[missingIndex].quoteOrder(recoveryRequest) : null;
+    if (!quote || quote.availableContracts + 1e-9 < missingContracts || quote.priceCents > maxPriceCents) {
+      lastReason = quote?.reason ?? `only ${quote?.availableContracts ?? 0} of ${missingContracts.toFixed(2)} recovery contracts available`;
+      continue;
+    }
+    // Keep the full emergency ceiling on the submitted order. Narrowing this to the
+    // just-observed ask recreates the quote/place race: a 25c quote followed by a 27c ask
+    // was rejected even though the approved recovery ceiling was 32c.
+    const existingMissing = working[missingIndex].filledContracts;
+    const combinedMissingPrice = (
+      existingMissing * working[missingIndex].avgPriceCents + missingContracts * maxPriceCents
+    ) / targetContracts;
+    const modeledLegs = ctx.executedLegs.map((leg, i) => {
+      const priceCents = i === missingIndex ? combinedMissingPrice : working[i].avgPriceCents;
+      return { ...leg, size: targetContracts, priceCents, impliedProbability: priceCents / 100, decimalOdds: 100 / priceCents };
+    });
+    const modeledFees = computeFees(modeledLegs);
+    modeledLegs.forEach((leg, i) => (leg.feeCents = modeledFees[i].feeCents));
+    const modeledEconomics = executedEconomics(modeledLegs);
+    lastModeledProfit = modeledEconomics.expectedProfit;
+    if (modeledEconomics.expectedProfit < -maxLoss) {
+      lastReason = `recovery would lock $${Math.abs(modeledEconomics.expectedProfit).toFixed(2)} loss, above $${maxLoss.toFixed(2)} ceiling`;
+      break;
+    }
+
+    const placed = await adapters[missingIndex].placeOrder(recoveryRequest);
+    const recoveryRecon = await reconcileLegs([adapters[missingIndex]], [recoveryRequest], [placed]);
+    reconciliations.push(...recoveryRecon);
+    const confirmed = applyReconciliation([placed], recoveryRecon, [recoveryRequest])[0];
+    if (confirmed.orderId) recoveryOrderIds.push(confirmed.orderId);
+    if (confirmed.filledContracts > 0) {
+      const priorContracts = working[missingIndex].filledContracts;
+      const addedContracts = Math.min(missingContracts, confirmed.filledContracts);
+      const combinedContracts = priorContracts + addedContracts;
+      const combinedPrice = combinedContracts > 0
+        ? (priorContracts * working[missingIndex].avgPriceCents + addedContracts * confirmed.avgPriceCents) / combinedContracts
+        : confirmed.avgPriceCents;
+      working[missingIndex] = {
+        ...confirmed,
+        ok: true,
+        filledContracts: combinedContracts,
+        avgPriceCents: combinedPrice,
+        status: combinedContracts + 1e-9 >= requests[missingIndex].sizeContracts ? "filled" : "partial",
+      };
+    }
+    if (working[missingIndex].filledContracts + 1e-9 >= targetContracts) {
+      requests[missingIndex] = { ...requests[missingIndex], limitPriceCents: recoveryRequest.limitPriceCents };
+      return {
+        results: working,
+        reconciliations,
+        step: {
+          key: "hedge_recovery",
+          label: "Automatic hedge recovery",
+          status: "pass",
+          detail: `${venueLabel(requests[missingIndex].venueId)} recovered the basket to ${targetContracts.toFixed(2)} matched contracts at <= ${recoveryRequest.limitPriceCents.toFixed(2)}c; projected worst-case basket P&L $${modeledEconomics.expectedProfit.toFixed(2)} (original order ${originalOrderId ?? "none"}; recovery orders ${recoveryOrderIds.join(", ") || "none"})`,
+        },
+      };
+    }
+    lastReason = confirmed.status === "pending" ? "recovery order confirmation still pending" : confirmed.error ?? "recovery IOC/FOK did not fill";
+    if (confirmed.status === "pending") {
+      working[missingIndex] = {
+        ...confirmed,
+        filledContracts: working[missingIndex].filledContracts,
+        avgPriceCents: working[missingIndex].avgPriceCents,
+        status: "pending",
+      };
+      return {
+        results: working,
+        reconciliations,
+        step: {
+          key: "hedge_recovery",
+          label: "Automatic hedge recovery",
+          status: "warn",
+          detail: `${venueLabel(requests[missingIndex].venueId)} accepted the recovery order; fill confirmation is pending, so no duplicate retry was sent`,
+        },
+      };
+    }
+    // A venue acknowledgement/hash could still represent a live order. Only retry when
+    // placement produced no identifier at all, or reconciliation explicitly proved the
+    // order terminal with zero fill.
+    const confirmationStatus = recoveryRecon[0]?.confirmation?.status;
+    const explicitlyTerminal = confirmationStatus === "failed" || confirmationStatus === "settled";
+    const adapterIsImmediate = !adapters[missingIndex].confirmFill;
+    if (confirmed.orderId || confirmed.confirmationId) {
+      if (!explicitlyTerminal && !adapterIsImmediate) break;
+    }
+  }
+
+  return {
+    results: working,
+    reconciliations,
+    step: {
+      key: "hedge_recovery",
+      label: "Automatic hedge recovery",
+      status: "halt",
+      detail: `Could not fully match ${targetContracts.toFixed(2)} contracts on ${venueLabel(requests[missingIndex].venueId)} within +${maxSlippage.toFixed(2)}c / $${maxLoss.toFixed(2)} max loss (last projected P&L $${lastModeledProfit.toFixed(2)}): ${lastReason}`,
+    },
+  };
+}
+
 type RunResult = ExecutionOutcome & { mode: ExecMode; blockers: string[] };
 const executionQueue = globalThis as typeof globalThis & { __arbLiveExecutionTail?: Promise<void> };
 
@@ -221,23 +624,32 @@ export function runExecution(
   opportunityId: string,
   date: string,
   requestedMode: ExecMode,
-  creds?: ExecCreds
+  creds?: ExecCreds,
+  // ISO timestamp of when the underlying opportunity was originally detected (arbEngine.ts's
+  // detectArbs) — NOT when this execution attempt started. Threaded through from
+  // scannerWorker.ts's auto-fire so a saved trade can show true end-to-end "detected to
+  // filled" latency (trade.openedAt - trade.detectedAt), not just this attempt's own timing.
+  // Omitted for manually-triggered trades (the Play button), where there's no single
+  // detection instant to anchor to.
+  detectedAt?: string
 ): Promise<RunResult> {
   // One live basket at a time per server process. This ensures the completed trade is saved
   // before the next queued request checks the Risk panel's per-match open-position limit.
   // Paper simulations remain concurrent.
   return requestedMode === "live"
-    ? serializeLiveExecution(() => runExecutionUnlocked(opportunityId, date, requestedMode, creds))
-    : runExecutionUnlocked(opportunityId, date, requestedMode, creds);
+    ? serializeLiveExecution(() => runExecutionUnlocked(opportunityId, date, requestedMode, creds, detectedAt))
+    : runExecutionUnlocked(opportunityId, date, requestedMode, creds, detectedAt);
 }
 
 async function runExecutionUnlocked(
   opportunityId: string,
   date: string,
   requestedMode: ExecMode,
-  creds?: ExecCreds
+  creds?: ExecCreds,
+  detectedAt?: string
 ): Promise<RunResult> {
-  const prep = await prepareExecution(opportunityId, date, requestedMode);
+  const pipelineStartMs = Date.now();
+  const prep = await prepareExecution(opportunityId, date, requestedMode, pipelineStartMs);
   if (prep.kind === "halt") return { ...prep.outcome, mode: "dry_run", blockers: [] };
   const ctx = prep.ctx;
 
@@ -272,7 +684,7 @@ async function runExecutionUnlocked(
           opportunityId: ctx.opportunityId,
           pipelineSteps: [
             ...ctx.executionSteps,
-            { key: "exec_mode", label: "Execution mode", status: "halt", detail: "Live request blocked before order placement" },
+            { key: "exec_mode", label: "Execution mode", status: "halt", detail: "Live request blocked before order placement", tookMs: Date.now() - pipelineStartMs },
           ],
           totalCost: ctx.totalStake,
           expectedProfit: ctx.expectedProfit,
@@ -284,7 +696,11 @@ async function runExecutionUnlocked(
   }
   const mode = gate.mode;
   const executionSteps = [...ctx.executionSteps];
-  executionSteps.push({
+  // Same pipelineStartMs clock prepareExecution's own steps were stamped against, so the
+  // saved trade's executionSteps show one continuous timeline from attempt start through
+  // placement/reconciliation, not two timelines that each reset to 0.
+  const pushStep = (step: ExecutionStep) => executionSteps.push({ ...step, tookMs: Date.now() - pipelineStartMs });
+  pushStep({
     key: "exec_mode",
     label: "Execution mode",
     status: mode === "live" ? "warn" : "pass",
@@ -341,7 +757,7 @@ async function runExecutionUnlocked(
     });
     requests = liveCheck.requests;
     for (const adj of liveCheck.adjustments) {
-      executionSteps.push({
+      pushStep({
         key: `live_price_${adj.venueId}`,
         label: `${venueLabel(adj.venueId)} live price check`,
         status: "warn",
@@ -365,28 +781,70 @@ async function runExecutionUnlocked(
       return { result: "halted", reasonCode: "live_blocked", reason, trade: null, mode: "live", blockers: liveCheck.blockers };
     }
 
-    // Quote every venue-native executable book concurrently, then use exactly the same
-    // contract count on every leg. Polymarket walks the real CLOB ask ladder here, so a
-    // three-contract basket proceeds only when all three shares are actually offered at or
-    // below our limit (or all legs are uniformly resized to a smaller valid common count).
+    // Fetch every native ask ladder concurrently with a permissive probe ceiling. The
+    // optimizer, not a fixed cents cushion, establishes the actual price ceiling by testing
+    // every common size against fresh depth, exact fees, $1.01 venue floors, and profit.
     const depthBuffer = Math.max(1, ctx.risk.liquidityStakeBufferMultiple);
+    const requestedContracts = Math.min(...requests.map((request) => request.sizeContracts));
     const depthProbeRequests = requests.map((request) => ({
       ...request,
       sizeContracts: request.sizeContracts * depthBuffer,
+      limitPriceCents: 99,
     }));
-    const quotes = await Promise.all(
-      adapters.map((adapter, i): Promise<ExecutableOrderQuote> => adapter.quoteOrder
-        ? adapter.quoteOrder(depthProbeRequests[i])
-        : Promise.resolve({
-            ok: true,
-            priceCents: requests[i].limitPriceCents,
-            averagePriceCents: requests[i].limitPriceCents,
-            availableContracts: depthProbeRequests[i].sizeContracts,
-          }))
+    // If EVERY leg is Polymarket/Kalshi (the venues with a live-book websocket) and each
+    // one's live ladder alone already covers the full buffered probe size, skip the REST
+    // quote-probe round trip entirely — this is the same latency source that used to kill
+    // Polymarket fills when probed via REST right before firing (see the removed
+    // single-venue "anchor preflight" referenced elsewhere in this file), just now avoided
+    // instead of merely made faster. Any leg without enough live depth (or on a venue with
+    // no live book — SX.bet, predict.fun, Cloudbet) falls the WHOLE basket back to the
+    // existing REST probe for every leg, unchanged from before.
+    const liveOnly = buildLiveOnlyQuotes(depthProbeRequests, (request) =>
+      request.venueId === "polymarket" && request.nativeSide
+        ? polymarketLiveBook.getAskLevels(request.nativeSide)
+        : request.venueId === "kalshi" && request.nativeMarketId && request.nativeSide
+          ? kalshiLiveBook.getAskLevels(request.nativeMarketId, request.nativeSide.toLowerCase() === "no" ? "no" : "yes")
+          : null
     );
-    const resized = commonExecutableRequests(requests, quotes, depthBuffer);
-    if (resized.blockers.length) {
-      const reason = `Live execution blocked - ${resized.blockers.join("; ")}`;
+    const canSkipQuoteProbe = liveOnly.canSkipRestProbe;
+    const nativeQuotes = canSkipQuoteProbe
+      ? (liveOnly.quotes as ExecutableOrderQuote[])
+      : await Promise.all(
+          adapters.map((adapter, i): Promise<ExecutableOrderQuote> => adapter.quoteOrder
+            ? adapter.quoteOrder(depthProbeRequests[i])
+            : Promise.resolve({
+                ok: true,
+                priceCents: requests[i].limitPriceCents,
+                averagePriceCents: requests[i].limitPriceCents,
+                availableContracts: depthProbeRequests[i].sizeContracts,
+                levels: [{ priceCents: requests[i].limitPriceCents, contracts: depthProbeRequests[i].sizeContracts }],
+              }))
+        );
+    if (canSkipQuoteProbe) {
+      pushStep({
+        key: "live_quote_probe",
+        label: "Quote probe",
+        status: "pass",
+        detail: "Skipped the REST depth probe — live-book ladders on every leg already covered the required size (in-memory, no added latency)",
+      });
+    }
+    const quotes = nativeQuotes.map((quote, i) => {
+      const request = requests[i];
+      if (request.venueId !== "kalshi" || !request.nativeMarketId || !request.nativeSide) return quote;
+      const side = request.nativeSide.toLowerCase() === "no" ? "no" : "yes";
+      const liveLevels = kalshiLiveBook.getAskLevels(request.nativeMarketId, side);
+      // The REST market snapshot is the freshest independent top-price confirmation. Only
+      // trust websocket depth beyond that top when both sources identify the same best ask.
+      if (!liveLevels?.length || Math.abs(liveLevels[0].priceCents - quote.priceCents) > 1e-9) return quote;
+      return {
+        ...quote,
+        levels: liveLevels,
+        availableContracts: liveLevels.reduce((sum, level) => sum + level.contracts, 0),
+      };
+    });
+    const optimized = optimizeExecutableBasket(requests, quotes, depthBuffer, ctx.risk.minExpectedProfitUsd);
+    if (optimized.blockers.length) {
+      const reason = `Live execution blocked - ${optimized.blockers.join("; ")}`;
       await writeLog(
         ctx.agent,
         ctx.opportunityMatchup,
@@ -395,18 +853,19 @@ async function runExecutionUnlocked(
         "halted",
         "live_blocked",
         reason,
-        { effectiveMode: "blocked", gateBlockers: resized.blockers, executableQuotes: quotes, totalCost: ctx.totalStake, expectedProfit: ctx.expectedProfit, pipelineSteps: executionSteps },
+        { effectiveMode: "blocked", gateBlockers: optimized.blockers, executableQuotes: quotes, evaluatedSizes: optimized.evaluatedCount, totalCost: ctx.totalStake, expectedProfit: ctx.expectedProfit, pipelineSteps: executionSteps },
         date,
         "live"
       );
-      return { result: "halted", reasonCode: "live_blocked", reason, trade: null, mode: "live", blockers: resized.blockers };
+      return { result: "halted", reasonCode: "live_blocked", reason, trade: null, mode: "live", blockers: optimized.blockers };
     }
 
-    requests = resized.requests;
+    requests = optimized.requests;
+    const executableLimits = requests.map((request) => request.limitPriceCents);
     const quotedLegs = ctx.executedLegs.map((leg, i) => ({
       ...leg,
-      size: resized.commonContracts,
-      priceCents: requests[i].limitPriceCents,
+      size: optimized.commonContracts,
+      priceCents: optimized.averagePriceCents[i],
     }));
     const minimumBlockers = liveVenueMinimumStakeBlockers(quotedLegs);
     const quotedFees = computeFees(quotedLegs);
@@ -427,7 +886,7 @@ async function runExecutionUnlocked(
         effectiveMode: "blocked",
         gateBlockers: economicBlockers,
         executableQuotes: quotes,
-        commonContracts: resized.commonContracts,
+        commonContracts: optimized.commonContracts,
         submittedStakesUsd: quotedLegs.map((leg) => Number(((leg.size * leg.priceCents) / 100).toFixed(4))),
         totalCost: quotedEconomics.totalCost,
         expectedProfit: quotedEconomics.expectedProfit,
@@ -435,12 +894,65 @@ async function runExecutionUnlocked(
       }, date, "live");
       return { result: "halted", reasonCode: "live_blocked", reason, trade: null, mode: "live", blockers: economicBlockers };
     }
-    executionSteps.push({
+    const cushion = applyEconomicPriceCushion(
+      requests,
+      quotedLegs,
+      ctx.risk.minExpectedProfitUsd,
+      ctx.risk.hedgeRecoveryMaxSlippageCents ?? 10,
+      ctx.risk.maxLiveStakeUsd
+    );
+    requests = cushion.requests;
+    pushStep({
       key: "executable_books",
-      label: "Executable books",
+      label: "Optimized executable basket",
       status: "pass",
-      detail: `${resized.commonContracts.toFixed(2)} exact common contracts across every leg with ${depthBuffer.toFixed(1)}x depth; $${quotedEconomics.expectedProfit.toFixed(2)} executable profit`,
+      detail: `${requestedContracts.toFixed(2)} requested -> ${optimized.commonContracts.toFixed(2)} exact common contracts; fresh ladder limits ${optimized.requests.map((request) => `${venueLabel(request.venueId)} ${request.limitPriceCents.toFixed(2)}c`).join(" / ")}; ${depthBuffer.toFixed(1)}x depth; $${quotedEconomics.expectedProfit.toFixed(2)} executable profit after evaluating ${optimized.evaluatedCount} sizes`,
     });
+    pushStep({
+      key: "price_cushion",
+      label: "Economics-safe submission ceilings",
+      status: cushion.safe ? (cushion.cushionCents > 0 ? "pass" : "info") : "halt",
+      detail: `${cushion.cushionCents.toFixed(0)}c shared movement allowance; observed limits ${executableLimits.map((limit, i) => `${venueLabel(requests[i].venueId)} ${limit.toFixed(2)}c`).join(" / ")}; submission ceilings ${requests.map((request) => `${venueLabel(request.venueId)} ${request.limitPriceCents.toFixed(2)}c`).join(" / ")}; worst-case profit $${cushion.worstCaseProfit.toFixed(2)}`,
+    });
+    if (!cushion.safe) {
+      const blockers = [`worst-case submission profit $${cushion.worstCaseProfit.toFixed(2)} is below $${ctx.risk.minExpectedProfitUsd.toFixed(2)}`];
+      const reason = `Live execution blocked - ${blockers[0]}`;
+      await writeLog(ctx.agent, ctx.opportunityMatchup, ctx.venues, quotedEconomics.netEdge, "halted", "live_blocked", reason, {
+        effectiveMode: "blocked",
+        gateBlockers: blockers,
+        totalCost: quotedEconomics.totalCost,
+        expectedProfit: quotedEconomics.expectedProfit,
+        pipelineSteps: executionSteps,
+      }, date, "live");
+      return { result: "halted", reasonCode: "live_blocked", reason, trade: null, mode: "live", blockers };
+    }
+
+    const recoveryBlockers = recoveryPathBlockers(
+      requests,
+      quotes,
+      quotedLegs,
+      ctx.risk.hedgeRecoveryMaxSlippageCents ?? 10,
+      ctx.risk.hedgeRecoveryMaxLossUsd ?? 1
+    );
+    pushStep({
+      key: "recovery_preflight",
+      label: "Emergency hedge path",
+      status: recoveryBlockers.length ? "halt" : "pass",
+      detail: recoveryBlockers.length
+        ? recoveryBlockers.join("; ")
+        : `Both one-leg failure scenarios have current depth within the configured recovery price/loss ceilings`,
+    });
+    if (recoveryBlockers.length) {
+      const reason = `Live execution blocked - ${recoveryBlockers.join("; ")}`;
+      await writeLog(ctx.agent, ctx.opportunityMatchup, ctx.venues, quotedEconomics.netEdge, "halted", "live_blocked", reason, {
+        effectiveMode: "blocked",
+        gateBlockers: recoveryBlockers,
+        totalCost: quotedEconomics.totalCost,
+        expectedProfit: quotedEconomics.expectedProfit,
+        pipelineSteps: executionSteps,
+      }, date, "live");
+      return { result: "halted", reasonCode: "live_blocked", reason, trade: null, mode: "live", blockers: recoveryBlockers };
+    }
   }
 
   let placed: OrderResult[];
@@ -473,14 +985,23 @@ async function runExecutionUnlocked(
   let results = placed;
   if (mode === "live") {
     reconciliation = await reconcileLegs(adapters, requests, placed);
-    results = applyReconciliation(placed, reconciliation);
+    results = applyReconciliation(placed, reconciliation, requests);
+    const recovery = await recoverMissingHedge(ctx, adapters, requests, results);
+    results = recovery.results;
+    reconciliation.push(...recovery.reconciliations);
+    if (recovery.step) pushStep(recovery.step);
   }
 
   // ── Derive position status from per-leg fills ───────────────────────────────
   const filledFlags = results.map((r) => r.filledContracts > 0);
-  const fullyFilled = results.every((r, i) => r.filledContracts + 1e-9 >= requests[i].sizeContracts);
+  const minFilledContracts = Math.min(...results.map((r) => r.filledContracts));
+  const maxFilledContracts = Math.max(...results.map((r) => r.filledContracts));
+  const fillImbalanceContracts = maxFilledContracts - minFilledContracts;
+  const balanced = fillImbalanceContracts <= 0.01 + 1e-9;
+  const fullyFilled = balanced && results.every((r, i) => r.filledContracts + 1e-9 >= requests[i].sizeContracts);
   const anyFilled = filledFlags.some(Boolean);
   const allFilled = filledFlags.every(Boolean);
+  const anyPending = results.some((r) => r.status === "pending");
 
   let status: Trade["status"];
   let fillStatus: Trade["fillStatus"];
@@ -494,18 +1015,31 @@ async function runExecutionUnlocked(
     fillStatus = "filled";
     result = "executed";
     reason = mode === "live" ? "Both legs filled (live)" : "Both legs filled (dry-run)";
-  } else if (allFilled) {
+  } else if (anyPending) {
+    status = "partial";
+    fillStatus = "partial";
+    result = "partial";
+    reason = "Venue accepted an order, but final fill confirmation is still pending";
+  } else if (allFilled && balanced) {
     status = "partial";
     fillStatus = "partial";
     result = "partial";
     reason = "Partial fill — reduced size";
+  } else if (allFilled && fillImbalanceContracts < 0.1) {
+    status = "partial";
+    fillStatus = "partial";
+    result = "partial";
+    reason = `Both legs filled with a ${fillImbalanceContracts.toFixed(4)}-contract residual below venue minimum order size`;
   } else if (anyFilled) {
     status = "naked";
     fillStatus = "partial";
     result = "naked";
     reasonCode = "naked_position";
     reason = "One leg filled, the hedge did not — unhedged exposure";
-    nakedLegIndex = filledFlags.findIndex(Boolean);
+    reason = allFilled
+      ? `Leg fills remain imbalanced by ${fillImbalanceContracts.toFixed(2)} contracts - unhedged exposure`
+      : reason;
+    nakedLegIndex = results.findIndex((r) => r.filledContracts === maxFilledContracts);
   } else {
     // Nothing filled — treat as a hedge failure with no exposure.
     status = "failed";
@@ -514,7 +1048,7 @@ async function runExecutionUnlocked(
     reasonCode = "hedge_failed";
     reason = results.find((r) => r.error)?.error ?? "No legs filled";
   }
-  executionSteps.push({
+  pushStep({
     key: "execute",
     label: "Leg execution",
     status: result === "executed" ? "pass" : result === "partial" ? "warn" : "halt",
@@ -560,6 +1094,7 @@ async function runExecutionUnlocked(
           date,
           nakedLegIndex,
           executionSteps,
+          detectedAt,
         };
 
   const postFill = trade ? await verifyPostFill(ctx.opportunityId, date, ctx.netAfter) : undefined;
@@ -572,6 +1107,7 @@ async function runExecutionUnlocked(
         label: "Post-fill verification",
         status: postFill?.status === "edge_intact" ? "warn" : postFill?.status === "arb_gone" ? "pass" : "info",
         detail: postFill?.reason,
+        tookMs: Date.now() - pipelineStartMs,
       },
     ];
     await saveTrade(trade);
@@ -590,7 +1126,14 @@ async function runExecutionUnlocked(
       tradeId: trade?.id ?? null,
       opportunityId: ctx.opportunityId,
       pipelineSteps: trade?.executionSteps ?? executionSteps,
-      orders: results.map((r, i) => ({ venue: ctx.executedLegs[i].venueId, orderId: r.orderId, status: r.status, filled: r.filledContracts, error: r.error })),
+      orders: results.map((r, i) => ({
+        venue: ctx.executedLegs[i].venueId,
+        orderId: r.orderId,
+        confirmationId: r.confirmationId,
+        status: r.status,
+        filled: r.filledContracts,
+        error: r.error,
+      })),
       reconciliation: reconciliation.length
         ? reconciliation.map((rc) => ({ venue: rc.venue, orderId: rc.orderId, settlement: rc.confirmation?.status ?? "n/a" }))
         : undefined,

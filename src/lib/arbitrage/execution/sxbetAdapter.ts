@@ -178,6 +178,7 @@ export async function quoteSxOrder(req: OrderRequest): Promise<ExecutableOrderQu
       priceCents: worstPriceCents,
       averagePriceCents: cost / availableContracts,
       availableContracts,
+      levels,
       reason: availableContracts + 1e-9 >= req.sizeContracts ? undefined : `SX.bet executable depth ${availableContracts.toFixed(2)} < ${req.sizeContracts}`,
     };
   } catch (e) {

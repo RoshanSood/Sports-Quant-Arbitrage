@@ -3,7 +3,7 @@
 // (Kalshi ticker / Polymarket tokenId / SX marketHash) rides on the OrderRequest —
 // live adapters refuse to place an order without it.
 
-export type OrderFillStatus = "filled" | "partial" | "unfilled" | "rejected";
+export type OrderFillStatus = "pending" | "filled" | "partial" | "unfilled" | "rejected";
 
 export type OrderRequest = {
   venueId: string;
@@ -19,6 +19,8 @@ export type OrderRequest = {
 export type OrderResult = {
   ok: boolean;
   orderId: string | null;
+  // Some venues acknowledge with a display/API id but require a hash for confirmation.
+  confirmationId?: string | null;
   filledContracts: number;
   avgPriceCents: number;
   status: OrderFillStatus;
@@ -34,6 +36,10 @@ export type ExecutableOrderQuote = {
   priceCents: number; // worst price required to fill availableContracts
   averagePriceCents: number;
   availableContracts: number;
+  // Fresh executable ask levels, cheapest first. Keeping the ladder lets the executor
+  // optimize price and common contract count without making another network request for
+  // every possible size. Venues that only expose top-of-book return one level.
+  levels?: Array<{ priceCents: number; contracts: number }>;
   reason?: string;
 };
 
@@ -43,6 +49,8 @@ export type ExecutableOrderQuote = {
 export type FillConfirmation = {
   status: "settled" | "pending" | "failed" | "unknown";
   filledContracts?: number;
+  avgPriceCents?: number;
+  error?: string;
 };
 
 export interface ExecutionAdapter {
@@ -54,6 +62,6 @@ export interface ExecutionAdapter {
   quoteOrder?(req: OrderRequest): Promise<ExecutableOrderQuote>;
   placeOrder(req: OrderRequest): Promise<OrderResult>;
   // Optional: re-query the venue to confirm an order actually settled. Absent ⇒ the
-  // placement result is treated as authoritative (e.g. Kalshi IOC, Polymarket FOK).
+  // placement result is treated as authoritative (currently Kalshi IOC).
   confirmFill?(orderId: string, req: OrderRequest): Promise<FillConfirmation>;
 }

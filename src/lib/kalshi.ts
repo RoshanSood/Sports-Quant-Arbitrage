@@ -530,7 +530,7 @@ export async function fetchKalshiMoneylineByGame(
 // would silently fold the tie's probability into whichever side we didn't have a direct
 // quote for). yesSide is left undefined here to signal "read every outcome's own ticker" —
 // see nativeSideFor / normalizeVenueTwoWay in ingest.ts.
-export async function fetchKalshiF5MoneylineByGame(
+export async function fetchKalshiThreeWayMoneylineByGame(
   games: ArbGame[],
   series: string = MLB_F5_GAME_SERIES
 ): Promise<Map<string, VenueTwoWay>> {
@@ -554,7 +554,7 @@ export async function fetchKalshiF5MoneylineByGame(
       else if (side === "away") awayM ??= m;
       else if (!tieM && /\btie\b/i.test(m.yes_sub_title ?? m.title ?? "")) tieM = m;
     }
-    if (!homeM || !awayM) continue; // need both teams priced to hedge; tie is optional
+    if (!homeM || !awayM || !tieM) continue; // unsafe unless every 1X2 outcome is priced
 
     const readOwnAsk = (m: KalshiMarket) => {
       const { ask } = readBidAsk(m);
@@ -565,7 +565,8 @@ export async function fetchKalshiF5MoneylineByGame(
     const home = readOwnAsk(homeM);
     const away = readOwnAsk(awayM);
     if (!home || !away) continue;
-    const tie = tieM ? readOwnAsk(tieM) : null;
+    const tie = readOwnAsk(tieM);
+    if (!tie) continue;
 
     result.set(game.id, {
       homeCents: home.askCents,
@@ -575,13 +576,20 @@ export async function fetchKalshiF5MoneylineByGame(
       marketId: homeM.ticker,
       homeTokenId: homeM.ticker,
       awayTokenId: awayM.ticker,
-      ...(tie ? { drawCents: tie.askCents, drawLiquidityUsd: tie.usd, drawTokenId: tieM!.ticker } : {}),
+      drawCents: tie.askCents,
+      drawLiquidityUsd: tie.usd,
+      drawTokenId: tieM.ticker,
       sourceStartTime: kalshiTickerIsoDate(homeM.ticker) ?? undefined,
     });
   }
 
   return result;
 }
+
+// Backward-compatible name for MLB F5 callers. Soccer 1X2 leagues use the generic
+// three-way function above because their home/away/draw outcomes have the same native
+// Kalshi shape: one independent YES ticker per possible result.
+export const fetchKalshiF5MoneylineByGame = fetchKalshiThreeWayMoneylineByGame;
 
 // Kalshi tennis match winner (KXWTAMATCH / KXATPMATCH): TWO INDEPENDENT per-player
 // tickers, mutually exclusive — the SAME shape as fetchKalshiF5MoneylineByGame (read each

@@ -253,6 +253,18 @@ class PolymarketLiveBook {
     return depthAtOrBetter(side === "ask" ? lv.asks : lv.bids, side, limitPriceCents);
   }
 
+  // Full ask ladder (price ascending), or null if we have no ladder for this token / it's
+  // gone stale. Same {priceCents, contracts} shape as kalshiLiveBook's getAskLevels, so
+  // callers can treat both venues' live ladders uniformly.
+  getAskLevels(tokenId: string): Array<{ priceCents: number; contracts: number }> | null {
+    const lv = this.levels.get(tokenId);
+    if (!lv || Date.now() - lv.updatedAt > LIVE_QUOTE_STALE_MS) return null;
+    return lv.asks
+      .filter((l) => l.priceCents > 0 && l.priceCents < 100 && l.size > 0)
+      .map((l) => ({ priceCents: l.priceCents, contracts: l.size }))
+      .sort((a, b) => a.priceCents - b.priceCents);
+  }
+
   status(): { connected: boolean; subscribedCount: number; quoteCount: number; connectCount: number } {
     return {
       connected: this.ws?.readyState === WebSocket.OPEN,
