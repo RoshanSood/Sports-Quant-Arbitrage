@@ -12,7 +12,7 @@
 // status) as this codebase's existing REST order-book reader (sxbet.ts's SxOrder/bestPrices),
 // so we reuse that odds math instead of re-deriving SX's unusual encoding a second time.
 
-import { Centrifuge } from "centrifuge";
+import { Centrifuge, UnauthorizedError } from "centrifuge";
 import WS from "ws";
 
 export type LiveQuote = { o1AskCents: number | null; o2AskCents: number | null; updatedAt: number };
@@ -55,13 +55,49 @@ function bestAsksFromOrders(orders: Map<string, RawOrder>): { o1AskCents: number
 }
 
 export const LIVE_QUOTE_STALE_MS = 15_000;
+const DEFAULT_TOKEN_RATE_LIMIT_COOLDOWN_MS = 15_000;
+let tokenCooldownUntil = 0;
+let tokenFetchInFlight: Promise<string> | null = null;
+
+function retryAfterMs(response: Response, now = Date.now()): number {
+  const value = response.headers.get("retry-after")?.trim();
+  if (!value) return DEFAULT_TOKEN_RATE_LIMIT_COOLDOWN_MS;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  const date = Date.parse(value);
+  return Number.isFinite(date) ? Math.max(0, date - now) : DEFAULT_TOKEN_RATE_LIMIT_COOLDOWN_MS;
+}
+
+function delay(ms: number): Promise<void> {
+  return ms > 0 ? new Promise((resolve) => setTimeout(resolve, ms)) : Promise.resolve();
+}
 
 async function fetchToken(apiKey: string): Promise<string> {
-  const res = await fetch(TOKEN_URL, { headers: { "x-api-key": apiKey }, cache: "no-store" });
-  if (!res.ok) throw new Error(`SX realtime token fetch failed: ${res.status}`);
-  const data = (await res.json()) as { token?: string };
-  if (!data.token) throw new Error("SX realtime token response missing token");
-  return data.token;
+  if (tokenFetchInFlight) return tokenFetchInFlight;
+  const request = (async () => {
+    await delay(Math.max(0, tokenCooldownUntil - Date.now()));
+    const res = await fetch(TOKEN_URL, { headers: { "x-api-key": apiKey }, cache: "no-store" });
+    if (res.status === 401 || res.status === 403) {
+      // Centrifuge treats UnauthorizedError as terminal instead of repeatedly retrying a
+      // bad/revoked key forever.
+      throw new UnauthorizedError(`SX realtime token rejected: ${res.status}`);
+    }
+    if (res.status === 429) {
+      const cooldownMs = retryAfterMs(res);
+      tokenCooldownUntil = Math.max(tokenCooldownUntil, Date.now() + cooldownMs);
+      throw new Error(`SX realtime token rate-limited: retrying after ${Math.ceil(cooldownMs / 1000)}s`);
+    }
+    if (!res.ok) throw new Error(`SX realtime token fetch failed: ${res.status}`);
+    const data = (await res.json()) as { token?: string };
+    if (!data.token) throw new Error("SX realtime token response missing token");
+    return data.token;
+  })();
+  tokenFetchInFlight = request;
+  try {
+    return await request;
+  } finally {
+    if (tokenFetchInFlight === request) tokenFetchInFlight = null;
+  }
 }
 
 export class SxBetLiveBook {
@@ -175,4 +211,9 @@ export class SxBetLiveBook {
 export const sxbetLiveBook = new SxBetLiveBook();
 
 // Exported for testing — pure, no I/O.
-export { bestAsksFromOrders };
+export function resetSxTokenStateForTests(): void {
+  tokenCooldownUntil = 0;
+  tokenFetchInFlight = null;
+}
+
+export { bestAsksFromOrders, fetchToken, retryAfterMs };

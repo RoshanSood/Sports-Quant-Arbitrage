@@ -5,7 +5,7 @@ import type { ArbLeg, FeeBreakdown, VenueId } from "@/types/arbitrage";
 import { centsToDollars } from "./arbMath";
 
 export const KALSHI_FEE_TIER = 0.07; // default 7% tier
-export const POLYMARKET_SPORTS_FEE = 0.0075; // 0.75% sports taker fee
+export const POLYMARKET_SPORTS_FEE = 0.03; // fee-enabled sports taker rate
 export const SXBET_TAKER_FEE = 0; // SX.bet charges no taker commission on fills (configurable)
 
 // Kalshi: fee = tier * P * (1 - P), where P is the contract probability (0-1).
@@ -15,9 +15,12 @@ export function kalshiFeePerContract(prob: number, tier = KALSHI_FEE_TIER): numb
   return round(tier * p * (1 - p), 6);
 }
 
-// Polymarket: flat category taker fee on notional (dollars).
-export function polymarketFee(notional: number, rate = POLYMARKET_SPORTS_FEE): number {
-  return round(Math.max(0, notional) * rate, 4);
+// Polymarket fee-enabled markets use C * rate * p * (1-p), where C is the
+// contract count and p is the execution price as a probability. Market-level
+// fee metadata remains the authority for whether this estimate applies.
+export function polymarketFee(contracts: number, prob: number, rate = POLYMARKET_SPORTS_FEE): number {
+  const p = clamp01(prob);
+  return round(Math.max(0, contracts) * rate * p * (1 - p), 6);
 }
 
 // Compute a per-leg fee breakdown. Contract sizes come from the stake plan; if a
@@ -42,12 +45,12 @@ export function computeFees(legs: ArbLeg[]): FeeBreakdown[] {
     const isPoly = leg.venueId.toLowerCase().includes("poly");
     const notional = centsToDollars(leg.priceCents) * contracts;
     if (isPoly) {
-      const feeDollars = polymarketFee(notional);
+      const feeDollars = polymarketFee(contracts, prob);
       return {
         venueId: leg.venueId,
         feeCents: round(feeDollars * 100, 4),
         feeRate: POLYMARKET_SPORTS_FEE,
-        model: "polymarket_flat" as const,
+        model: "polymarket_curve" as const,
       };
     }
 

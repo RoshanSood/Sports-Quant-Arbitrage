@@ -122,7 +122,7 @@ export default function ArbitrageClient() {
   // a live (in-progress) game emit an event.
   useEffect(() => {
     let cancelled = false;
-    const sportTag = (s: string) => (s === "baseball" ? "[MLB]" : s === "basketball" ? "[WNBA]" : s === "soccer" ? "[SOC]" : "[SCORE]");
+    const sportTag = (s: string) => (s === "baseball" ? "[MLB]" : s === "basketball" ? "[WNBA]" : s === "football" ? "[NFL]" : s === "soccer" ? "[SOC]" : "[SCORE]");
     const quarterLabel = (p: number) => (p <= 4 ? `Q${p}` : p === 5 ? "OT" : `OT${p - 4}`);
     async function poll() {
       const data = (await fetch("/api/arbitrage/scores").then((r) => r.json()).catch(() => null)) as { scores?: GameScore[] } | null;

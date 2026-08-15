@@ -327,6 +327,22 @@ Live orders fail closed. A real trade only fires when all of these are true:
 
 If any check fails, the app reports the blocker instead of silently sending an unsafe order.
 
+Live baskets also require a durable atomic reservation in `data/arbitrage/risk-ledger.sqlite`.
+The reservation transaction applies the Risk tab's per-match limit, global exposure cap,
+and optional per-venue caps across processes before any venue request is sent. Reservations
+that reached submission remain exposure-blocking when a response is pending, a worker
+crashes, or a basket becomes naked; they are released only after a confirmed zero-fill or
+the linked trade reaches a terminal state. The original process-wide execution lock remains
+enabled during the dual-control rollout and must not be removed until live canary auditing
+has verified that every venue order is linked to exactly one reservation.
+
+Each reservation persists its exact executable leg plan, deterministic client order IDs,
+submission/acknowledgement timestamps, returned venue order IDs, and immutable lifecycle
+events. `GET /api/arbitrage/risk-reservations` exposes this local audit record. Starting the
+scanner also performs read-only restart reconciliation; it never resubmits an ambiguous
+order and frees capacity only when every leg is positively confirmed as a terminal zero-fill.
+`POST /api/arbitrage/risk-reservations` can run the same read-only reconciliation manually.
+
 Naked positions are recorded and surfaced for review, but they do not pause the scanner or stop subsequent opportunities from executing.
 
 Validate each venue with a very small trade before increasing size.
@@ -342,7 +358,7 @@ Validate each venue with a very small trade before increasing size.
 - ethers v6
 - Polymarket CLOB clients
 - Vitest
-- Local JSON persistence under `data/`
+- Local JSON persistence under `data/`, plus a SQLite WAL risk ledger for atomic live reservations
 
 This repo pins a modified build of Next.js. See `AGENTS.md` before changing Next.js-specific code.
 

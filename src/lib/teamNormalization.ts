@@ -156,14 +156,44 @@ export const TEAM_ALIASES: Record<string, string> = {
   "chicago w": "chicago white sox",
 };
 
+const NFL_TEAM_ROWS = [
+  ["arizona cardinals", "cardinals", "ari"], ["atlanta falcons", "falcons", "atl"],
+  ["baltimore ravens", "ravens", "bal"], ["buffalo bills", "bills", "buf"],
+  ["carolina panthers", "panthers", "car"], ["chicago bears", "bears", "chi"],
+  ["cincinnati bengals", "bengals", "cin"], ["cleveland browns", "browns", "cle"],
+  ["dallas cowboys", "cowboys", "dal"], ["denver broncos", "broncos", "den"],
+  ["detroit lions", "lions", "det"], ["green bay packers", "packers", "gb"],
+  ["houston texans", "texans", "hou"], ["indianapolis colts", "colts", "ind"],
+  ["jacksonville jaguars", "jaguars", "jax"], ["kansas city chiefs", "chiefs", "kc"],
+  ["las vegas raiders", "raiders", "lv"], ["los angeles chargers", "chargers", "lac"],
+  ["los angeles rams", "rams", "lar"], ["miami dolphins", "dolphins", "mia"],
+  ["minnesota vikings", "vikings", "min"], ["new england patriots", "patriots", "ne"],
+  ["new orleans saints", "saints", "no"], ["new york giants", "giants", "nyg"],
+  ["new york jets", "jets", "nyj"], ["philadelphia eagles", "eagles", "phi"],
+  ["pittsburgh steelers", "steelers", "pit"], ["san francisco 49ers", "49ers", "sf"],
+  ["seattle seahawks", "seahawks", "sea"], ["tampa bay buccaneers", "buccaneers", "tb"],
+  ["tennessee titans", "titans", "ten"], ["washington commanders", "commanders", "was"],
+] as const;
+
+export const NFL_TEAM_ALIASES: Record<string, string> = Object.fromEntries(
+  NFL_TEAM_ROWS.flatMap(([canonical, nickname, abbreviation]) => [
+    [canonical, canonical],
+    [nickname, canonical],
+    [abbreviation, canonical],
+  ])
+);
+
 // Returns the canonical full name for a SINGLE team name/abbreviation.
 // NEVER pass a full event title (e.g. "Angels vs. Blue Jays") — that will match the wrong team.
-export function normalizeTeamName(name: string): string {
-  const lower = name.toLowerCase().trim();
+export function normalizeTeamName(name: string, sport?: string): string {
+  const lower = name.toLowerCase().replace(/\s+/g, " ").trim();
+  if (sport === "football") return NFL_TEAM_ALIASES[lower] ?? lower;
   if (TEAM_ALIASES[lower]) return TEAM_ALIASES[lower];
-  for (const [alias, canonical] of Object.entries(TEAM_ALIASES)) {
-    if (lower.includes(alias)) return canonical;
-  }
+  // `name` is a single team label, not an event title. Do not use substring aliases
+  // here: city-only MLB aliases such as "miami", "washington", "arizona" and
+  // "pittsburgh" also occur in NFL team names. Substring matching turned
+  // "Miami Dolphins" into "Miami Marlins" and inverted venue outcome tokens.
+  // Decorated venue/event titles are handled separately by teamMatchesTitle().
   return lower;
 }
 
@@ -183,23 +213,87 @@ export function teamMatchesTitle(
   // Short name (e.g. "Angels")
   if (lower.includes(espnShortName.toLowerCase())) return true;
 
+  // Some Kalshi team labels use only the location ("Green Bay") or the location
+  // plus a nickname initial ("Los Angeles C"). Restrict this to the entire label so
+  // same-city teams do not both match a longer event title.
+  const full = espnName.toLowerCase().trim();
+  const short = espnShortName.toLowerCase().trim();
+  const location = full.endsWith(` ${short}`) ? full.slice(0, -(short.length + 1)) : "";
+  const normalizedLabel = lower.replace(/[^a-z0-9]+/g, " ").trim();
+  if (location && (
+    normalizedLabel === location ||
+    normalizedLabel === `${location} ${short.charAt(0)}`
+  )) return true;
+
   // All known aliases for this team's canonical name
   const canonical = normalizeTeamName(espnName);
   for (const [alias, can] of Object.entries(TEAM_ALIASES)) {
     if (can === canonical && lower.includes(alias)) return true;
   }
 
-  // Abbreviation check (3+ chars, e.g. "NYM", "LAD" in "NYM vs LAD" sub-titles)
-  if (espnAbbr.length >= 3 && lower.includes(espnAbbr.toLowerCase())) return true;
+  // Token-bounded abbreviation check. NFL uses two-letter abbreviations such as GB,
+  // NE, LV, and SF, which are safe here only as complete tokens (never substrings).
+  const abbr = espnAbbr.toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (abbr.length >= 2) {
+    const escaped = abbr.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (new RegExp(`(^|[^a-z0-9])${escaped}([^a-z0-9]|$)`).test(lower)) return true;
+  }
 
   return false;
 }
 
 // Legacy helper kept for backward compatibility in other modules (spread/moneyline labeling)
 export function teamsMatch(name1: string, name2: string): boolean {
+  // Prefer the literal single-team labels before consulting league aliases. This makes
+  // "Dolphins" match "Miami Dolphins", "Cardinals" match "Arizona Cardinals", and
+  // "Giants" match "New York Giants" without allowing MLB canonicalization to steal
+  // those NFL nicknames.
+  const raw1 = name1.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const raw2 = name2.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  if (raw1 && raw2 && (raw1 === raw2 || raw1.includes(raw2) || raw2.includes(raw1))) return true;
   const n1 = normalizeTeamName(name1);
   const n2 = normalizeTeamName(name2);
   if (n1 === n2) return true;
   if (n1.includes(n2) || n2.includes(n1)) return true;
   return false;
+}
+
+export type TeamIdentity = {
+  name: string;
+  shortName: string;
+  abbreviation: string;
+};
+
+// Match a single venue outcome label to one canonical fixture team. This is deliberately
+// separate from title matching: outcome labels must identify exactly one side, so an
+// ambiguous or unknown label must fail closed instead of being assigned to "the other"
+// team by elimination.
+export function teamLabelMatches(label: string, team: TeamIdentity): boolean {
+  if (teamsMatch(label, team.name) || teamsMatch(label, team.shortName)) return true;
+  const normalizedLabel = label.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const abbr = team.abbreviation.toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (abbr.length < 2) return false;
+  const escaped = abbr.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^|\\s)${escaped}(\\s|$)`).test(normalizedLabel);
+}
+
+export type TwoWayTeamOrder = "away_home" | "home_away";
+
+// Resolve the native outcome order only when both labels independently identify opposite
+// fixture teams. Callers must drop the market on null; guessing the second side is what
+// created the Dolphins/Commanders same-outcome "arb".
+export function resolveTwoWayTeamOrder(
+  labels: readonly string[],
+  away: TeamIdentity,
+  home: TeamIdentity
+): TwoWayTeamOrder | null {
+  if (labels.length < 2) return null;
+  const [first, second] = labels;
+  const firstAway = teamLabelMatches(first, away);
+  const firstHome = teamLabelMatches(first, home);
+  const secondAway = teamLabelMatches(second, away);
+  const secondHome = teamLabelMatches(second, home);
+  if (firstAway && !firstHome && secondHome && !secondAway) return "away_home";
+  if (firstHome && !firstAway && secondAway && !secondHome) return "home_away";
+  return null;
 }

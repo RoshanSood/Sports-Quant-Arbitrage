@@ -5,6 +5,7 @@
 
 import {
   fetchKalshiF5MoneylineByGame,
+  fetchKalshiIndependentMoneylineByGame,
   fetchKalshiMoneylineByGame,
   fetchKalshiPlayerMatchByGame,
   fetchKalshiSpreadByGame,
@@ -31,6 +32,7 @@ import { fetchCloudbetMoneylineByGame, fetchCloudbetSpreadByGame, fetchCloudbetT
 import { fetchSxBetMLBMarkets, fetchSxBetMoneylineByGame, fetchSxBetTotalsByGame, type SxBetMarkets } from "@/lib/sxbet";
 import type { MarketSegment, MarketType, NormalizedMarket, Outcome, Sport, VenueId } from "@/types/arbitrage";
 import { decimalOddsFromCents, impliedProbFromCents } from "./arbMath";
+import { fillAskLevels } from "./executableBook";
 import { buildEventKey } from "./matching";
 import { getMarkets, saveMarkets, setRunning } from "./marketStore";
 import { SPORTS, type ArbGame, type SportConfig } from "./sports";
@@ -109,7 +111,8 @@ function nativeSideFor(
 // different, unrelated venue with no socket feed here. Returns null (use REST) otherwise.
 function livePolymarketAskCents(venueId: VenueId, nativeSide: string | undefined): number | null {
   if (venueId !== "polymarket" || !nativeSide || polymarketRegion() === "us") return null;
-  return polymarketLiveBook.getQuote(nativeSide)?.bestAskCents ?? null;
+  const levels = polymarketLiveBook.getAskLevels(nativeSide);
+  return levels ? fillAskLevels(levels, 1)?.worstPriceCents ?? null : null;
 }
 
 // Same idea for Kalshi (kalshiLiveBook.ts) — keyed by ticker (nativeMarketId) + yes/no side
@@ -118,9 +121,8 @@ function livePolymarketAskCents(venueId: VenueId, nativeSide: string | undefined
 // live, so this can never surface a wrong price, only fail to speed one up.
 function liveKalshiAskCents(venueId: VenueId, nativeMarketId: string | undefined, nativeSide: string | undefined): number | null {
   if (venueId !== "kalshi" || !nativeMarketId) return null;
-  const q = kalshiLiveBook.getQuote(nativeMarketId);
-  if (!q) return null;
-  return nativeSide === "no" ? q.noAskCents : q.yesAskCents;
+  const levels = kalshiLiveBook.getAskLevels(nativeMarketId, nativeSide === "no" ? "no" : "yes");
+  return levels ? fillAskLevels(levels, 1)?.worstPriceCents ?? null : null;
 }
 
 // Same idea for SX.bet (sxbetLiveBook.ts, Centrifugo) — keyed by market hash + outcome
@@ -298,6 +300,8 @@ async function ingestSportMarkets(
           ? withFetchedAt(
               cfg.kalshi.threeWay
                 ? fetchKalshiThreeWayMoneylineByGame(games, cfg.kalshi.game)
+                : cfg.kalshi.independentOutcomes
+                  ? fetchKalshiIndependentMoneylineByGame(games, cfg.kalshi.game)
                 : cfg.sport === "tennis"
                   ? fetchKalshiPlayerMatchByGame(games, cfg.kalshi.game)
                   : fetchKalshiMoneylineByGame(games, cfg.kalshi.game),

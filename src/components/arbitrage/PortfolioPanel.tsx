@@ -288,10 +288,10 @@ export default function PortfolioPanel({
                   <LegColumn leg={b} />
                   {/* TOTAL */}
                   <td className="py-3 pr-3 text-gray-200 font-semibold">{formatDollars(t.totalCost)}</td>
-                  {/* EDGE + net $ */}
+                  {/* GUARANTEED EDGE + PROFIT */}
                   <td className="py-3 pr-3">
                     <div>
-                      <span className="text-[10px] text-gray-500 mr-1">NET</span>
+                      <span className="text-[10px] text-gray-500 mr-1">GUAR.</span>
                       <span className="text-emerald-400 font-semibold">{formatEdgePct(t.netEdge)}</span>
                     </div>
                     <div className="text-[10px] text-gray-500">{formatDollars(t.expectedProfit)}</div>

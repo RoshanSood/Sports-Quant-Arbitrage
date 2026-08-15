@@ -2,18 +2,23 @@ import { describe, expect, it } from "vitest";
 import type { ArbLeg } from "@/types/arbitrage";
 import {
   applyEconomicPriceCushion,
+  applyVenueAwarePriceCushion,
   buildLiveOnlyQuotes,
   fragileVenueFirstOrder,
   commonExecutableRequests,
   checkLiveFillability,
+  confirmPendingAnchor,
   liveVenueMinimumStakeBlockers,
   optimizeExecutableBasket,
+  isPolymarketKalshiPair,
   recoverMissingHedge,
   recoveryPathBlockers,
+  resizeHedgeToAnchorFill,
   shouldSequenceFragileVenuePair,
 } from "./executor";
 import type { PreparedContext } from "../executionPipeline";
 import type { ExecutionAdapter, OrderRequest, OrderResult } from "./types";
+import { RiskReservationService, type AcquireRiskReservationInput } from "./riskReservation";
 
 function leg(venueId: string, size: number, priceCents: number): ArbLeg {
   return {
@@ -143,6 +148,61 @@ describe("automatic missing-hedge recovery", () => {
     expect(result.results[1].orderId).toBe("third-attempt");
   });
 
+  it("persists unique recovery ids and submits only the remaining imbalance", async () => {
+    const ledger = new RiskReservationService(":memory:");
+    try {
+      const input: AcquireRiskReservationInput = {
+        opportunityId: "baseball:mlb:a|b:2026-08-10T00:00:00.000Z:moneyline:0",
+        idempotencyKey: "durable-recovery:generation",
+        quoteGeneration: "generation",
+        matchKey: "baseball:mlb:a|b:2026-08-10T00:00:00.000Z",
+        date: "20260810",
+        ownerId: "worker",
+        exposureUsd: 6,
+        venueExposureUsd: { polymarket: 3, kalshi: 3 },
+        maxExposureUsd: 100,
+        maxOpenPositionsPerMatch: 1,
+        perVenueCapsUsd: {},
+        existingOpenPositions: [],
+        legs: [
+          { venueId: "polymarket", marketId: "p", outcome: "home", sizeContracts: 6, limitPriceCents: 65 },
+          { venueId: "kalshi", marketId: "k", nativeMarketId: "K", nativeSide: "no", outcome: "away", sizeContracts: 6, limitPriceCents: 30 },
+        ],
+      };
+      const acquired = ledger.acquire(input);
+      expect(acquired.ok).toBe(true);
+      if (!acquired.ok) return;
+      expect(ledger.beginSubmission(acquired.reservation)).toBe(true);
+      for (const legPlan of acquired.reservation.legs) expect(ledger.markLegSubmitting(acquired.reservation, legPlan.index)).toBe(true);
+      expect(ledger.recordLegResult(acquired.reservation, 0, filled)).toBe(true);
+      expect(ledger.recordLegResult(acquired.reservation, 1, missed)).toBe(true);
+
+      const submitted: OrderRequest[] = [];
+      const adapter = recoveryAdapter("kalshi", { priceCents: 31, availableContracts: 20 }, missed);
+      adapter.placeOrder = async (request) => {
+        submitted.push({ ...request });
+        return submitted.length === 1
+          ? { ...missed, orderId: "recovery-zero" }
+          : { ok: true, orderId: "recovery-fill", filledContracts: request.sizeContracts, avgPriceCents: 31, status: "filled" };
+      };
+      const result = await recoverMissingHedge(
+        recoveryContext(),
+        [recoveryAdapter("polymarket", { priceCents: 65, availableContracts: 20 }, filled), adapter],
+        requests.map((request, index) => ({ ...request, clientOrderId: acquired.reservation.legs[index].clientOrderId })),
+        [filled, missed],
+        { reservation: acquired.reservation, service: ledger }
+      );
+      expect(submitted).toHaveLength(2);
+      expect(new Set(submitted.map((request) => request.clientOrderId)).size).toBe(2);
+      expect(submitted.every((request) => request.clientOrderId !== acquired.reservation.legs[1].clientOrderId)).toBe(true);
+      expect(submitted.map((request) => request.sizeContracts)).toEqual([6, 6]);
+      expect(result.results[1]).toMatchObject({ filledContracts: 6, status: "filled" });
+      expect(ledger.get(acquired.reservation.id)?.recoveryAttempts).toHaveLength(2);
+    } finally {
+      ledger.close();
+    }
+  });
+
   it("never duplicates an accepted recovery order whose confirmation is pending", async () => {
     let placements = 0;
     const adapter = recoveryAdapter("kalshi", { priceCents: 31, availableContracts: 20 }, missed);
@@ -253,6 +313,96 @@ describe("economics-safe initial price cushions", () => {
   });
 });
 
+describe("Polymarket-first Kalshi hedge cushion", () => {
+  it("keeps the Polymarket FOK limit fixed and gives the movement allowance to Kalshi", () => {
+    const requests: OrderRequest[] = [
+      { venueId: "kalshi", marketId: "k", outcome: "away", sizeContracts: 6, limitPriceCents: 45 },
+      { venueId: "polymarket", marketId: "p", outcome: "home", sizeContracts: 6, limitPriceCents: 45 },
+    ];
+    const result = applyVenueAwarePriceCushion(
+      requests,
+      [leg("kalshi", 6, 45), leg("polymarket", 6, 45)],
+      0.03,
+      10
+    );
+
+    expect(result.safe).toBe(true);
+    expect(result.cushionCents).toBeGreaterThan(0);
+    expect(result.requests[1].limitPriceCents).toBe(45);
+    expect(result.requests[0].limitPriceCents).toBe(45 + result.cushionCents);
+  });
+
+  it("retains shared cushioning for pairings that still submit concurrently", () => {
+    const requests: OrderRequest[] = [
+      { venueId: "predictfun", marketId: "p", outcome: "home", sizeContracts: 6, limitPriceCents: 45 },
+      { venueId: "kalshi", marketId: "k", outcome: "away", sizeContracts: 6, limitPriceCents: 45 },
+    ];
+    const result = applyVenueAwarePriceCushion(
+      requests,
+      [leg("predictfun", 6, 45), leg("kalshi", 6, 45)],
+      0.03,
+      10
+    );
+
+    expect(result.requests[0].limitPriceCents).toBe(result.requests[1].limitPriceCents);
+  });
+});
+
+describe("Polymarket pending-anchor confirmation", () => {
+  const request: OrderRequest = {
+    venueId: "polymarket",
+    marketId: "polymarket:m",
+    outcome: "home",
+    sizeContracts: 6,
+    limitPriceCents: 45,
+  };
+  const pending: OrderResult = {
+    ok: true,
+    orderId: "poly-order",
+    filledContracts: 0,
+    avgPriceCents: 45,
+    status: "pending",
+  };
+
+  function adapter(confirmations: Array<Awaited<ReturnType<NonNullable<ExecutionAdapter["confirmFill"]>>>>): ExecutionAdapter {
+    let index = 0;
+    return {
+      id: "polymarket",
+      supportsLive: () => true,
+      getBalanceUsd: async () => null,
+      placeOrder: async () => pending,
+      confirmFill: async () => confirmations[Math.min(index++, confirmations.length - 1)],
+    };
+  }
+
+  it("turns a delayed acknowledgement into the confirmed fill used for the hedge", async () => {
+    const confirmed = await confirmPendingAnchor(adapter([
+      { status: "pending" },
+      { status: "settled", filledContracts: 6, avgPriceCents: 44 },
+    ]), request, pending, { attempts: 2, delayMs: 0 });
+
+    expect(confirmed.result).toMatchObject({ ok: true, status: "filled", filledContracts: 6, avgPriceCents: 44 });
+  });
+
+  it("retries a transient unknown confirmation instead of withholding the hedge immediately", async () => {
+    const confirmed = await confirmPendingAnchor(adapter([
+      { status: "unknown" },
+      { status: "settled", filledContracts: 6, avgPriceCents: 44 },
+    ]), request, pending, { attempts: 2, delayMs: 0 });
+    expect(confirmed.result).toMatchObject({ status: "filled", filledContracts: 6 });
+  });
+
+  it("preserves an unresolved acknowledgement as pending instead of inventing a zero fill", async () => {
+    const unresolved = await confirmPendingAnchor(adapter([{ status: "pending" }]), request, pending, { attempts: 2, delayMs: 0 });
+    expect(unresolved.result).toMatchObject({ ok: true, status: "pending", filledContracts: 0, orderId: "poly-order" });
+  });
+
+  it("returns an explicit failed confirmation as terminal zero fill", async () => {
+    const failed = await confirmPendingAnchor(adapter([{ status: "failed", filledContracts: 0, error: "not matched" }]), request, pending, { attempts: 1, delayMs: 0 });
+    expect(failed.result).toMatchObject({ ok: false, status: "unfilled", filledContracts: 0, error: "not matched" });
+  });
+});
+
 describe("pre-submission emergency hedge paths", () => {
   const requests: OrderRequest[] = [
     { venueId: "predictfun", marketId: "p", outcome: "home", sizeContracts: 6, limitPriceCents: 22 },
@@ -283,15 +433,22 @@ describe("executor live venue minimum stake guard", () => {
     ]);
   });
 
-  it("blocks Polymarket fills below the shared $1.01 minimum", () => {
-    expect(liveVenueMinimumStakeBlockers([leg("polymarket", 1, 90)])).toEqual([
-      "Polymarket Home stake $0.90 is below minimum $1.01",
+  it("blocks Polymarket fills below both its $1.01 notional and one-contract floors", () => {
+    expect(liveVenueMinimumStakeBlockers([leg("polymarket", 0.9, 90)])).toEqual([
+      "Polymarket Home stake $0.81 is below minimum $1.01",
+      "Polymarket Home size 0.90 is below minimum 1.00 contracts",
     ]);
   });
 
-  it("allows fills only when every venue clears the shared minimum", () => {
+  it("blocks a one-contract Polymarket fill below $1.01", () => {
     expect(
-      liveVenueMinimumStakeBlockers([leg("sxbet", 9, 12), leg("polymarket", 2, 60), leg("kalshi", 21, 5)])
+      liveVenueMinimumStakeBlockers([leg("polymarket", 1, 60), leg("kalshi", 1, 5)])
+    ).toEqual(["Polymarket Home stake $0.60 is below minimum $1.01"]);
+  });
+
+  it("allows Polymarket and Kalshi once the Polymarket notional clears $1.01", () => {
+    expect(
+      liveVenueMinimumStakeBlockers([leg("polymarket", 2, 60), leg("kalshi", 2, 5)])
     ).toEqual([]);
   });
 
@@ -355,14 +512,27 @@ describe("executor SX.bet execution ordering", () => {
     expect(fragileVenueFirstOrder([req("polymarket"), req("sxbet")])).toEqual([1, 0]);
   });
 
-  it("does NOT sequence Polymarket + Kalshi (no SX.bet) — fires concurrently", () => {
-    // Sequencing these was net-negative once Polymarket started filling reliably: it
-    // added a confirmation round-trip before Kalshi's turn, and on 2026-08-08 that delay
-    // alone caused 9 of 15 live trades to go naked (Kalshi's IOC came back genuinely
-    // unfilled — a real order, no error — because the market had moved by the time it fired).
+  it("sequences Polymarket first when paired with Kalshi — re-introduced 2026-08-11 (see fragileVenueFirstOrder's comment)", () => {
     const requests = [req("kalshi"), req("polymarket")];
-    expect(shouldSequenceFragileVenuePair(requests)).toBe(false);
-    expect(fragileVenueFirstOrder(requests)).toEqual([0, 1]); // order is irrelevant when unsequenced
+    expect(shouldSequenceFragileVenuePair(requests)).toBe(true);
+    expect(fragileVenueFirstOrder(requests)).toEqual([1, 0]); // polymarket (index 1) first
+    expect(fragileVenueFirstOrder([req("polymarket"), req("kalshi")])).toEqual([0, 1]); // already polymarket-first
+  });
+
+  it("identifies only the exact two-venue Polymarket/Kalshi pair", () => {
+    const requests = [req("kalshi"), req("polymarket")];
+    expect(isPolymarketKalshiPair(requests)).toBe(true);
+    expect(isPolymarketKalshiPair([req("sxbet"), req("polymarket")])).toBe(false);
+  });
+
+  it("resizes Kalshi to a confirmed partial Polymarket fill instead of skipping the hedge", () => {
+    const kalshi = req("kalshi");
+    expect(resizeHedgeToAnchorFill(kalshi, 4.876)).toMatchObject({ sizeContracts: 4.87 });
+  });
+
+  it("does not submit a hedge when the anchor filled zero or the result is below the venue minimum", () => {
+    expect(resizeHedgeToAnchorFill(req("kalshi"), 0)).toBeNull();
+    expect(resizeHedgeToAnchorFill({ ...req("kalshi"), limitPriceCents: 10 }, 0.99)).toBeNull();
   });
 
   it("does NOT sequence Polymarket + predict.fun (no SX.bet) — fires concurrently", () => {
@@ -378,6 +548,11 @@ describe("executor SX.bet execution ordering", () => {
   it("places SX.bet first for SX.bet/Kalshi routes (fragile on-chain leg leads)", () => {
     expect(fragileVenueFirstOrder([req("sxbet"), req("kalshi")])).toEqual([0, 1]);
     expect(fragileVenueFirstOrder([req("kalshi"), req("sxbet")])).toEqual([1, 0]);
+  });
+
+  it("SX.bet still outranks Polymarket when both are present alongside Kalshi", () => {
+    const requests = [req("kalshi"), req("polymarket"), req("sxbet")];
+    expect(fragileVenueFirstOrder(requests)).toEqual([2, 0, 1]); // sxbet (index 2) first
   });
 });
 
@@ -514,14 +689,13 @@ describe("executable basket optimizer", () => {
     expect(result.expectedProfit).toBeGreaterThan(0.2);
   });
 
-  it("rejects after searching when a resized leg cannot clear the shared $1.01 minimum", () => {
+  it("rejects a resized basket whose Polymarket leg is below $1.01", () => {
     const result = optimizeExecutableBasket([req("kalshi", 90), req("polymarket", 5)], [
-      { ok: true, priceCents: 90, averagePriceCents: 90, availableContracts: 18, levels: [{ priceCents: 90, contracts: 18 }] },
-      { ok: true, priceCents: 5, averagePriceCents: 5, availableContracts: 18, levels: [{ priceCents: 5, contracts: 18 }] },
-    ], 3, 0.03);
+      { ok: true, priceCents: 90, averagePriceCents: 90, availableContracts: 3, levels: [{ priceCents: 90, contracts: 3 }] },
+      { ok: true, priceCents: 5, averagePriceCents: 5, availableContracts: 3, levels: [{ priceCents: 5, contracts: 3 }] },
+    ], 3, 0);
     expect(result.commonContracts).toBe(0);
-    expect(result.blockers[0]).toMatch(/no profitable resized basket/);
-    expect(result.blockers[0]).toMatch(/venue minimum/);
+    expect(result.blockers[0]).toContain("venue minimum");
   });
 
   it("rejects the whole basket when any venue has no executable ladder", () => {
@@ -549,8 +723,9 @@ describe("buildLiveOnlyQuotes — skip the REST probe when the live ladder alone
     const ladder = [{ priceCents: 48, contracts: 4 }, { priceCents: 49, contracts: 4 }];
     const result = buildLiveOnlyQuotes([req("kalshi", 6), req("polymarket", 6)], () => ladder);
     expect(result.canSkipRestProbe).toBe(true);
-    expect(result.quotes[0]).toMatchObject({ ok: true, priceCents: 48, availableContracts: 8 });
-    expect(result.quotes[1]).toMatchObject({ ok: true, priceCents: 48, availableContracts: 8 });
+    expect(result.quotes[0]).toMatchObject({ ok: true, priceCents: 49, availableContracts: 8 });
+    expect(result.quotes[0]?.averagePriceCents).toBeCloseTo(48.333333, 5);
+    expect(result.quotes[1]).toMatchObject({ ok: true, priceCents: 49, availableContracts: 8 });
   });
 
   it("does NOT allow skipping REST when even one leg's live ladder is short of the required size", () => {

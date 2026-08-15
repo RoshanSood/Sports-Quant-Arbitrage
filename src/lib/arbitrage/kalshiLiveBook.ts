@@ -28,9 +28,13 @@ import WS from "ws";
 import { authHeaders, isKalshiConfigured, type KalshiCreds } from "@/lib/kalshiAuth";
 
 export type LiveQuote = { yesAskCents: number | null; noAskCents: number | null; updatedAt: number };
+export type LiveBookMarketState = "connecting" | "subscribed_waiting_snapshot" | "ready" | "one_sided" | "stale" | "sequence_gap" | "disconnected";
 
 const WS_PATH = "/trade-api/ws/v2";
-const WS_URL = (process.env.KALSHI_WS_URL ?? "wss://api.elections.kalshi.com") + WS_PATH;
+// Kalshi's dedicated external WebSocket host superseded the legacy shared
+// api.elections.kalshi.com endpoint. The shared host remains compatible, but it proved
+// unstable under broad order-book subscriptions (frequent abnormal 1006 closes).
+const WS_URL = (process.env.KALSHI_WS_URL ?? "wss://external-api-ws.kalshi.com") + WS_PATH;
 const RECONNECT_BASE_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
 export const LIVE_QUOTE_STALE_MS = 15_000;
@@ -39,6 +43,7 @@ type Envelope = { type?: string; sid?: number; seq?: number; msg?: unknown };
 // Real shape (verified live): levels are [priceDollarsString, qtyString] pairs, e.g. ["0.0100", "141011.00"].
 type SnapshotMsg = { market_ticker?: string; yes_dollars_fp?: [string, string][]; no_dollars_fp?: [string, string][] };
 type DeltaMsg = { market_ticker?: string; price_dollars?: string; delta_fp?: string; side?: "yes" | "no" };
+type TrackedBook = { yes: Map<number, number>; no: Map<number, number>; updatedAt: number };
 
 function bestBid(levels: Map<number, number>): number | null {
   let best: number | null = null;
@@ -125,7 +130,7 @@ export function executableAskLevels(oppositeSideBids: Map<number, number>): Arra
 
 class KalshiLiveBook {
   private ws: WS | null = null;
-  private books = new Map<string, { yes: Map<number, number>; no: Map<number, number> }>();
+  private books = new Map<string, TrackedBook>();
   private quotes = new Map<string, LiveQuote>();
   private subscribed: string[] = [];
   // `seq` is ONE counter for the whole subscription, not per-ticker — confirmed live: the
@@ -140,6 +145,20 @@ class KalshiLiveBook {
   private reconnectDelayMs = RECONNECT_BASE_MS;
   private closing = false;
   private creds?: KalshiCreds;
+  private lastMessageAt = 0;
+  private sid: number | null = null;
+  private initialSubscribePending = false;
+  private sequenceHealthy = true;
+  private reconnectCount = 0;
+  private pingTimer: ReturnType<typeof setInterval> | null = null;
+  private lastDisconnectReason: string | null = null;
+  private updateListeners = new Set<(ticker: string) => void>();
+
+  private notifyUpdate(ticker: string): void {
+    for (const listener of this.updateListeners) {
+      try { listener(ticker); } catch (error) { console.error("[kalshiLiveBook] update listener failed:", error); }
+    }
+  }
 
   connect(creds?: KalshiCreds): void {
     if (this.ws || this.closing) return;
@@ -164,10 +183,22 @@ class KalshiLiveBook {
 
     ws.on("open", () => {
       this.reconnectDelayMs = RECONNECT_BASE_MS;
+      this.sid = null;
+      this.initialSubscribePending = false;
+      // Sequence numbers belong to a single socket session. Never compare the first
+      // message on a replacement connection with the final message from the old one.
+      this.lastSeq = null;
+      this.books.clear();
+      this.quotes.clear();
+      this.sequenceHealthy = true;
       this.sendSubscribe();
+      this.pingTimer = setInterval(() => {
+        if (ws.readyState === WS.OPEN) ws.ping();
+      }, 10_000);
     });
 
     ws.on("message", (data: WS.RawData) => {
+      this.lastMessageAt = Date.now();
       try {
         this.handleEnvelope(JSON.parse(data.toString()));
       } catch (e) {
@@ -175,8 +206,19 @@ class KalshiLiveBook {
       }
     });
 
-    ws.on("close", () => {
+    ws.on("close", (code, reason) => {
+      if (this.pingTimer) clearInterval(this.pingTimer);
+      this.pingTimer = null;
+      this.lastDisconnectReason = `${code}${reason.length ? `: ${reason.toString()}` : ""}`;
+      console.warn(`[kalshiLiveBook] socket closed (${this.lastDisconnectReason})`);
       this.ws = null;
+      this.sid = null;
+      this.initialSubscribePending = false;
+      this.lastSeq = null;
+      this.sequenceHealthy = false;
+      this.books.clear();
+      this.quotes.clear();
+      this.lastMessageAt = 0;
       if (!this.closing) this.scheduleReconnect();
     });
 
@@ -186,6 +228,11 @@ class KalshiLiveBook {
   }
 
   private handleEnvelope(env: Envelope): void {
+    if (env.type === "subscribed") {
+      this.sid = env.sid ?? (env.msg as { sid?: number } | undefined)?.sid ?? null;
+      this.initialSubscribePending = false;
+      return;
+    }
     if (env.type !== "orderbook_snapshot" && env.type !== "orderbook_delta") return;
 
     // Connection-wide sequence check (see lastSeq's doc comment) — applies to snapshot AND
@@ -195,10 +242,17 @@ class KalshiLiveBook {
         // A REAL gap: the connection dropped a message and we don't know which ticker(s) it
         // touched, so every book is now suspect. Resubscribing gets fresh snapshots for
         // everything (Kalshi does not replay missed deltas).
-        console.warn(`[kalshiLiveBook] sequence gap (${this.lastSeq} -> ${env.seq}), resubscribing to recover`);
-        this.books.clear();
-        this.quotes.clear();
-        this.sendSubscribe();
+        const previousSeq = this.lastSeq;
+        this.lastSeq = env.seq;
+        // Recover once per incident. Keeping the old sequence here previously made every
+        // later message look like the same gap and flooded Kalshi with snapshot requests.
+        if (this.sequenceHealthy) {
+          console.warn(`[kalshiLiveBook] sequence gap (${previousSeq} -> ${env.seq}), requesting fresh snapshots`);
+          this.sequenceHealthy = false;
+          this.books.clear();
+          this.quotes.clear();
+          this.requestSnapshots(this.subscribed);
+        }
         return;
       }
       this.lastSeq = env.seq;
@@ -208,10 +262,16 @@ class KalshiLiveBook {
       const parsed = applySnapshot(env.msg as SnapshotMsg);
       const ticker = (env.msg as SnapshotMsg)?.market_ticker;
       if (parsed && ticker) {
-        this.books.set(ticker, parsed);
+        this.books.set(ticker, { ...parsed, updatedAt: Date.now() });
         this.updateQuote(ticker);
+        this.sequenceHealthy = true;
+        this.notifyUpdate(ticker);
       }
     } else {
+      // While recovering, do not apply deltas to the pre-gap state. The first fresh
+      // snapshot re-enables deltas; books without a snapshot remain absent and therefore
+      // unavailable to execution.
+      if (!this.sequenceHealthy) return;
       const msg = env.msg as DeltaMsg;
       const ticker = msg?.market_ticker;
       if (!ticker) return;
@@ -222,7 +282,9 @@ class KalshiLiveBook {
       const side = msg.side === "no" ? "no" : msg.side === "yes" ? "yes" : null;
       if (!side) return;
       book[side] = applyDelta(book[side], msg);
+      book.updatedAt = Date.now();
       this.updateQuote(ticker);
+      this.notifyUpdate(ticker);
     }
   }
 
@@ -250,6 +312,7 @@ class KalshiLiveBook {
   // spam. Only subscribing the diff cuts that down to real ticker additions.
   private sendSubscribe(tickers: string[] = this.subscribed): void {
     if (!this.ws || this.ws.readyState !== WS.OPEN || tickers.length === 0) return;
+    this.initialSubscribePending = true;
     // ANY subscribe call (even this narrower one) causes the known +2 seq jump above — reset
     // our baseline so that expected, harmless jump is never mistaken for a real dropped
     // message on the NEXT delta we see for an unrelated, already-subscribed ticker.
@@ -257,11 +320,28 @@ class KalshiLiveBook {
     this.ws.send(JSON.stringify({ id: Date.now(), cmd: "subscribe", params: { channels: ["orderbook_delta"], market_tickers: tickers } }));
   }
 
+  private updateSubscription(action: "add_markets" | "delete_markets" | "get_snapshot", tickers: string[]): void {
+    if (!this.ws || this.ws.readyState !== WS.OPEN || this.sid == null || tickers.length === 0) return;
+    this.ws.send(JSON.stringify({
+      id: Date.now(),
+      cmd: "update_subscription",
+      params: { sids: [this.sid], market_tickers: tickers, action },
+    }));
+  }
+
+  private requestSnapshots(tickers: string[]): void {
+    if (this.sid == null) return;
+    for (let i = 0; i < tickers.length; i += 100) {
+      this.updateSubscription("get_snapshot", tickers.slice(i, i + 100));
+    }
+  }
+
   private scheduleReconnect(): void {
     if (this.reconnectTimer) return;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.reconnectDelayMs = Math.min(this.reconnectDelayMs * 2, RECONNECT_MAX_MS);
+      this.reconnectCount += 1;
       this.openSocket();
     }, this.reconnectDelayMs);
   }
@@ -274,22 +354,44 @@ class KalshiLiveBook {
     if (next.length === prev.length && next.every((t, i) => t === prev[i])) return;
     const prevSet = new Set(prev);
     const added = next.filter((t) => !prevSet.has(t));
-    this.subscribed = next;
     const nextSet = new Set(next);
+    const removed = prev.filter((t) => !nextSet.has(t));
+    this.subscribed = next;
     for (const k of [...this.books.keys()]) if (!nextSet.has(k)) { this.books.delete(k); this.quotes.delete(k); }
     if (this.ws?.readyState === WS.OPEN) {
-      // Only subscribe the NEW tickers — see sendSubscribe's doc comment. Tickers that
-      // dropped out of `next` were already deleted above; Kalshi keeps streaming their
-      // deltas (there's no per-ticker unsubscribe), but with no local book to apply them to
-      // they're cheaply ignored (handleEnvelope's `if (!book) return`).
-      if (added.length) this.sendSubscribe(added);
+      if (this.sid == null) {
+        if (!this.initialSubscribePending && next.length) this.sendSubscribe(next);
+        return;
+      }
+      if (removed.length) this.updateSubscription("delete_markets", removed);
+      if (added.length) this.updateSubscription("add_markets", added);
     } else if (isKalshiConfigured(this.creds)) this.connect(this.creds);
+  }
+
+  requestSnapshot(ticker: string): void {
+    if (this.subscribed.includes(ticker)) this.requestSnapshots([ticker]);
+  }
+
+  onUpdate(listener: (ticker: string) => void): () => void {
+    this.updateListeners.add(listener);
+    return () => this.updateListeners.delete(listener);
+  }
+
+  marketState(ticker: string, now = Date.now()): LiveBookMarketState {
+    if (!this.ws || this.ws.readyState !== WS.OPEN) return this.ws ? "connecting" : "disconnected";
+    if (!this.subscribed.includes(ticker)) return "disconnected";
+    if (!this.sequenceHealthy) return "sequence_gap";
+    const book = this.books.get(ticker);
+    if (!book) return "subscribed_waiting_snapshot";
+    if (now - this.lastMessageAt > LIVE_QUOTE_STALE_MS) return "stale";
+    if (book.yes.size === 0 || book.no.size === 0) return "one_sided";
+    return "ready";
   }
 
   getQuote(ticker: string): LiveQuote | null {
     const q = this.quotes.get(ticker);
     if (!q) return null;
-    if (Date.now() - q.updatedAt > LIVE_QUOTE_STALE_MS) return null;
+    if (this.ws?.readyState !== WS.OPEN || !this.sequenceHealthy || Date.now() - this.lastMessageAt > LIVE_QUOTE_STALE_MS) return null;
     return q;
   }
 
@@ -298,20 +400,40 @@ class KalshiLiveBook {
   // null as "no liquidity").
   getDepth(ticker: string, side: "yes" | "no", limitPriceCents: number): number | null {
     const book = this.books.get(ticker);
-    const q = this.quotes.get(ticker);
-    if (!book || !q || Date.now() - q.updatedAt > LIVE_QUOTE_STALE_MS) return null;
+    if (!book || this.ws?.readyState !== WS.OPEN || !this.sequenceHealthy || Date.now() - this.lastMessageAt > LIVE_QUOTE_STALE_MS) return null;
     return depthAtOrBetter(side === "yes" ? book.no : book.yes, limitPriceCents);
   }
 
   getAskLevels(ticker: string, side: "yes" | "no"): Array<{ priceCents: number; contracts: number }> | null {
     const book = this.books.get(ticker);
-    const q = this.quotes.get(ticker);
-    if (!book || !q || Date.now() - q.updatedAt > LIVE_QUOTE_STALE_MS) return null;
-    return executableAskLevels(side === "yes" ? book.no : book.yes);
+    if (!book || this.ws?.readyState !== WS.OPEN || !this.sequenceHealthy || Date.now() - this.lastMessageAt > LIVE_QUOTE_STALE_MS) return null;
+    const levels = executableAskLevels(side === "yes" ? book.no : book.yes);
+    return levels.length ? levels : null;
   }
 
-  status(): { connected: boolean; subscribedCount: number; quoteCount: number } {
-    return { connected: this.ws?.readyState === WS.OPEN, subscribedCount: this.subscribed.length, quoteCount: this.quotes.size };
+  getAskSnapshot(ticker: string, side: "yes" | "no"): { levels: Array<{ priceCents: number; contracts: number }>; updatedAt: number } | null {
+    const book = this.books.get(ticker);
+    if (!book || this.ws?.readyState !== WS.OPEN || !this.sequenceHealthy || Date.now() - this.lastMessageAt > LIVE_QUOTE_STALE_MS) return null;
+    const levels = executableAskLevels(side === "yes" ? book.no : book.yes);
+    return levels.length ? { levels, updatedAt: this.lastMessageAt } : null;
+  }
+
+  status(): { connected: boolean; subscribedCount: number; quoteCount: number; readyCount: number; waitingSnapshotCount: number; staleCount: number; oneSidedCount: number; sequenceHealthy: boolean; reconnectCount: number; oldestBookAgeMs: number | null; lastDisconnectReason: string | null } {
+    const states = this.subscribed.map((ticker) => this.marketState(ticker));
+    const ages = [...this.books.values()].map((book) => Math.max(0, Date.now() - book.updatedAt));
+    return {
+      connected: this.ws?.readyState === WS.OPEN,
+      subscribedCount: this.subscribed.length,
+      quoteCount: this.quotes.size,
+      readyCount: states.filter((state) => state === "ready").length,
+      waitingSnapshotCount: states.filter((state) => state === "subscribed_waiting_snapshot").length,
+      staleCount: states.filter((state) => state === "stale").length,
+      oneSidedCount: states.filter((state) => state === "one_sided").length,
+      sequenceHealthy: this.sequenceHealthy,
+      reconnectCount: this.reconnectCount,
+      oldestBookAgeMs: ages.length ? Math.max(...ages) : null,
+      lastDisconnectReason: this.lastDisconnectReason,
+    };
   }
 
   close(): void {
@@ -319,7 +441,10 @@ class KalshiLiveBook {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
     this.ws?.close();
+    if (this.pingTimer) clearInterval(this.pingTimer);
+    this.pingTimer = null;
     this.ws = null;
+    this.lastMessageAt = 0;
   }
 }
 

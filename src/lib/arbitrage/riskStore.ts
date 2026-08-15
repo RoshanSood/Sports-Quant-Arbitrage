@@ -5,6 +5,8 @@ import { DEFAULT_RISK } from "./seed";
 
 const DATA_DIR = path.join(process.cwd(), "data", "arbitrage");
 const FILE = path.join(DATA_DIR, "risk.json");
+let cached: { revision: number; risk: RiskSettings } | null = null;
+let revision = 0;
 
 function sanitizeRiskSettings(value: unknown): Partial<RiskSettings> {
   if (!value || typeof value !== "object") return {};
@@ -17,11 +19,14 @@ function sanitizeRiskSettings(value: unknown): Partial<RiskSettings> {
 }
 
 export async function getRiskSettings(): Promise<RiskSettings> {
+  if (cached) return { ...cached.risk };
   try {
     const stored = sanitizeRiskSettings(JSON.parse(await fs.readFile(FILE, "utf-8")));
     // Merge over defaults so fields added later (e.g. maxLiveStakeUsd) are always present
     // — a missing live cap must never read as undefined and bypass the stake check.
-    return { ...DEFAULT_RISK, ...stored };
+    const risk = { ...DEFAULT_RISK, ...stored };
+    cached = { revision, risk };
+    return { ...risk };
   } catch {
     await write(DEFAULT_RISK);
     return DEFAULT_RISK;
@@ -31,7 +36,11 @@ export async function getRiskSettings(): Promise<RiskSettings> {
 async function write(risk: RiskSettings): Promise<void> {
   await fs.mkdir(DATA_DIR, { recursive: true });
   await fs.writeFile(FILE, JSON.stringify(risk, null, 2), "utf-8");
+  revision += 1;
+  cached = { revision, risk: { ...risk } };
 }
+
+export function riskConfigRevision(): number { return cached?.revision ?? revision; }
 
 export async function updateRiskSettings(partial: Partial<RiskSettings>): Promise<RiskSettings> {
   const current = await getRiskSettings();

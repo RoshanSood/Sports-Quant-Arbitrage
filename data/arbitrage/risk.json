@@ -9,6 +9,8 @@
   "minExpectedProfitUsd": 0.03,
   "liquidityStakeBufferMultiple": 3,
   "staleDivergenceCents": 40,
-  "maxLiveStakeUsd": 7,
+  "maxLiveStakeUsd": 5,
+  "hedgeRecoveryMaxSlippageCents": 10,
+  "hedgeRecoveryMaxLossUsd": 1,
   "perVenueCap": {}
 }

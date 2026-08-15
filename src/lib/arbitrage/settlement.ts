@@ -9,13 +9,15 @@
 
 import type { Trade } from "@/types/arbitrage";
 import { getAllTrades, updateTrade } from "./tradeStore";
+import { SPORTS } from "./sports";
 
 // Scoreboards for every sport the arb module ingests. ESPN event ids are globally
 // unique, so we merge both into one gameId→result map.
-const ESPN_BASES = [
-  "https://site.api.espn.com/apis/site/v2/sports/baseball/mlb",
-  "https://site.api.espn.com/apis/site/v2/sports/basketball/wnba",
-];
+const ESPN_BASES = [...new Set(
+  SPORTS.flatMap((sport) => sport.espnScorePath
+    ? [`https://site.api.espn.com/apis/site/v2/sports/${sport.espnScorePath}`]
+    : [])
+)];
 
 type GameResult = { final: boolean; away: number; home: number; total: number };
 

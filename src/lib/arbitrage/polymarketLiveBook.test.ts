@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { depthAtOrBetter, parseBookLevels, parseBookSnapshot, parsePriceChange } from "./polymarketLiveBook";
+import { applyPriceChanges, depthAtOrBetter, parseBookLevels, parseBookSnapshot, parsePriceChange } from "./polymarketLiveBook";
 
 // Fixtures captured from the LIVE wss://ws-subscriptions-clob.polymarket.com/ws/market feed
 // (verified against a real subscribed token before writing the parser) — not hand-guessed.
@@ -35,6 +35,26 @@ describe("polymarketLiveBook — parseBookSnapshot (live-captured shape)", () =>
   it("returns null for a non-book message", () => {
     expect(parseBookSnapshot({ event_type: "price_change" }, 1000)).toBeNull();
     expect(parseBookSnapshot({}, 1000)).toBeNull();
+  });
+});
+
+describe("polymarketLiveBook incremental ladder maintenance", () => {
+  it("updates aggregate sizes and removes zero-sized levels atomically", () => {
+    const current = {
+      bids: [{ priceCents: 40, size: 5 }],
+      asks: [{ priceCents: 60, size: 4 }, { priceCents: 62, size: 8 }],
+      updatedAt: 100,
+    };
+    const next = applyPriceChanges(current, [
+      { asset_id: "token", price: "0.60", size: "0", side: "SELL" },
+      { asset_id: "token", price: "0.61", size: "12", side: "SELL" },
+      { asset_id: "token", price: "0.40", size: "9", side: "BUY" },
+    ], "token", 200);
+    expect(next.asks).toEqual(expect.arrayContaining([{ priceCents: 61, size: 12 }, { priceCents: 62, size: 8 }]));
+    expect(next.asks.some((level) => level.priceCents === 60)).toBe(false);
+    expect(next.bids).toEqual([{ priceCents: 40, size: 9 }]);
+    expect(next.updatedAt).toBe(200);
+    expect(current.asks).toHaveLength(2);
   });
 });
 

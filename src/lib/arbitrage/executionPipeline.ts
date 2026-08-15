@@ -17,6 +17,7 @@ import type {
   ReasonCode,
   RiskSettings,
   Trade,
+  ExecutionTiming,
 } from "@/types/arbitrage";
 import { getMarkets } from "./marketStore";
 import { ingestTotals, refreshMarketsForOpportunity } from "./ingest";
@@ -27,11 +28,19 @@ import { getRiskSettings } from "./riskStore";
 import { getTradesByDate, saveTrade } from "./tradeStore";
 import { appendLog } from "./arbLogStore";
 import { DEFAULT_AGENT } from "./seed";
-import { centsToDollars, venueMinStakeScale } from "./arbMath";
+import { centsToDollars, venueMinContracts, venueMinStakeScale } from "./arbMath";
+import { fillAskLevels } from "./executableBook";
 import { computeFees, feeFractionOfStake } from "./feeEngine";
 import { getVenues } from "./venueStore";
 import { filterMarketsForAgent } from "./venueFilters";
 import { dateParamToIsoDate } from "./date";
+import {
+  captureCurrentLiveExecutionSnapshot,
+  isPolymarketKalshiNativePair,
+  LIVE_EXECUTION_SNAPSHOT_FRESH_MS,
+  waitForCurrentLiveExecutionSnapshot,
+  type LiveExecutionSnapshot,
+} from "./execution/liveExecutionSnapshot";
 
 export type ExecutionOutcome = {
   result: ArbResult | "halted";
@@ -110,6 +119,8 @@ export async function writeLog(
   date: string,
   mode: "paper" | "live" = "paper"
 ): Promise<ArbLog> {
+  const executionTiming = details.executionTiming as ExecutionTiming | undefined;
+  if (executionTiming && !executionTiming.completedAt) executionTiming.completedAt = nowIso();
   const log: ArbLog = {
     id: `log-${date}-${Date.now()}-${Math.floor(Math.random() * 1e4)}`,
     time: nowIso(),
@@ -160,6 +171,7 @@ export type PreparedContext = {
   // Same clock reference addStep's tookMs was computed against — pass this straight into
   // any further pushes (executor.ts) so the whole attempt shares one continuous timeline.
   pipelineStartMs: number;
+  liveExecutionSnapshot?: LiveExecutionSnapshot;
 };
 
 export type PrepareResult =
@@ -179,11 +191,16 @@ export async function prepareExecution(
   opportunityId: string,
   date: string,
   requestedMode: "dry_run" | "live" = "dry_run",
-  pipelineStartMs: number = Date.now()
+  pipelineStartMs: number = Date.now(),
+  executionTiming?: ExecutionTiming,
+  detectedOpportunity?: ArbOpportunity
 ): Promise<PrepareResult> {
-  const agent = (await getAgent(DEFAULT_AGENT.id)) ?? DEFAULT_AGENT;
-  const risk: RiskSettings = await getRiskSettings();
-  const configuredVenues = await getVenues();
+  const [storedAgent, risk, configuredVenues] = await Promise.all([
+    getAgent(DEFAULT_AGENT.id),
+    getRiskSettings(),
+    getVenues(),
+  ]);
+  const agent = storedAgent ?? DEFAULT_AGENT;
   const executionSteps: ExecutionStep[] = [];
   const addStep = (key: string, label: string, status: ExecutionStep["status"], detail?: string) => {
     executionSteps.push({ key, label, status, detail, tookMs: Date.now() - pipelineStartMs });
@@ -197,7 +214,12 @@ export async function prepareExecution(
   const detect = async () => {
     const markets = filterMarketsForAgent(await getMarkets(date), configuredVenues, agent);
     const { matched } = matchMarkets(markets);
-    const { opportunities } = detectArbs(matched, agent, { minLiquidityUsd: risk.minLiquidityUsd, staleDivergenceCents: risk.staleDivergenceCents });
+    const { opportunities } = detectArbs(matched, agent, {
+      minLiquidityUsd: risk.minLiquidityUsd,
+      minExpectedProfitUsd: risk.minExpectedProfitUsd,
+      liquidityStakeBufferMultiple: risk.liquidityStakeBufferMultiple,
+      staleDivergenceCents: risk.staleDivergenceCents,
+    });
     return { markets, opp: opportunities.find((o) => o.id === opportunityId) };
   };
   // Age (ms) of the oldest quote backing the opportunity's legs.
@@ -210,6 +232,36 @@ export async function prepareExecution(
     }));
 
   let { markets, opp } = await detect();
+  // The event-driven scanner can discover an executable native-ladder arb before the next
+  // REST market-store refresh. Carry that exact candidate into preflight instead of losing
+  // it during reconstruction; every live ladder, identity, economics, recovery, and risk
+  // gate below still runs again immediately before submission.
+  if (detectedOpportunity?.id === opportunityId && isPolymarketKalshiNativePair(detectedOpportunity.legs)) {
+    opp = detectedOpportunity;
+  }
+  let liveSnapshotResult = requestedMode === "live" && opp
+    ? captureCurrentLiveExecutionSnapshot(
+        opp.legs,
+        Date.now(),
+        Math.min(risk.staleQuoteMs, LIVE_EXECUTION_SNAPSHOT_FRESH_MS),
+        risk.liquidityStakeBufferMultiple
+      )
+    : { snapshot: null, reason: "not a live execution" };
+  // For the latency-sensitive Polymarket/Kalshi route, REST is not an execution fallback.
+  // If either websocket ladder is unavailable, fail this tick quickly and let the scanner
+  // retry from a fresh native snapshot. Waiting 1-3 seconds for REST produced stale orders.
+  const requiresNativeSnapshot = requestedMode === "live" && opp != null && isPolymarketKalshiNativePair(opp.legs);
+  if (requiresNativeSnapshot && opp && !liveSnapshotResult.snapshot) {
+    const recovered = await waitForCurrentLiveExecutionSnapshot(opp.legs, {
+      timeoutMs: 2_000,
+      maxAgeMs: Math.min(risk.staleQuoteMs, LIVE_EXECUTION_SNAPSHOT_FRESH_MS),
+      depthMultiple: risk.liquidityStakeBufferMultiple,
+    });
+    liveSnapshotResult = recovered;
+  }
+  // A missing socket snapshot now falls through to the executor's exact-leg native REST
+  // quote probe. That probe is independently bounded; it never triggers a full ingest.
+  const nativeRestFallback = requiresNativeSnapshot && !liveSnapshotResult.snapshot;
   // Live orders must run on a fresh snapshot. Paper keeps the wider cache window (no fill risk).
   //
   // Fast-path: if the scanner already left this opportunity's legs fresher than
@@ -219,23 +271,52 @@ export async function prepareExecution(
   const initialQuoteAgeMs = opp ? legAgeMs(opp, markets) : null;
   const legVenues = opp ? [...new Set(opp.legs.map((l) => l.venueId))] : undefined;
   const canSkipLiveRefresh =
-    opp != null && initialQuoteAgeMs != null && initialQuoteAgeMs <= Math.min(risk.staleQuoteMs, LIVE_QUOTE_FRESH_MS);
+    requiresNativeSnapshot ||
+    liveSnapshotResult.snapshot != null ||
+    (opp != null && initialQuoteAgeMs != null && initialQuoteAgeMs <= Math.min(risk.staleQuoteMs, LIVE_QUOTE_FRESH_MS));
   if (requestedMode === "live" && !canSkipLiveRefresh) {
+    if (executionTiming) executionTiming.finalRefreshStartedAt = nowIso();
     for (let attempt = 0; attempt <= LIVE_REFRESH_RETRIES; attempt += 1) {
       await refreshMarketsForOpportunity(date, opportunityId, legVenues).catch((e) => console.error("[arbitrage/exec] targeted pre-execution refresh failed:", e));
       ({ markets, opp } = await detect());
+      if (opp) {
+        liveSnapshotResult = captureCurrentLiveExecutionSnapshot(
+          opp.legs,
+          Date.now(),
+          Math.min(risk.staleQuoteMs, LIVE_EXECUTION_SNAPSHOT_FRESH_MS),
+          risk.liquidityStakeBufferMultiple
+        );
+      }
       if (opp) break;
       if (attempt < LIVE_REFRESH_RETRIES) await sleep(LIVE_REFRESH_RETRY_DELAY_MS);
     }
+    if (executionTiming) executionTiming.finalRefreshCompletedAt = nowIso();
   } else if (requestedMode !== "live" && (!opp || legAgeMs(opp, markets) > risk.staleQuoteMs)) {
+    if (executionTiming) executionTiming.finalRefreshStartedAt = nowIso();
     await ingestTotals(date).catch((e) => console.error("[arbitrage/exec] pre-execution refresh failed:", e));
     ({ markets, opp } = await detect());
+    if (executionTiming) executionTiming.finalRefreshCompletedAt = nowIso();
+  } else if (executionTiming) {
+    executionTiming.finalRefreshStartedAt = nowIso();
+    executionTiming.finalRefreshCompletedAt = executionTiming.finalRefreshStartedAt;
   }
 
   const asHalt = async (rc: ReasonCode, reason: string, matchup: string, venues: string[], edge: number, details: Record<string, unknown>) => {
     addStep(rc, reasonCodeLabel(rc), "halt", reason);
     const h = halt(rc, reason);
-    await writeLog(agent, matchup, venues, edge, "halted", rc, reason, { ...details, opportunityId, pipelineSteps: executionSteps }, date);
+    if (executionTiming) executionTiming.completedAt = nowIso();
+    await writeLog(
+      agent,
+      matchup,
+      venues,
+      edge,
+      "halted",
+      rc,
+      reason,
+      { ...details, opportunityId, pipelineSteps: executionSteps, executionTiming },
+      date,
+      requestedMode === "live" ? "live" : "paper"
+    );
     return { kind: "halt" as const, outcome: h };
   };
 
@@ -245,7 +326,18 @@ export async function prepareExecution(
   if (oppDate != null && oppDate !== requestedSlateDate) {
     return asHalt("final_refresh_failed", `Opportunity is for ${oppDate}, not requested slate ${requestedSlateDate}`, priorMatchup, [], 0, { opportunityId, opportunityDate: oppDate, requestedSlateDate });
   }
-  addStep("final_refresh", "Final quote refresh", opp ? "pass" : "halt", opp ? "Opportunity survived refresh" : "Opportunity disappeared");
+  addStep(
+    "final_refresh",
+    "Final quote refresh",
+    opp ? "pass" : "halt",
+    opp
+      ? liveSnapshotResult.snapshot
+        ? `REST skipped; ${liveSnapshotResult.reason}`
+        : nativeRestFallback
+          ? `Native snapshot recovery timed out; using bounded exact-leg REST fallback: ${liveSnapshotResult.reason}`
+          : `Opportunity survived refresh; native snapshot fallback: ${liveSnapshotResult.reason}`
+      : "Opportunity disappeared"
+  );
   if (!opp) return asHalt("final_refresh_failed", "Opportunity no longer exists after quote refresh", priorMatchup, [], 0, { opportunityId });
 
   const venues = [...new Set(opp.legs.map((l) => l.venueId))];
@@ -299,7 +391,7 @@ export async function prepareExecution(
   // A targeted refresh can fail while the old opportunity remains in the date cache.
   // Enforce the configured age in live mode too: surviving detection is not evidence that
   // any venue actually returned a current executable quote.
-  const oldestMs = legAgeMs(opp, markets);
+  const oldestMs = liveSnapshotResult.snapshot?.oldestAgeMs ?? legAgeMs(opp, markets);
   const maxQuoteAgeMs = risk.staleQuoteMs;
   const quoteIsFresh = Number.isFinite(oldestMs) && oldestMs <= maxQuoteAgeMs;
   addStep("stale_quote", "Quote freshness", quoteIsFresh ? "pass" : "halt", `${oldestMs}ms oldest quote`);
@@ -340,12 +432,27 @@ export async function prepareExecution(
 
   // ── Final refresh: apply slippage, recompute net edge ───────────────────────
   const executedLegs: ArbLeg[] = opp.legs.map((l) => {
-    const executedCents = slip(l.priceCents);
-    return { ...l, priceCents: executedCents, decimalOdds: 100 / executedCents, impliedProbability: executedCents / 100 };
+    const snapshotLeg = liveSnapshotResult.snapshot?.legs.find((candidate) => candidate.marketId === l.marketId);
+    // Gate the opportunity on a price that can actually buy the venue minimum. This walks
+    // past sub-contract dust while leaving exact full-size ladder optimization to executor.
+    const minimumFill = snapshotLeg
+      ? fillAskLevels(snapshotLeg.levels, Math.max(1, venueMinContracts(l.venueId)))
+      : null;
+    const executedCents = minimumFill?.worstPriceCents ?? slip(l.priceCents);
+    const liquidityUsd = snapshotLeg
+      ? snapshotLeg.levels.reduce((sum, level) => sum + (level.priceCents * level.contracts) / 100, 0)
+      : l.liquidityUsd;
+    return {
+      ...l,
+      priceCents: executedCents,
+      decimalOdds: 100 / executedCents,
+      impliedProbability: executedCents / 100,
+      liquidityUsd,
+    };
   });
 
-  // ── Venue $1 minimum order: size the WHOLE arb up so every min-venue leg clears its floor ──
-  // A below-minimum SX.bet or Polymarket order cannot be placed at all, so this floor
+  // ── Venue minimum order: size the WHOLE arb up so every leg clears its venue floor ──
+  // A below-minimum order cannot be placed at all, so this floor
   // can raise the agent's target size but never the risk live-stake cap. Scaling every leg
   // by the same factor preserves the hedge
   // ratio and edge% — see venueMinStakeScale. Example: Polymarket ~$3 / SX ~$0.68 → SX is
@@ -362,7 +469,7 @@ export async function prepareExecution(
       "venue_min_order",
       "Venue minimum order size",
       "warn",
-      `sized arb up ${minVenueScale.toFixed(2)}x so every leg clears the shared $1.01 minimum; live risk cap still applies`
+      `sized arb up ${minVenueScale.toFixed(2)}x so every leg clears its venue minimum; live risk cap still applies`
     );
   }
 
@@ -427,6 +534,7 @@ export async function prepareExecution(
       minLiveStakeFloorUsd,
       executionSteps,
       pipelineStartMs,
+      liveExecutionSnapshot: liveSnapshotResult.snapshot ?? undefined,
     },
   };
 }
@@ -443,7 +551,12 @@ export async function verifyPostFill(opportunityId: string, date: string, entryN
     const configuredVenues = await getVenues();
     const markets = filterMarketsForAgent(await getMarkets(date), configuredVenues, agent);
     const { matched } = matchMarkets(markets);
-    const { opportunities } = detectArbs(matched, agent, { minLiquidityUsd: risk.minLiquidityUsd, staleDivergenceCents: risk.staleDivergenceCents });
+    const { opportunities } = detectArbs(matched, agent, {
+      minLiquidityUsd: risk.minLiquidityUsd,
+      minExpectedProfitUsd: risk.minExpectedProfitUsd,
+      liquidityStakeBufferMultiple: risk.liquidityStakeBufferMultiple,
+      staleDivergenceCents: risk.staleDivergenceCents,
+    });
     const same = opportunities.find((o) => o.id === opportunityId);
     if (!same) {
       return {

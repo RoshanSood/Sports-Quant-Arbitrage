@@ -25,9 +25,9 @@ describe("feeEngine — Kalshi tier formula (manual §8)", () => {
   });
 });
 
-describe("feeEngine — Polymarket flat", () => {
-  it("0.75% of notional", () => {
-    expect(polymarketFee(100)).toBeCloseTo(0.75, 4);
+describe("feeEngine — Polymarket probability curve", () => {
+  it("uses contracts * rate * p * (1-p)", () => {
+    expect(polymarketFee(4, 0.88)).toBeCloseTo(0.012672, 6);
   });
 });
 
@@ -35,7 +35,7 @@ describe("feeEngine — per-venue model routing", () => {
   it("routes kalshi/polymarket/sxbet to the right models", () => {
     const fees = computeFees([leg("kalshi", 55, 40), leg("polymarket", 44, 40), leg("sxbet", 50, 40)]);
     expect(fees[0].model).toBe("kalshi_tier");
-    expect(fees[1].model).toBe("polymarket_flat");
+    expect(fees[1].model).toBe("polymarket_curve");
     expect(fees[2].model).toBe("sxbet_flat");
     // Kalshi fee = 0.07*0.55*0.45*40 contracts ≈ $0.693 → ~69c
     expect(fees[0].feeCents).toBeCloseTo(0.07 * 0.55 * 0.45 * 40 * 100, 0);

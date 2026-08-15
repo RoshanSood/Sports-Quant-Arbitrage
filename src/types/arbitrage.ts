@@ -88,9 +88,34 @@ export type ExecutionStep = {
   tookMs?: number;
 };
 
+export type VenueExecutionTiming = {
+  venueId: string;
+  dispatchedAt?: string;
+  httpResponseAt?: string;
+  fillConfirmedAt?: string;
+};
+
+export type ExecutionTiming = {
+  detectedAt?: string;
+  queueEnteredAt: string;
+  executionStartedAt?: string;
+  finalRefreshStartedAt?: string;
+  finalRefreshCompletedAt?: string;
+  quoteAcquisitionStartedAt?: string;
+  quoteAcquisitionCompletedAt?: string;
+  optimizerStartedAt?: string;
+  optimizerCompletedAt?: string;
+  recoveryValidationStartedAt?: string;
+  recoveryValidationCompletedAt?: string;
+  reservationStartedAt?: string;
+  reservationCompletedAt?: string;
+  completedAt?: string;
+  legs: VenueExecutionTiming[];
+};
+
 // Supporting shapes
 
-export type FeeModel = "kalshi_tier" | "polymarket_flat" | "sxbet_flat" | "placeholder";
+export type FeeModel = "kalshi_tier" | "polymarket_curve" | "polymarket_flat" | "sxbet_flat" | "placeholder";
 
 // Which portion of the game a market covers. "full_game" is the whole contest; "f5" is
 // first-5-innings (MLB only — a tie after 5 is possible, unlike a full 9-inning game).
@@ -122,6 +147,9 @@ export type ArbLeg = {
   nativeMarketId?: string;
   nativeSide?: string;
   sourceStartTime?: string;
+  marketType?: MarketType;
+  line?: number | null;
+  teams?: [string, string]; // canonical [away, home]
 };
 
 export type StakePlan = {
@@ -213,6 +241,8 @@ export type MatchedLeg = {
   nativeMarketId?: string;
   nativeSide?: string;
   sourceStartTime?: string;
+  marketType: MarketType;
+  teams: [string, string]; // canonical [away, home]
   outcome: Outcome; // OVER/UNDER for totals, HOME/AWAY for moneyline
   line: number;
   priceCents: number;
@@ -310,9 +340,9 @@ export type Trade = {
   orderIds: (string | null)[];
   fillStatus: FillStatus;
   totalCost: number; // dollars
-  expectedProfit: number; // dollars
+  expectedProfit: number; // guaranteed payout minus filled leg costs, before separately reported fees
   realizedPnl: number | null; // dollars, null while open
-  netEdge: number; // fraction at entry
+  netEdge: number; // guaranteed profit / filled cost at entry
   clvDrift: number | null; // closing-line-value drift, fraction
   status: TradeStatus;
   openedAt: string; // ISO timestamp
@@ -322,12 +352,16 @@ export type Trade = {
   nakedLegIndex?: number; // for naked positions, which leg actually filled
   postFill?: PostFillCheck;
   executionSteps?: ExecutionStep[];
+  executionTiming?: ExecutionTiming;
   // When the underlying opportunity was originally detected (arbEngine.ts's detectArbs),
   // as opposed to openedAt (when this trade record was finalized). openedAt - detectedAt is
   // the full detection-to-fill latency; executionSteps[].tookMs breaks down where the time
   // inside this specific execution attempt went. Undefined for trades placed manually via
   // the Play button, where "detection" isn't a single well-defined instant.
   detectedAt?: string;
+  // Durable risk-ledger reservation that authorized this live basket. Undefined on paper
+  // and on legacy live trades created before the atomic ledger existed.
+  reservationId?: string;
 };
 
 export type ArbLog = {

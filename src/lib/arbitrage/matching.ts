@@ -53,7 +53,7 @@ export function startBucket(startTime: string, windowMinutes = START_WINDOW_MINU
 export function buildEventKey(market: NormalizedMarket): string {
   const sport = normalizeSport(market.sport);
   const league = normalizeLeague(market.league);
-  const teams = market.teams.map(normalizeTeamName).sort();
+  const teams = market.teams.map((team) => normalizeTeamName(team, sport)).sort();
   const bucket = startBucket(market.startTime);
   const segment = market.segment ?? "full_game";
   const suffix = segment === "full_game" ? "" : `:${segment}`;
@@ -71,9 +71,10 @@ function startDeltaMinutes(a: string, b: string): number {
 // and league scores are high, but we still compute deterministically so the gate is
 // meaningful when feeds diverge.
 function confidenceScore(a: NormalizedMarket, b: NormalizedMarket): number {
+  const sport = normalizeSport(a.sport);
   const teamScore =
-    normalizeTeamName(a.teams[0]) === normalizeTeamName(b.teams[0]) &&
-    normalizeTeamName(a.teams[1]) === normalizeTeamName(b.teams[1])
+    normalizeTeamName(a.teams[0], sport) === normalizeTeamName(b.teams[0], sport) &&
+    normalizeTeamName(a.teams[1], sport) === normalizeTeamName(b.teams[1], sport)
       ? 1
       : 0;
   const delta = startDeltaMinutes(a.startTime, b.startTime);
@@ -117,6 +118,8 @@ function toLeg(m: NormalizedMarket): MatchedLeg {
     nativeMarketId: m.nativeMarketId,
     nativeSide: m.nativeSide,
     sourceStartTime: m.sourceStartTime,
+    marketType: m.marketType,
+    teams: m.teams,
     outcome: m.outcome,
     line: m.line ?? 0,
     priceCents: m.priceCents,

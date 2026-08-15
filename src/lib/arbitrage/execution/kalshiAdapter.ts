@@ -23,6 +23,16 @@ type KalshiV2OrderResp = {
   ts_ms?: number;
 };
 
+type KalshiOrderRecord = KalshiV2OrderResp & {
+  ticker?: string;
+  status?: string;
+  fill_count_fp?: string;
+  yes_price_dollars?: string;
+  no_price_dollars?: string;
+};
+
+type KalshiOrdersResponse = { orders?: KalshiOrderRecord[] };
+
 type KalshiMarketSnapshot = {
   market?: {
     yes_bid?: number;
@@ -126,7 +136,7 @@ export class KalshiExecutionAdapter implements ExecutionAdapter {
 
     const body = {
       ticker,
-      client_order_id: crypto.randomUUID(),
+      client_order_id: req.clientOrderId ?? crypto.randomUUID(),
       side: isYes ? "bid" : "ask",
       count: req.sizeContracts.toFixed(2), // fixed-point count, e.g. "10.00"
       price: yesPriceDollars.toFixed(4), // YES price in dollars
@@ -146,7 +156,65 @@ export class KalshiExecutionAdapter implements ExecutionAdapter {
       const status = filled >= req.sizeContracts ? "filled" : filled > 0 ? "partial" : "unfilled";
       return { ok: filled > 0, orderId, filledContracts: filled, avgPriceCents, status, raw: resp };
     } catch (e) {
+      // A 409 means Kalshi has already consumed this idempotency key. Never classify that
+      // as a terminal zero-fill until the existing order has been looked up: the POST
+      // response may have been lost after the matching engine accepted or filled it.
+      if (/\b409\b|order_already_exists|already exists/i.test(String(e)) && req.clientOrderId) {
+        const existing = await this.recoverOrder(req);
+        if (existing) return existing;
+        return {
+          ok: false,
+          orderId: null,
+          filledContracts: 0,
+          avgPriceCents: req.limitPriceCents,
+          status: "pending",
+          error: `Kalshi duplicate client order id; existing order could not yet be reconciled: ${String(e)}`,
+        };
+      }
       return reject(req, String(e));
+    }
+  }
+
+  async recoverOrder(req: OrderRequest): Promise<OrderResult | null> {
+    if (!this.supportsLive() || !req.clientOrderId || !req.nativeMarketId) return null;
+    try {
+      // Kalshi documents client_order_id as its duplicate-order key. Query the account's
+      // recent orders for this ticker and match that identifier; this is read-only and
+      // never retries the original POST.
+      const response = await kalshiGet<KalshiOrdersResponse>(
+        `/portfolio/orders?ticker=${encodeURIComponent(req.nativeMarketId)}&limit=100`,
+        {},
+        this.creds
+      );
+      const order = response.orders?.find((candidate) => candidate.client_order_id === req.clientOrderId);
+      if (!order) return null;
+      const filled = Math.floor((Number(order.fill_count_fp ?? order.fill_count) || 0) * 100) / 100;
+      const isYes = (req.nativeSide ?? "").toLowerCase() === "yes";
+      const yesPrice = Number(order.average_fill_price ?? order.yes_price_dollars);
+      const noPrice = Number(order.no_price_dollars);
+      const avgPriceCents = Number.isFinite(yesPrice) && yesPrice > 0
+        ? Math.round((isYes ? yesPrice : 1 - yesPrice) * 100)
+        : Number.isFinite(noPrice) && noPrice > 0
+          ? Math.round((isYes ? 1 - noPrice : noPrice) * 100)
+          : req.limitPriceCents;
+      const venueStatus = (order.status ?? "").toLowerCase();
+      const status = filled + 1e-9 >= req.sizeContracts
+        ? "filled"
+        : filled > 0
+          ? "partial"
+          : venueStatus === "resting" || venueStatus === "pending"
+            ? "pending"
+            : "unfilled";
+      return {
+        ok: filled > 0,
+        orderId: order.order_id ?? null,
+        filledContracts: filled,
+        avgPriceCents,
+        status,
+        raw: order,
+      };
+    } catch {
+      return null;
     }
   }
 }

@@ -4,6 +4,7 @@ import {
   decimalOddsFromCents,
   equalProfitSizing,
   executedEconomics,
+  guaranteedTradeEconomics,
   grossEdge,
   impliedProbFromCents,
   netEdge,
@@ -107,16 +108,33 @@ describe("arbMath — executedEconomics (portfolio truth of the fill)", () => {
 });
 
 describe("arbMath — venueMinStakeUsd", () => {
-  it("requires a $1.01 leg on every venue and two Predict.fun contracts", () => {
-    for (const venue of ["sxbet", "polymarket", "kalshi", "predictfun", "cloudbet"]) {
+  it("uses a $1.01 Polymarket floor, a contract-only Kalshi floor, and preserves other venue rules", () => {
+    for (const venue of ["sxbet", "predictfun", "cloudbet"]) {
       expect(venueMinStakeUsd(venue)).toBeCloseTo(1.01, 4);
     }
+    expect(venueMinStakeUsd("polymarket")).toBe(1.01);
+    expect(venueMinStakeUsd("kalshi")).toBe(0);
     expect(venueMinContracts("predictfun")).toBe(2);
-    expect(venueMinContracts("kalshi")).toBe(0);
+    expect(venueMinContracts("polymarket")).toBe(1);
+    expect(venueMinContracts("kalshi")).toBe(1);
   });
 });
 
-describe("arbMath — venueMinStakeScale (every venue has a $1.01 minimum order)", () => {
+describe("arbMath — guaranteedTradeEconomics", () => {
+  it("reports the Panthers v Bills hedge as four cents", () => {
+    const economics = guaranteedTradeEconomics([
+      { priceCents: 88, size: 4 },
+      { priceCents: 11, size: 4 },
+    ]);
+
+    expect(economics.totalCost).toBe(3.96);
+    expect(economics.guaranteedPayout).toBe(4);
+    expect(economics.expectedProfit).toBe(0.04);
+    expect(economics.netEdge).toBeCloseTo(0.04 / 3.96, 6);
+  });
+});
+
+describe("arbMath — venueMinStakeScale (venue-specific minimum orders)", () => {
   const applyScale = (
     legs: { venueId: string; priceCents: number; size: number }[],
     scale: number
@@ -135,21 +153,17 @@ describe("arbMath — venueMinStakeScale (every venue has a $1.01 minimum order)
     expect(centsToDollars(sx.priceCents) * sx.size).toBeGreaterThanOrEqual(1.01);
     // Both legs kept equal contract counts (still a valid hedge).
     expect(scaled[0].size).toBeCloseTo(scaled[1].size, 4);
-    expect(floorTotalUsd).toBeCloseTo(3.30, 2); // the cheaper 30c Kalshi leg dominates
+    expect(floorTotalUsd).toBeCloseTo(1.46, 2); // SX's $1.01 floor determines the common size
   });
 
-  it("scales the whole arb up so a Polymarket leg clears its $1 minimum (this session's reported case)", () => {
-    // Reported: a $0.90 Polymarket order (1 contract @ 90c) was rejected — "invalid amount
-    // for a marketable BUY order ($0.9), min size: 1".
+  it("scales the basket until the Polymarket leg clears $1.01", () => {
     const legs = [
       { venueId: "kalshi", priceCents: 10, size: 1 },
       { venueId: "polymarket", priceCents: 90, size: 1 },
     ];
-    const { scale } = venueMinStakeScale(legs);
-    expect(scale).toBeGreaterThan(1);
-    const scaled = applyScale(legs, scale);
-    const poly = scaled.find((l) => l.venueId === "polymarket")!;
-    expect(centsToDollars(poly.priceCents) * poly.size).toBeGreaterThanOrEqual(1);
+    const result = venueMinStakeScale(legs);
+    expect(result.scale).toBeCloseTo(1.13, 6);
+    expect(result.floorTotalUsd).toBeCloseTo(1.13, 2);
   });
 
   it("takes the LARGER scale when both venues' legs are under their minimums", () => {

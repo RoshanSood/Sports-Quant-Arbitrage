@@ -4,6 +4,10 @@
 // instrumentation-node.ts.
 
 export async function register() {
+  // Next invokes instrumentation while producing a build as well as when a server starts.
+  // Background sockets/schedulers are runtime side effects and must never run in build
+  // workers (which can otherwise ingest markets or auto-execute with live credentials).
+  if (process.env.NEXT_PHASE === "phase-production-build") return;
   if (process.env.NEXT_RUNTIME === "nodejs") {
     const { registerNode } = await import("./instrumentation-node");
     await registerNode();

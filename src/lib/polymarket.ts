@@ -1,5 +1,5 @@
 import { GameMarket, MLBGame, OddsOption } from "@/types";
-import { teamMatchesTitle, teamsMatch } from "./teamNormalization";
+import { resolveTwoWayTeamOrder, teamMatchesTitle, teamsMatch } from "./teamNormalization";
 import type { VenueTotalLine, VenueTwoWay, VenueSpread } from "./kalshi";
 import type { ArbGame } from "./arbitrage/sports";
 import { pacificDateFromIso } from "./arbitrage/date";
@@ -193,6 +193,9 @@ function classifyMarket(market: PolymarketMarket): MarketType {
   // can never be matched against a full-game or F5 line it doesn't actually share.
   if (classifyMarketSegment(market.question) === null) return null;
   const q = market.question.toLowerCase();
+  // Game events also contain team totals. They are not complementary with the
+  // full-game total and must never enter the shared over/under ladder.
+  if (/\bteam total\b/.test(q)) return null;
   if (/o\/u|over|under/.test(q) && !q.includes("spread")) return "total";
   if (q.startsWith("spread:") || q.includes("spread:")) return "spread";
   // 2-outcome markets without game-prop keywords → moneyline
@@ -532,10 +535,11 @@ export async function fetchPolymarketMoneylineByGame(
     const { outcomes, prices, tokenIds } = parseOutcomes(ml);
     if (outcomes.length < 2 || isSettledMarket(prices)) continue;
 
-    // Which outcome token is the away team? bestBid/bestAsk are for outcomes[0].
-    const outcome0IsAway =
-      teamsMatch(outcomes[0], game.awayTeam.name) ||
-      outcomes[0].toLowerCase().includes(game.awayTeam.abbreviation.toLowerCase());
+    // Resolve both native labels independently. Never infer an unknown token as the
+    // opposite team: a bad inference here produces two same-team legs across venues.
+    const teamOrder = resolveTwoWayTeamOrder(outcomes, game.awayTeam, game.homeTeam);
+    if (!teamOrder) continue;
+    const outcome0IsAway = teamOrder === "away_home";
     const awayTokenId = outcome0IsAway ? tokenIds[0] ?? undefined : tokenIds[1] ?? undefined;
     const homeTokenId = outcome0IsAway ? tokenIds[1] ?? undefined : tokenIds[0] ?? undefined;
 
@@ -735,9 +739,9 @@ export async function fetchPolymarketSpreadByGame(
     const titleFavorsAway = teamMatchesTitle(game.awayTeam.name, game.awayTeam.shortName, game.awayTeam.abbreviation, q);
     const homeSignedLine = titleFavorsAway ? -favLine : favLine;
 
-    const outcome0IsHome =
-      teamsMatch(outcomes[0], game.homeTeam.name) ||
-      outcomes[0].toLowerCase().includes(game.homeTeam.abbreviation.toLowerCase());
+    const teamOrder = resolveTwoWayTeamOrder(outcomes, game.awayTeam, game.homeTeam);
+    if (!teamOrder) continue;
+    const outcome0IsHome = teamOrder === "home_away";
     const homeTokenId = outcome0IsHome ? tokenIds[0] ?? undefined : tokenIds[1] ?? undefined;
     const awayTokenId = outcome0IsHome ? tokenIds[1] ?? undefined : tokenIds[0] ?? undefined;
 

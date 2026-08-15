@@ -50,7 +50,7 @@ export type SportConfig = {
   // KXWTAMATCH) — Kalshi has no tennis totals/spread markets, and ingestSportMarkets never
   // reads total/spread unless `markets.totals`/`markets.spread` is also set, which tennis's
   // moneyline-only `markets` config leaves off.
-  kalshi?: { game: string; total?: string; spread?: string; threeWay?: boolean };
+  kalshi?: { game: string; total?: string; spread?: string; threeWay?: boolean; independentOutcomes?: boolean };
   polyTag?: string;
   sxLeagueId?: number; // fixed SX league (MLB/WNBA totals+ml+spread)
   // SX moneyline for sports whose leagues are ephemeral/per-tournament (soccer, tennis):
@@ -98,6 +98,28 @@ export const SPORTS: SportConfig[] = [
     polyTag: "wnba",
     sxLeagueId: 1384,
     spreadFixedLine: undefined, // variable point spread
+  },
+  {
+    sport: "football",
+    league: "nfl-preseason",
+    fetchGames: espnTeamGamesFetcher("football/nfl"),
+    espnScorePath: "football/nfl",
+    markets: { totals: true, spread: true, moneyline: true },
+    // Live catalog validation 2026-08-13: Kalshi's preseason events use the normal
+    // KXNFL* series. KXNFLGAME exposes one independently priced YES ticker per team.
+    kalshi: {
+      game: "KXNFLGAME",
+      total: "KXNFLTOTAL",
+      spread: "KXNFLSPREAD",
+      independentOutcomes: true,
+    },
+    // Polymarket tags preseason games as NFL and mixes the full-game ladder with
+    // team totals / first-half markets; the adapter filters those derivatives out.
+    polyTag: "nfl",
+    // SX's catalog calls this "NFL Pre Season". It is currently inactive with no
+    // markets, but the fixed id lets ingestion begin automatically when SX lists them.
+    sxLeagueId: 242,
+    spreadFixedLine: undefined,
   },
   // ── Soccer (3-way 1X2 moneyline) ────────────────────────────────────────────
   // CloudBet competition/market keys are best-effort against CloudBet's documented

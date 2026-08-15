@@ -140,16 +140,37 @@ export function executedEconomics(
   return { totalCost, guaranteedPayout, expectedProfit, netEdge };
 }
 
+// Portfolio accounting for a completed hedge. The locked trading profit is the
+// matched $1 payout minus what was paid for every filled contract. Estimated venue
+// fees are intentionally not mixed into this figure: they are model-dependent and
+// already remain available on each leg as feeCents.
+export function guaranteedTradeEconomics(
+  legs: Pick<ArbLeg, "priceCents" | "size">[]
+): { totalCost: number; guaranteedPayout: number; expectedProfit: number; netEdge: number } {
+  if (legs.length === 0) return { totalCost: 0, guaranteedPayout: 0, expectedProfit: 0, netEdge: 0 };
+  const totalCost = round(
+    legs.reduce((sum, leg) => sum + centsToDollars(leg.size * leg.priceCents), 0),
+    2
+  );
+  const guaranteedPayout = round(Math.min(...legs.map((leg) => leg.size)), 4);
+  const expectedProfit = round(guaranteedPayout - totalCost, 2);
+  const netEdge = totalCost > 0 ? round(expectedProfit / totalCost, 6) : 0;
+  return { totalCost, guaranteedPayout, expectedProfit, netEdge };
+}
+
 // ── Per-venue minimum-order sizing ─────────────────────────────────────────────
 //
-// Some venues reject orders below a fixed dollar minimum. Returns the dollar order minimum
-// for a venue, 0 if none. Single source of truth for these floors (the execution config's
-// SXBET_MIN_TAKER_STAKE_USD derives from this).
+// Some venues reject orders below a fixed dollar or contract minimum. Polymarket marketable
+// BUY orders require at least $1 notional; use $1.01 to stay safely above the boundary after
+// fixed-point encoding. Kalshi only has the one-contract floor. Single source of truth for
+// sizing and the executor's final safety check.
 export function venueMinStakeUsd(venueId: string): number {
+  if (venueId === "kalshi") return 0;
   return venueId.trim() ? 1.01 : 0;
 }
 
 export function venueMinContracts(venueId: string): number {
+  if (venueId === "polymarket" || venueId === "kalshi") return 1;
   return venueId === "predictfun" ? 2 : 0;
 }
 
@@ -169,7 +190,7 @@ export function venueMinStakeScale(
     const price = centsToDollars(l.priceCents);
     if (price <= 0 || (price * l.size >= min && l.size >= minContracts)) continue;
     // All legs ultimately share Kalshi's two-decimal fixed-point contract precision. Round
-    // UP at that same precision so the final common-size floor cannot slip back under $1.01.
+    // UP at that same precision so the final common-size floor cannot slip under its minimum.
     const floorContracts = Math.max(minContracts, Math.ceil((min / price) * 100) / 100);
     scale = Math.max(scale, floorContracts / l.size);
   }

@@ -11,6 +11,14 @@ export type LegReconciliation = {
   venue: string;
   orderId: string | null;
   confirmation: FillConfirmation | null;
+  confirmationStartedAt?: string;
+  confirmationCompletedAt?: string;
+};
+
+export type ReconcileOptions = {
+  attempts?: number;
+  delayMs?: number;
+  retryUnknown?: boolean;
 };
 
 const ATTEMPTS = Math.max(1, Number(process.env.ARB_RECON_ATTEMPTS) || 6);
@@ -25,15 +33,18 @@ const isFinalized = (c: FillConfirmation | null): boolean =>
 export async function reconcileLegs(
   adapters: ExecutionAdapter[],
   requests: OrderRequest[],
-  results: OrderResult[]
+  results: OrderResult[],
+  options: ReconcileOptions = {}
 ): Promise<LegReconciliation[]> {
+  const attempts = Math.max(1, Math.floor(options.attempts ?? ATTEMPTS));
+  const delayMs = Math.max(0, options.delayMs ?? DELAY_MS);
   const recon: LegReconciliation[] = results.map((r, i) => ({
     venue: requests[i]?.venueId ?? adapters[i]?.id ?? "unknown",
     orderId: r.orderId,
     confirmation: null,
   }));
 
-  for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
+  for (let attempt = 0; attempt < attempts; attempt++) {
     let anyPending = false;
     await Promise.all(
       results.map(async (r, i) => {
@@ -41,13 +52,15 @@ export async function reconcileLegs(
         const confirmationId = r.confirmationId ?? r.orderId;
         if (!confirmationId || !adapter?.confirmFill) return; // nothing to reconcile
         if (isFinalized(recon[i].confirmation)) return; // already resolved
+        recon[i].confirmationStartedAt ??= new Date().toISOString();
         const c = await adapter.confirmFill(confirmationId, requests[i]).catch(() => ({ status: "unknown" as const }));
         recon[i].confirmation = c;
-        if (c.status === "pending") anyPending = true;
+        if (isFinalized(c)) recon[i].confirmationCompletedAt = new Date().toISOString();
+        if (c.status === "pending" || (options.retryUnknown && c.status === "unknown")) anyPending = true;
       })
     );
     if (!anyPending) break;
-    if (attempt < ATTEMPTS - 1 && DELAY_MS > 0) await new Promise((res) => setTimeout(res, DELAY_MS));
+    if (attempt < attempts - 1 && delayMs > 0) await new Promise((res) => setTimeout(res, delayMs));
   }
   return recon;
 }

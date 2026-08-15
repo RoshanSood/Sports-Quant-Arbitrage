@@ -1,5 +1,42 @@
 import { describe, it, expect } from "vitest";
-import { avgCentsFrom, polymarketFillFromResponse, polymarketFillQuoteFromAsks } from "./polymarketAdapter";
+import { avgCentsFrom, polymarketFillFromResponse, polymarketFillQuoteFromAsks, polymarketV3BuyAmounts } from "./polymarketAdapter";
+
+describe("exchange-v3 exact BUY amounts", () => {
+  it("produces an exact tick ratio with two-decimal maker and hedgeable shares", () => {
+    const amounts = polymarketV3BuyAmounts(5.91, 56.01);
+    expect(amounts).not.toBeNull();
+    expect(Number(amounts!.makerAmount) % 10_000).toBe(0);
+    expect(Number(amounts!.takerAmount) % 10_000).toBe(0);
+    expect(amounts!.submittedContracts).toBeLessThanOrEqual(5.91);
+    expect(amounts!.submittedContracts).toBe(5.76);
+    expect(amounts!.effectiveLimitPriceCents).toBeGreaterThanOrEqual(56.01);
+    expect(amounts!.effectiveLimitPriceCents).toBe(56.25);
+    const makerUsd = Number(amounts!.makerAmount) / 1_000_000;
+    const takerShares = Number(amounts!.takerAmount) / 1_000_000;
+    expect((makerUsd / takerShares) * 100).toBeCloseTo(amounts!.effectiveLimitPriceCents, 10);
+  });
+
+  it("normalizes the Lynx v Fire 5.21 @ 96.70c rejection before submission", () => {
+    expect(polymarketV3BuyAmounts(5.21, 96.7)).toMatchObject({
+      makerAmount: "4840000",
+      takerAmount: "5000000",
+      submittedContracts: 5,
+      effectiveLimitPriceCents: 96.8,
+    });
+  });
+
+  it("leaves less than one-hundredth contract after Kalshi floors the confirmed anchor fill", () => {
+    const amounts = polymarketV3BuyAmounts(3.25, 39);
+    const kalshiContracts = Math.floor(amounts!.submittedContracts * 100) / 100;
+    expect(amounts!.submittedContracts - kalshiContracts).toBeLessThanOrEqual(0.01);
+  });
+
+  it("rejects unusable sizes and prices before signing", () => {
+    expect(polymarketV3BuyAmounts(0, 50)).toBeNull();
+    expect(polymarketV3BuyAmounts(1, 0)).toBeNull();
+    expect(polymarketV3BuyAmounts(Number.NaN, 50)).toBeNull();
+  });
+});
 
 // The phantom-fill bug: a killed/unmatched FOK returns success + a (client-computed) order
 // hash but NO real shares in takingAmount. The old code fell back to the requested size and
@@ -40,6 +77,15 @@ describe("polymarketFillFromResponse", () => {
   it("error response -> zero fill", () => {
     expect(polymarketFillFromResponse({ error: "order not filled", takingAmount: "3" }, 3).ok).toBe(false);
     expect(polymarketFillFromResponse({ errorMsg: "maker address not allowed", takingAmount: "3" }, 3).ok).toBe(false);
+  });
+
+  it("treats a non-string venue status as unknown instead of throwing", () => {
+    expect(() => polymarketFillFromResponse({ success: true, status: 500 as unknown as string }, 3)).not.toThrow();
+    expect(polymarketFillFromResponse({ success: true, status: { code: "delayed" } as unknown as string }, 3)).toEqual({
+      ok: false,
+      filledContracts: 0,
+      status: "unfilled",
+    });
   });
 });
 

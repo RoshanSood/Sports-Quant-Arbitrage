@@ -5,10 +5,19 @@ import { DEFAULT_AGENT } from "./seed";
 
 const DATA_DIR = path.join(process.cwd(), "data", "arbitrage");
 const FILE = path.join(DATA_DIR, "agents.json");
+let cached: { revision: number; agents: Agent[] } | null = null;
+let revision = 0;
+
+function cloneAgents(agents: Agent[]): Agent[] {
+  return agents.map((agent) => ({ ...agent }));
+}
 
 async function read(): Promise<Agent[]> {
+  if (cached) return cloneAgents(cached.agents);
   try {
-    return JSON.parse(await fs.readFile(FILE, "utf-8")) as Agent[];
+    const agents = JSON.parse(await fs.readFile(FILE, "utf-8")) as Agent[];
+    cached = { revision, agents: cloneAgents(agents) };
+    return cloneAgents(agents);
   } catch {
     await write([DEFAULT_AGENT]);
     return [DEFAULT_AGENT];
@@ -18,7 +27,11 @@ async function read(): Promise<Agent[]> {
 async function write(agents: Agent[]): Promise<void> {
   await fs.mkdir(DATA_DIR, { recursive: true });
   await fs.writeFile(FILE, JSON.stringify(agents, null, 2), "utf-8");
+  revision += 1;
+  cached = { revision, agents: cloneAgents(agents) };
 }
+
+export function agentConfigRevision(): number { return cached?.revision ?? revision; }
 
 export async function getAgents(): Promise<Agent[]> {
   return read();

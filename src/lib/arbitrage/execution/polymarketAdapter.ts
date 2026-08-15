@@ -17,6 +17,8 @@ import {
   SignatureTypeV2,
 } from "@polymarket/clob-client-v2";
 import { Wallet } from "ethers";
+import axios from "axios";
+import { Agent as HttpsAgent } from "node:https";
 // NOTE: international self-custody Polymarket adapter — currently UNUSED (the registry
 // routes "polymarket" to the regulated Polymarket US adapter). Kept for recoverability.
 import { POLYGON_CHAIN_ID, polymarketClobHost, polygonUsdcAddress } from "./chains";
@@ -24,6 +26,9 @@ import type { PolymarketCreds } from "./onchainCreds";
 import { deriveEoa, providerFor, usdcBalance } from "./wallet";
 import type { ExecutableOrderQuote, ExecutionAdapter, FillConfirmation, OrderRequest, OrderResult } from "./types";
 import { clobSignerShim, walletKey } from "./wallet";
+import { polymarketV3BuyAmounts } from "./polymarketAmounts";
+
+export { polymarketV3BuyAmounts, type PolymarketV3BuyAmounts } from "./polymarketAmounts";
 
 // Which signature scheme the funded wallet uses. Default EOA (direct wallet). Users
 // whose USDC lives in a Polymarket proxy/safe pass funder + sigType (UI or env).
@@ -40,6 +45,23 @@ function signatureType(sig?: number): SignatureTypeV2 {
 // Cache authenticated (L2) clients per wallet key — deriving API creds signs + hits the
 // network, so we do it once per key (UI-entered or env). Keyed by the raw key string.
 const clientCache = new Map<string, ClobClient>();
+const clientVersionCache = new WeakMap<ClobClient, Promise<number>>();
+const polymarketHttpsAgent = new HttpsAgent({ keepAlive: true, keepAliveMsecs: 10_000, maxSockets: 16, maxFreeSockets: 8 });
+// The SDK uses the shared axios module without exposing an agent option. Install one
+// persistent TLS pool once so book/auth/order calls reuse sockets instead of handshaking on
+// the latency-critical FOK request.
+axios.defaults.httpsAgent = polymarketHttpsAgent;
+
+function clientVersion(client: ClobClient): Promise<number> {
+  const cached = clientVersionCache.get(client);
+  if (cached) return cached;
+  const pending = client.getVersion().catch((error) => {
+    clientVersionCache.delete(client);
+    throw error;
+  });
+  clientVersionCache.set(client, pending);
+  return pending;
+}
 
 function normalizeFunder(value?: string): string | undefined {
   return value?.trim().match(/^0x[a-fA-F0-9]{40}/)?.[0];
@@ -143,6 +165,14 @@ function roundTo(value: number, decimals: number): number {
   return Math.round((value + Number.EPSILON) * scale) / scale;
 }
 
+export async function warmPolymarketExecutionPath(creds?: PolymarketCreds): Promise<boolean> {
+  const key = walletKey("polymarket", creds?.key);
+  if (!key) return false;
+  const client = await buildClient(key, creds?.funder, creds?.sigType);
+  await Promise.all([clientVersion(client), client.getOk()]);
+  return true;
+}
+
 // A live-book quote for how much a marketable FOK BUY can ACTUALLY fill at/below our price.
 // Sizing the order to this (instead of the arb-detected size) is what lets the FOK fill
 // rather than get killed for asking more than the book holds.
@@ -214,11 +244,12 @@ export function polymarketFillFromResponse(
   resp: PostOrderResponse,
   requestedContracts: number
 ): { ok: boolean; filledContracts: number; status: "pending" | "filled" | "partial" | "unfilled" } {
-  if ((resp.status ?? "").toLowerCase() === "delayed" && !resp.error && !resp.errorMsg) {
+  const venueStatus = typeof resp.status === "string" ? resp.status : "";
+  if (venueStatus.toLowerCase() === "delayed" && !resp.error && !resp.errorMsg) {
     return { ok: true, filledContracts: 0, status: "pending" };
   }
   const shares = Number(resp.takingAmount);
-  const explicitlyUnmatched = /unmatch|cancel|kill|not.?filled|reject/i.test(resp.status ?? "");
+  const explicitlyUnmatched = /unmatch|cancel|kill|not.?filled|reject/i.test(venueStatus);
   const filled = Number.isFinite(shares) && shares > 0 && !explicitlyUnmatched ? shares : 0;
   const ok = filled > 0 && !resp.error && !resp.errorMsg;
   return { ok, filledContracts: filled, status: ok ? (filled >= requestedContracts ? "filled" : "partial") : "unfilled" };
@@ -234,7 +265,60 @@ function orderError(resp: PostOrderResponse): string {
 
 export class PolymarketExecutionAdapter implements ExecutionAdapter {
   id = "polymarket";
+  private preparedOrders = new Map<string, Promise<{
+    client: ClobClient;
+    signed: Parameters<ClobClient["postOrder"]>[0];
+    submittedContracts: number;
+  }>>();
   constructor(private creds?: PolymarketCreds) {}
+
+  private preparedKey(req: OrderRequest): string {
+    return `${req.nativeSide ?? ""}:${req.sizeContracts.toFixed(8)}:${req.limitPriceCents.toFixed(4)}`;
+  }
+
+  private async buildPreparedOrder(req: OrderRequest): Promise<{
+    client: ClobClient;
+    signed: Parameters<ClobClient["postOrder"]>[0];
+    submittedContracts: number;
+  }> {
+    const key = this.key();
+    if (!key) throw new Error("Polymarket wallet key not configured");
+    const tokenID = req.nativeSide;
+    if (!tokenID) throw new Error("missing Polymarket token id");
+    if (req.sizeContracts <= 0) throw new Error("Polymarket order size must be positive");
+    const client = await buildClient(key, this.funder(), this.sigType());
+    const version = await clientVersion(client);
+    let submittedContracts = req.sizeContracts;
+    const signed = version === 3
+      ? (() => {
+          const amounts = polymarketV3BuyAmounts(req.sizeContracts, req.limitPriceCents);
+          if (!amounts) throw new Error("Polymarket order is too small for exchange-v3 amount precision");
+          submittedContracts = amounts.submittedContracts;
+          return client.createExchangeV3OrderFromAmounts({
+            tokenID,
+            makerAmount: amounts.makerAmount,
+            takerAmount: amounts.takerAmount,
+            side: Side.BUY,
+          });
+        })()
+      : client.createOrder(
+          { tokenID, price: req.limitPriceCents / 100, size: req.sizeContracts, side: Side.BUY },
+          { version: version === 1 ? 1 : 2 }
+        );
+    return { client, signed: await signed, submittedContracts };
+  }
+
+  async prepareOrder(req: OrderRequest): Promise<{ ok: boolean; reason?: string }> {
+    const cacheKey = this.preparedKey(req);
+    if (!this.preparedOrders.has(cacheKey)) this.preparedOrders.set(cacheKey, this.buildPreparedOrder(req));
+    try {
+      await this.preparedOrders.get(cacheKey);
+      return { ok: true };
+    } catch (error) {
+      this.preparedOrders.delete(cacheKey);
+      return { ok: false, reason: String(error).slice(0, 200) };
+    }
+  }
 
   private key(): string | undefined {
     return walletKey("polymarket", this.creds?.key);
@@ -302,18 +386,15 @@ export class PolymarketExecutionAdapter implements ExecutionAdapter {
     const tokenID = req.nativeSide;
     if (!tokenID) return reject(req, "missing Polymarket token id — live order not wired for this leg");
 
-    const price = req.limitPriceCents / 100; // probability price 0..1
     try {
-      const client = await buildClient(key, this.funder(), this.sigType());
-      if (req.sizeContracts <= 0) return reject(req, "Polymarket order size must be positive");
-      // Submit the exact common share count chosen by the all-venue depth pass. A
-      // dollar-denominated market BUY rounds collateral first and can derive a different
-      // share count, breaking the hedge ratio even when both venues return order ids.
-      const signed = await client.createOrder({ tokenID, price, size: req.sizeContracts, side: Side.BUY });
+      const cacheKey = this.preparedKey(req);
+      const pending = this.preparedOrders.get(cacheKey) ?? this.buildPreparedOrder(req);
+      this.preparedOrders.delete(cacheKey); // a signed FOK payload is single-use
+      const { client, signed, submittedContracts } = await pending;
       const resp = (await client.postOrder(signed, OrderType.FOK)) as PostOrderResponse;
 
       // Decide fill from ACTUAL shares received, not from success+orderID (see helper).
-      const { ok, filledContracts, status } = polymarketFillFromResponse(resp, req.sizeContracts);
+      const { ok, filledContracts, status } = polymarketFillFromResponse(resp, submittedContracts);
       return {
         ok,
         orderId: resp.orderID ?? null,

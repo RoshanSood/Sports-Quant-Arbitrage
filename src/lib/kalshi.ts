@@ -209,18 +209,34 @@ export function eventMatchesTennisGame(game: ArbGame, event: KalshiEvent): boole
 function marketYesSide(market: KalshiMarket, game: ArbGame): "away" | "home" | null {
   const text = market.yes_sub_title ?? "";
   if (!text.trim()) return null;
+  const normalized = text.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const locationHit = (
+    team: ArbGame["awayTeam"],
+    other: ArbGame["homeTeam"]
+  ): boolean => {
+    const full = team.name.toLowerCase().trim();
+    const short = team.shortName.toLowerCase().trim();
+    const location = full.endsWith(` ${short}`) ? full.slice(0, -(short.length + 1)) : "";
+    if (!location || !(normalized === location || normalized.startsWith(`${location} `))) return false;
+    const otherFull = other.name.toLowerCase().trim();
+    const otherShort = other.shortName.toLowerCase().trim();
+    const otherLocation = otherFull.endsWith(` ${otherShort}`) ? otherFull.slice(0, -(otherShort.length + 1)) : "";
+    if (location !== otherLocation) return true;
+    const remainder = normalized.slice(location.length).trim();
+    return remainder === short || remainder.startsWith(`${short} `) || remainder === short.charAt(0) || remainder.startsWith(`${short.charAt(0)} `);
+  };
   const awayHit = teamMatchesTitle(
     game.awayTeam.name,
     game.awayTeam.shortName,
     game.awayTeam.abbreviation,
     text
-  );
+  ) || locationHit(game.awayTeam, game.homeTeam);
   const homeHit = teamMatchesTitle(
     game.homeTeam.name,
     game.homeTeam.shortName,
     game.homeTeam.abbreviation,
     text
-  );
+  ) || locationHit(game.homeTeam, game.awayTeam);
   if (awayHit && !homeHit) return "away";
   if (homeHit && !awayHit) return "home";
   return null;
@@ -598,9 +614,10 @@ export const fetchKalshiF5MoneylineByGame = fetchKalshiThreeWayMoneylineByGame;
 // Verified live 2026-08-09 against KXWTAMATCH-26AUG09SAMRYB: two markets,
 // "...-SAM" and "...-RYB", each independently priced (13-14c / 88-89c, summing to ~100%
 // but never assumed to). No tie market (unlike F5) — tennis has no draw.
-export async function fetchKalshiPlayerMatchByGame(
+export async function fetchKalshiIndependentMoneylineByGame(
   games: ArbGame[],
-  series: string
+  series: string,
+  tennisNames = false
 ): Promise<Map<string, VenueTwoWay>> {
   const result = new Map<string, VenueTwoWay>();
   if (!games.length) return result;
@@ -609,7 +626,7 @@ export async function fetchKalshiPlayerMatchByGame(
 
   for (const game of games) {
     const markets = events
-      .filter((ev) => eventMatchesTennisGame(game, ev))
+      .filter((ev) => tennisNames ? eventMatchesTennisGame(game, ev) : eventMatchesGame(game, ev))
       .flatMap((ev) => ev.markets ?? []);
 
     let homeM: KalshiMarket | undefined;
@@ -645,6 +662,15 @@ export async function fetchKalshiPlayerMatchByGame(
   }
 
   return result;
+}
+
+// Backward-compatible tennis-specific wrapper. Team sports such as NFL preseason can
+// use the generic reader directly when a venue publishes one YES ticker per team.
+export function fetchKalshiPlayerMatchByGame(
+  games: ArbGame[],
+  series: string
+): Promise<Map<string, VenueTwoWay>> {
+  return fetchKalshiIndependentMoneylineByGame(games, series, true);
 }
 
 // A spread (runline) market: home/away cover costs + the SIGNED home line (e.g.

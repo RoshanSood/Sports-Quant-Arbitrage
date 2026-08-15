@@ -13,6 +13,7 @@
 // from SX's API docs. The deterministic math lives in exported pure helpers (tested).
 
 import { Wallet, ZeroAddress, ZeroHash, hexlify, parseUnits, randomBytes } from "ethers";
+import { validateSxContractIdentity } from "../../sxbet";
 import { SX_CHAIN_ID } from "./chains";
 import { getSxMetadata } from "./sxMeta";
 import { verifySx } from "./verify";
@@ -222,6 +223,8 @@ export class SxBetExecutionAdapter implements ExecutionAdapter {
     if (!marketHash || (side !== "one" && side !== "two")) {
       return reject(req, "missing SX.bet marketHash/outcome side — live order not wired for this leg");
     }
+    const identity = validateSxContractIdentity(marketHash, side, req.expectedContract);
+    if (!identity.ok) return reject(req, `SX.bet contract identity blocked signing: ${identity.reason}`);
     const wallet = signerFor("sxbet", this.creds?.key);
     if (!wallet) return reject(req, "invalid SX.bet wallet key");
 

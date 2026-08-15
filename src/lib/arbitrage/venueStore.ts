@@ -5,8 +5,15 @@ import { DEFAULT_VENUES } from "./seed";
 
 const DATA_DIR = path.join(process.cwd(), "data", "arbitrage");
 const FILE = path.join(DATA_DIR, "venues.json");
+let cached: { revision: number; venues: Venue[] } | null = null;
+let revision = 0;
+
+function cloneVenues(venues: Venue[]): Venue[] {
+  return venues.map((venue) => ({ ...venue }));
+}
 
 async function read(): Promise<Venue[]> {
+  if (cached) return cloneVenues(cached.venues);
   let stored: Venue[];
   try {
     stored = JSON.parse(await fs.readFile(FILE, "utf-8")) as Venue[];
@@ -23,13 +30,18 @@ async function read(): Promise<Venue[]> {
     stored = [...stored, ...missing];
     await write(stored);
   }
-  return stored;
+  cached = { revision, venues: cloneVenues(stored) };
+  return cloneVenues(stored);
 }
 
 async function write(venues: Venue[]): Promise<void> {
   await fs.mkdir(DATA_DIR, { recursive: true });
   await fs.writeFile(FILE, JSON.stringify(venues, null, 2), "utf-8");
+  revision += 1;
+  cached = { revision, venues: cloneVenues(venues) };
 }
+
+export function venueConfigRevision(): number { return cached?.revision ?? revision; }
 
 export async function getVenues(): Promise<Venue[]> {
   return read();

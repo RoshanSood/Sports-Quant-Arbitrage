@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { eventMatchesTennisGame, lastNameOf } from "./kalshi";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { eventMatchesTennisGame, fetchKalshiIndependentMoneylineByGame, lastNameOf } from "./kalshi";
 import type { ArbGame } from "./arbitrage/sports";
 
 function player(name: string): ArbGame["awayTeam"] {
@@ -63,5 +63,88 @@ describe("kalshi.ts — eventMatchesTennisGame", () => {
 
   it("returns false for an empty event", () => {
     expect(eventMatchesTennisGame(game("A Player", "B Player"), { event_ticker: "x" })).toBe(false);
+  });
+});
+
+describe("kalshi.ts — independent team moneylines", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("reads each team's own YES ask and native ticker", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      events: [{
+        event_ticker: "KXNFLGAME-26AUG13DETCIN",
+        title: "Detroit vs Cincinnati",
+        sub_title: "DET vs CIN (Aug 13)",
+        markets: [
+          {
+            ticker: "KXNFLGAME-26AUG13DETCIN-CIN",
+            status: "active",
+            yes_sub_title: "Cincinnati",
+            yes_bid_dollars: "0.71",
+            yes_ask_dollars: "0.72",
+            yes_ask_size_fp: 50,
+          },
+          {
+            ticker: "KXNFLGAME-26AUG13DETCIN-DET",
+            status: "active",
+            yes_sub_title: "Detroit",
+            yes_bid_dollars: "0.28",
+            yes_ask_dollars: "0.29",
+            yes_ask_size_fp: 40,
+          },
+        ],
+      }, {
+        event_ticker: "KXNFLGAME-26AUG13GBPIT",
+        title: "Green Bay vs Pittsburgh",
+        sub_title: "GB vs PIT (Aug 13)",
+        markets: [
+          {
+            ticker: "KXNFLGAME-26AUG13GBPIT-PIT",
+            status: "active",
+            yes_sub_title: "Pittsburgh",
+            yes_bid_dollars: "0.48",
+            yes_ask_dollars: "0.50",
+          },
+          {
+            ticker: "KXNFLGAME-26AUG13GBPIT-GB",
+            status: "active",
+            yes_sub_title: "Green Bay",
+            yes_bid_dollars: "0.50",
+            yes_ask_dollars: "0.52",
+          },
+        ],
+      }],
+    }), { status: 200 })));
+
+    const nflGame: ArbGame = {
+      id: "401873272",
+      date: "2026-08-13",
+      awayTeam: { name: "Detroit Lions", shortName: "Lions", abbreviation: "DET" },
+      homeTeam: { name: "Cincinnati Bengals", shortName: "Bengals", abbreviation: "CIN" },
+    };
+    const twoLetterAbbreviationGame: ArbGame = {
+      id: "401873275",
+      date: "2026-08-13",
+      awayTeam: { name: "Green Bay Packers", shortName: "Packers", abbreviation: "GB" },
+      homeTeam: { name: "Pittsburgh Steelers", shortName: "Steelers", abbreviation: "PIT" },
+    };
+    const result = await fetchKalshiIndependentMoneylineByGame(
+      [nflGame, twoLetterAbbreviationGame],
+      "KXNFLGAME"
+    );
+
+    expect(result.get(nflGame.id)).toMatchObject({
+      awayCents: 29,
+      homeCents: 72,
+      awayTokenId: "KXNFLGAME-26AUG13DETCIN-DET",
+      homeTokenId: "KXNFLGAME-26AUG13DETCIN-CIN",
+      sourceStartTime: "2026-08-13",
+    });
+    expect(result.get(twoLetterAbbreviationGame.id)).toMatchObject({
+      awayCents: 52,
+      homeCents: 50,
+      awayTokenId: "KXNFLGAME-26AUG13GBPIT-GB",
+      homeTokenId: "KXNFLGAME-26AUG13GBPIT-PIT",
+    });
   });
 });

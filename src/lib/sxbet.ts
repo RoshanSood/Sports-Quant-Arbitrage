@@ -11,6 +11,7 @@
 import { teamsMatch } from "./teamNormalization";
 import type { VenueSpread, VenueTotalLine, VenueTwoWay } from "./kalshi";
 import type { ArbGame } from "./arbitrage/sports";
+import type { ExpectedContractIdentity } from "./arbitrage/execution/types";
 
 const SX_API = "https://api.sx.bet";
 const TYPE_MONEYLINE = 226; // baseball/basketball 2-way moneyline
@@ -19,6 +20,53 @@ const TYPE_SPREAD = 342;
 const TYPE_TEAM_YESNO = 1; // "X vs Not X" — soccer 1X2 is three of these (home / away / Tie)
 const TYPE_TWO_WAY = 52; // 2-way "team1 vs team2" (soccer draw-no-bet; used for tennis winner)
 const USDC_DECIMALS = 1e6; // SX.bet collateral is USDC (6 decimals)
+const SX_MARKET_CACHE_MS = 30_000;
+const SX_ORDER_CACHE_MS = 5_000;
+// SX documents 500 requests/minute for general REST endpoints. Serializing this module's
+// public reads at 150ms intervals caps it at 400/minute and prevents the all-sports scanner
+// from producing a large concurrent burst on startup.
+const SX_REST_MIN_GAP_MS = 150;
+const SX_DEFAULT_RATE_LIMIT_COOLDOWN_MS = 15_000;
+
+type TimedCache<T> = { value: T; fetchedAt: number };
+const activeMarketCache = new Map<string, TimedCache<SxMarket[]>>();
+const activeMarketInFlight = new Map<string, Promise<SxMarket[]>>();
+const orderCache = new Map<string, TimedCache<SxOrder[]>>();
+let sxRestQueue: Promise<void> = Promise.resolve();
+let sxLastRestRequestAt = 0;
+let sxRestCooldownUntil = 0;
+
+function retryAfterMs(response: Response, now = Date.now()): number {
+  const value = response.headers.get("retry-after")?.trim();
+  if (!value) return SX_DEFAULT_RATE_LIMIT_COOLDOWN_MS;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  const date = Date.parse(value);
+  return Number.isFinite(date) ? Math.max(0, date - now) : SX_DEFAULT_RATE_LIMIT_COOLDOWN_MS;
+}
+
+function delay(ms: number): Promise<void> {
+  return ms > 0 ? new Promise((resolve) => setTimeout(resolve, ms)) : Promise.resolve();
+}
+
+async function scheduledSxFetch(input: string, init: RequestInit): Promise<Response> {
+  let release!: () => void;
+  const prior = sxRestQueue;
+  sxRestQueue = new Promise<void>((resolve) => { release = resolve; });
+  await prior;
+  try {
+    const now = Date.now();
+    await delay(Math.max(sxRestCooldownUntil - now, sxLastRestRequestAt + SX_REST_MIN_GAP_MS - now));
+    sxLastRestRequestAt = Date.now();
+    const response = await fetch(input, init);
+    if (response.status === 429) {
+      sxRestCooldownUntil = Math.max(sxRestCooldownUntil, Date.now() + retryAfterMs(response));
+    }
+    return response;
+  } finally {
+    release();
+  }
+}
 
 type SxMarket = {
   marketHash: string;
@@ -30,6 +78,57 @@ type SxMarket = {
   teamTwoName: string;
   gameTime: number;
 };
+
+type SxContractIdentityRecord = SxMarket & { observedAt: number };
+type SxContractIdentityStore = Map<string, SxContractIdentityRecord>;
+const SX_IDENTITY_MAX_AGE_MS = 60_000;
+const sxIdentityGlobal = globalThis as typeof globalThis & { __sxContractIdentityByHash?: SxContractIdentityStore };
+
+function sxContractIdentityStore(): SxContractIdentityStore {
+  return (sxIdentityGlobal.__sxContractIdentityByHash ??= new Map());
+}
+
+function registerSxContractIdentities(markets: SxMarket[]): void {
+  const observedAt = Date.now();
+  const store = sxContractIdentityStore();
+  for (const market of markets) store.set(market.marketHash, { ...market, observedAt });
+}
+
+export function clearSxContractIdentityRegistry(): void {
+  sxContractIdentityStore().clear();
+}
+
+type SxSpreadDescriptor = Pick<SxMarket, "line" | "outcomeOneName" | "outcomeTwoName">;
+
+function signedTrailingLine(outcomeName: string): number | null {
+  // SX supplies the signed handicap in both the structured `line` field and the
+  // outcome labels (for example, "Los Angeles Sparks W -2.5"). Parse the label as
+  // an independent integrity check; never invent a fallback line for an unfamiliar
+  // descriptor because that can match two different native contracts as an arb.
+  const match = outcomeName.trim().replaceAll("−", "-").match(/([+-]\d+(?:\.\d+)?)\s*$/);
+  if (!match) return null;
+  const parsed = Number(match[1]);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/**
+ * Return SX's exact signed handicap from the home team's perspective.
+ *
+ * `market.line` is signed for outcome one. The two displayed outcome lines must be
+ * exact opposites and must agree with that structured field. Returning null drops the
+ * market instead of allowing an ambiguous native contract into cross-venue matching.
+ * This is pure in-memory validation over metadata already fetched for discovery, so it
+ * adds no request or execution-path latency.
+ */
+export function sxHomeSignedSpreadLine(market: SxSpreadDescriptor, outcomeOneIsHome: boolean): number | null {
+  const oneLine = signedTrailingLine(market.outcomeOneName);
+  const twoLine = signedTrailingLine(market.outcomeTwoName);
+  if (oneLine == null || twoLine == null || market.line == null || !Number.isFinite(market.line)) return null;
+
+  const epsilon = 1e-9;
+  if (Math.abs(oneLine + twoLine) > epsilon || Math.abs(oneLine - market.line) > epsilon) return null;
+  return outcomeOneIsHome ? oneLine : twoLine;
+}
 
 type SxOrder = {
   marketHash: string;
@@ -74,17 +173,37 @@ function bestPrices(orders: SxOrder[] | undefined): BookPrices | null {
 }
 
 async function fetchActiveMarkets(leagueId: number, onlyMainLine = true): Promise<SxMarket[]> {
+  const cacheKey = `${leagueId}:${onlyMainLine ? "main" : "all"}`;
+  const cached = activeMarketCache.get(cacheKey);
+  if (cached && Date.now() - cached.fetchedAt < SX_MARKET_CACHE_MS) {
+    registerSxContractIdentities(cached.value);
+    return cached.value;
+  }
+  const existing = activeMarketInFlight.get(cacheKey);
+  if (existing) return existing;
+
+  const request = (async () => {
+    try {
+      const res = await scheduledSxFetch(
+        `${SX_API}/markets/active?leagueId=${leagueId}${onlyMainLine ? "&onlyMainLine=true" : ""}`,
+        { cache: "no-store", headers: { Accept: "application/json" } }
+      );
+      if (!res.ok) return cached?.value ?? [];
+      const data = await res.json();
+      const markets = (data?.data?.markets ?? []) as SxMarket[];
+      activeMarketCache.set(cacheKey, { value: markets, fetchedAt: Date.now() });
+      registerSxContractIdentities(markets);
+      return markets;
+    } catch (e) {
+      console.error("[sxbet] markets fetch failed:", e);
+      return cached?.value ?? [];
+    }
+  })();
+  activeMarketInFlight.set(cacheKey, request);
   try {
-    const res = await fetch(`${SX_API}/markets/active?leagueId=${leagueId}${onlyMainLine ? "&onlyMainLine=true" : ""}`, {
-      cache: "no-store",
-      headers: { Accept: "application/json" },
-    });
-    if (!res.ok) return [];
-    const data = await res.json();
-    return (data?.data?.markets ?? []) as SxMarket[];
-  } catch (e) {
-    console.error("[sxbet] markets fetch failed:", e);
-    return [];
+    return await request;
+  } finally {
+    if (activeMarketInFlight.get(cacheKey) === request) activeMarketInFlight.delete(cacheKey);
   }
 }
 
@@ -106,7 +225,7 @@ async function fetchLeagues(): Promise<SxLeague[]> {
     let lastError: unknown = null;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
-        const res = await fetch(`${SX_API}/leagues`, { cache: "no-store", headers: { Accept: "application/json" } });
+        const res = await scheduledSxFetch(`${SX_API}/leagues`, { cache: "no-store", headers: { Accept: "application/json" } });
         if (res.ok) {
           const leagues = ((await res.json())?.data ?? []) as SxLeague[];
           leagueCache = { fetchedAt: Date.now(), leagues };
@@ -134,23 +253,60 @@ async function fetchLeagues(): Promise<SxLeague[]> {
 
 async function fetchOrders(hashes: string[]): Promise<Map<string, SxOrder[]>> {
   const map = new Map<string, SxOrder[]>();
-  for (let i = 0; i < hashes.length; i += 20) {
-    const chunk = hashes.slice(i, i + 20);
+  const now = Date.now();
+  const uniqueHashes = [...new Set(hashes)];
+  const staleHashes: string[] = [];
+  for (const hash of uniqueHashes) {
+    const cached = orderCache.get(hash);
+    if (cached && now - cached.fetchedAt < SX_ORDER_CACHE_MS) map.set(hash, cached.value);
+    else staleHashes.push(hash);
+  }
+
+  for (let i = 0; i < staleHashes.length; i += 20) {
+    const chunk = staleHashes.slice(i, i + 20);
     try {
-      const res = await fetch(`${SX_API}/orders?marketHashes=${chunk.join(",")}`, {
+      const res = await scheduledSxFetch(`${SX_API}/orders?marketHashes=${chunk.join(",")}`, {
         cache: "no-store",
         headers: { Accept: "application/json" },
       });
-      if (!res.ok) continue;
+      if (!res.ok) {
+        for (const hash of chunk) {
+          const cached = orderCache.get(hash);
+          if (cached) map.set(hash, cached.value);
+        }
+        continue;
+      }
       const data = await res.json();
+      const byHash = new Map<string, SxOrder[]>();
       for (const o of (data?.data ?? []) as SxOrder[]) {
-        (map.get(o.marketHash) ?? map.set(o.marketHash, []).get(o.marketHash)!).push(o);
+        (byHash.get(o.marketHash) ?? byHash.set(o.marketHash, []).get(o.marketHash)!).push(o);
+      }
+      const fetchedAt = Date.now();
+      for (const hash of chunk) {
+        const orders = byHash.get(hash) ?? [];
+        orderCache.set(hash, { value: orders, fetchedAt });
+        map.set(hash, orders);
       }
     } catch (e) {
       console.error("[sxbet] orders fetch failed:", e);
+      for (const hash of chunk) {
+        const cached = orderCache.get(hash);
+        if (cached) map.set(hash, cached.value);
+      }
     }
   }
   return map;
+}
+
+export function clearSxFetchCachesForTests(): void {
+  activeMarketCache.clear();
+  activeMarketInFlight.clear();
+  orderCache.clear();
+  leagueCache = null;
+  leagueFetchInFlight = null;
+  sxRestQueue = Promise.resolve();
+  sxLastRestRequestAt = 0;
+  sxRestCooldownUntil = 0;
 }
 
 function teamHit(name: string, team: { name: string; abbreviation: string }): boolean {
@@ -167,6 +323,76 @@ function sxGameDate(m: SxMarket): string | null {
   }).formatToParts(new Date(m.gameTime * 1000));
   const get = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
   return `${get("year")}-${get("month")}-${get("day")}`;
+}
+
+function sxMarketType(market: SxMarket): ExpectedContractIdentity["marketType"] | null {
+  if (market.type === TYPE_SPREAD) return "spread";
+  if (market.type === TYPE_TOTAL) return "total";
+  if (market.type === TYPE_MONEYLINE || market.type === TYPE_TEAM_YESNO || market.type === TYPE_TWO_WAY) return "moneyline";
+  return null;
+}
+
+// Pure in-memory guard over metadata already fetched by discovery. No venue request is
+// made here: live signing is blocked unless the exact native hash still means the same
+// teams, outcome, market type, signed line and slate date as the normalized arb leg.
+export function validateSxContractIdentity(
+  marketHash: string | undefined,
+  nativeSide: string | undefined,
+  expected: ExpectedContractIdentity | undefined,
+  now = Date.now()
+): { ok: boolean; reason?: string } {
+  if (!marketHash || !nativeSide) return { ok: false, reason: "SX.bet contract identity is missing market hash or side" };
+  if (!expected) return { ok: false, reason: "SX.bet contract identity is missing the expected native descriptor" };
+
+  const market = sxContractIdentityStore().get(marketHash);
+  if (!market) return { ok: false, reason: `SX.bet contract identity cache has no metadata for ${marketHash}` };
+  if (now - market.observedAt > SX_IDENTITY_MAX_AGE_MS) {
+    return { ok: false, reason: `SX.bet contract identity metadata is stale (${now - market.observedAt}ms old)` };
+  }
+
+  const actualType = sxMarketType(market);
+  if (actualType !== expected.marketType) {
+    return { ok: false, reason: `SX.bet contract type mismatch: native ${actualType ?? market.type}, expected ${expected.marketType}` };
+  }
+
+  const [away, home] = expected.teams;
+  const oneIsHome = teamsMatch(market.teamOneName, home);
+  const oneIsAway = teamsMatch(market.teamOneName, away);
+  const twoIsHome = teamsMatch(market.teamTwoName, home);
+  const twoIsAway = teamsMatch(market.teamTwoName, away);
+  if (!((oneIsHome && twoIsAway) || (oneIsAway && twoIsHome))) {
+    return { ok: false, reason: `SX.bet contract teams do not match ${away} v ${home}` };
+  }
+
+  const side = nativeSide.toLowerCase();
+  if (side !== "one" && side !== "two") return { ok: false, reason: `SX.bet native side ${nativeSide} is invalid` };
+  const expectedTeam = expected.outcome === "home" ? home : expected.outcome === "away" ? away : null;
+  const selectedTeam = side === "one" ? market.teamOneName : market.teamTwoName;
+  if (expectedTeam && !teamsMatch(selectedTeam, expectedTeam)) {
+    return { ok: false, reason: `SX.bet selected side is ${selectedTeam}, expected ${expectedTeam}` };
+  }
+
+  if (actualType === "spread") {
+    const nativeHomeLine = sxHomeSignedSpreadLine(market, oneIsHome);
+    if (nativeHomeLine == null || expected.line == null || Math.abs(nativeHomeLine - expected.line) > 1e-9) {
+      return { ok: false, reason: `SX.bet spread mismatch: native home line ${nativeHomeLine ?? "invalid"}, expected ${expected.line ?? "missing"}` };
+    }
+  } else if (actualType === "total") {
+    if (expected.line == null || market.line == null || Math.abs(market.line - expected.line) > 1e-9) {
+      return { ok: false, reason: `SX.bet total mismatch: native ${market.line ?? "missing"}, expected ${expected.line ?? "missing"}` };
+    }
+    const selectedName = side === "one" ? market.outcomeOneName : market.outcomeTwoName;
+    if (!selectedName.toLowerCase().startsWith(expected.outcome.toLowerCase())) {
+      return { ok: false, reason: `SX.bet selected total outcome is ${selectedName}, expected ${expected.outcome}` };
+    }
+  }
+
+  const expectedDate = expected.sourceStartTime?.match(/^(\d{4}-\d{2}-\d{2})/)?.[1];
+  const nativeDate = sxGameDate(market);
+  if (expectedDate && nativeDate !== expectedDate) {
+    return { ok: false, reason: `SX.bet contract date mismatch: native ${nativeDate ?? "missing"}, expected ${expectedDate}` };
+  }
+  return { ok: true };
 }
 
 // A market matches a game when its two teams equal the game's away/home in either order.
@@ -250,24 +476,26 @@ export async function fetchSxBetMLBMarkets(games: ArbGame[], leagueId: number = 
       }
     }
 
-    // Spread (342): "Team +1.5 / Team -1.5" → home/away cover + signed home line.
+    // Spread (342): preserve SX's exact signed native line. WNBA main lines move
+    // frequently (-2.5 -> -2, for example), so they must never be coerced to +/-1.5.
     const sp = gm.find((m) => m.type === TYPE_SPREAD);
     if (sp) {
       const bp = bestPrices(books.get(sp.marketHash));
       if (bp) {
         const oneIsHome = teamHit(sp.teamOneName, game.homeTeam);
-        const homeOutcomeName = oneIsHome ? sp.outcomeOneName : sp.outcomeTwoName;
-        const homeSignedLine = homeOutcomeName.includes("-1.5") ? -1.5 : 1.5;
-        result.spread.set(game.id, {
-          homeCents: oneIsHome ? bp.o1Cents : bp.o2Cents,
-          awayCents: oneIsHome ? bp.o2Cents : bp.o1Cents,
-          homeLiquidityUsd: oneIsHome ? bp.o1LiqUsd : bp.o2LiqUsd,
-          awayLiquidityUsd: oneIsHome ? bp.o2LiqUsd : bp.o1LiqUsd,
-          homeSignedLine,
-          marketId: sp.marketHash,
-          homeIsOutcomeOne: oneIsHome,
-          sourceStartTime: sxGameDate(sp) ?? game.date,
-        });
+        const homeSignedLine = sxHomeSignedSpreadLine(sp, oneIsHome);
+        if (homeSignedLine != null) {
+          result.spread.set(game.id, {
+            homeCents: oneIsHome ? bp.o1Cents : bp.o2Cents,
+            awayCents: oneIsHome ? bp.o2Cents : bp.o1Cents,
+            homeLiquidityUsd: oneIsHome ? bp.o1LiqUsd : bp.o2LiqUsd,
+            awayLiquidityUsd: oneIsHome ? bp.o2LiqUsd : bp.o1LiqUsd,
+            homeSignedLine,
+            marketId: sp.marketHash,
+            homeIsOutcomeOne: oneIsHome,
+            sourceStartTime: sxGameDate(sp) ?? game.date,
+          });
+        }
       }
     }
 

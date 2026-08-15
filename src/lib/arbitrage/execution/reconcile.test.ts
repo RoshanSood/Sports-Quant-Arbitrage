@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { applyReconciliation, reconcileLegs, type LegReconciliation } from "./reconcile";
 import type { ExecutionAdapter, FillConfirmation, OrderRequest, OrderResult } from "./types";
 
@@ -57,6 +57,8 @@ describe("applyReconciliation", () => {
 });
 
 describe("reconcileLegs", () => {
+  afterEach(() => vi.useRealTimers());
+
   function adapter(id: string, confirm?: FillConfirmation): ExecutionAdapter {
     return {
       id,
@@ -94,5 +96,29 @@ describe("reconcileLegs", () => {
     const result = { ...filled("predictfun", "numeric-id", 0), confirmationId: "0xorder-hash", status: "pending" as const };
     await reconcileLegs([a], [req("predictfun")], [result]);
     expect(seen).toBe("0xorder-hash");
+  });
+
+  it("supports a 500ms fast-confirmation cadence for a pending anchor", async () => {
+    vi.useFakeTimers();
+    let checks = 0;
+    const a = adapter("polymarket");
+    a.confirmFill = async () => {
+      checks += 1;
+      return checks < 3
+        ? { status: "pending" }
+        : { status: "settled", filledContracts: 10, avgPriceCents: 49 };
+    };
+    const pending: OrderResult = { ...filled("polymarket", "poly-order", 0), ok: true, status: "pending" };
+
+    const reconciliation = reconcileLegs([a], [req("polymarket")], [pending], { attempts: 5, delayMs: 500 });
+    await vi.advanceTimersByTimeAsync(499);
+    expect(checks).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(checks).toBe(2);
+    await vi.advanceTimersByTimeAsync(500);
+
+    const [result] = await reconciliation;
+    expect(checks).toBe(3);
+    expect(result.confirmation).toMatchObject({ status: "settled", filledContracts: 10, avgPriceCents: 49 });
   });
 });

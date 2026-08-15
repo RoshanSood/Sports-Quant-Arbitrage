@@ -29,7 +29,12 @@ export async function GET(request: NextRequest) {
 
     const activeMarkets = filterMarketsForAgent(markets, venues, agent);
     const { matched } = matchMarkets(activeMarkets);
-    const { opportunities, rejects, watch } = detectArbs(matched, agent, { minLiquidityUsd: risk.minLiquidityUsd, staleDivergenceCents: risk.staleDivergenceCents });
+    const { opportunities, rejects, watch } = detectArbs(matched, agent, {
+      minLiquidityUsd: risk.minLiquidityUsd,
+      minExpectedProfitUsd: risk.minExpectedProfitUsd,
+      liquidityStakeBufferMultiple: risk.liquidityStakeBufferMultiple,
+      staleDivergenceCents: risk.staleDivergenceCents,
+    });
 
     return NextResponse.json({
       opportunities,

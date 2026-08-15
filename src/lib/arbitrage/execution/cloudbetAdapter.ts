@@ -65,7 +65,7 @@ export async function cbBalance(apiKey: string, currency: string): Promise<numbe
 type CbBetResponse = { status?: string; price?: string; stake?: string; returnAmount?: string; error?: string; referenceId?: string };
 
 // Statuses that mean the bet is live/graded (not a rejection). PENDING_ACCEPTANCE is
-// handled separately (poll before deciding).
+// handled separately by shared reconciliation.
 const PLACED_STATUSES = new Set(["ACCEPTED", "WIN", "LOSS", "PUSH", "HALF_WIN", "HALF_LOSS", "PARTIAL"]);
 
 export class CloudbetExecutionAdapter implements ExecutionAdapter {
@@ -92,7 +92,7 @@ export class CloudbetExecutionAdapter implements ExecutionAdapter {
 
     const decimalLimit = 100 / req.limitPriceCents; // min odds we'll accept
     const stake = (req.sizeContracts * req.limitPriceCents) / 100; // cost at the limit, in currency
-    const referenceId = crypto.randomUUID();
+    const referenceId = req.clientOrderId ?? crypto.randomUUID();
     const body = {
       referenceId,
       currency: cbCurrency(this.creds),
@@ -116,14 +116,20 @@ export class CloudbetExecutionAdapter implements ExecutionAdapter {
       } catch {
         // non-JSON error body
       }
-      let status = (b.status ?? "").toUpperCase();
+      const status = (b.status ?? "").toUpperCase();
 
-      // PENDING_ACCEPTANCE → the engine is still processing; poll the status endpoint.
-      for (let i = 0; status === "PENDING_ACCEPTANCE" && i < 4; i++) {
-        await sleep(600);
-        const s = await this.betStatus(apiKey, referenceId);
-        if (s?.status) status = s.status.toUpperCase();
-        if (s?.price) b.price = s.price;
+      // Do not turn a real accepted reference into a false rejection while Cloudbet is
+      // still processing it. Return pending immediately; the shared reconciliation loop
+      // polls the required GET-by-reference endpoint without adding a second inline wait.
+      if (res.ok && status === "PENDING_ACCEPTANCE") {
+        return {
+          ok: true,
+          orderId: referenceId,
+          filledContracts: 0,
+          avgPriceCents: req.limitPriceCents,
+          status: "pending",
+          raw: b,
+        };
       }
 
       if (!res.ok || !PLACED_STATUSES.has(status)) {
@@ -161,10 +167,25 @@ export class CloudbetExecutionAdapter implements ExecutionAdapter {
     return { status: "failed", filledContracts: 0 };
   }
 
+  async recoverOrder(req: OrderRequest): Promise<OrderResult | null> {
+    if (!req.clientOrderId) return null;
+    const confirmation = await this.confirmFill(req.clientOrderId, req);
+    if (confirmation.status === "unknown") return null;
+    const filledContracts = confirmation.filledContracts ?? 0;
+    return {
+      ok: filledContracts > 0,
+      orderId: req.clientOrderId,
+      filledContracts,
+      avgPriceCents: confirmation.avgPriceCents ?? req.limitPriceCents,
+      status: confirmation.status === "settled" ? "filled" : confirmation.status === "pending" ? "pending" : "unfilled",
+      error: confirmation.error,
+    };
+  }
+
   private async betStatus(apiKey: string, referenceId: string): Promise<CbBetResponse | null> {
     try {
       const r = await fetch(`${API}/pub/v3/bets/${referenceId}/status`, {
-        method: "POST",
+        method: "GET",
         headers: { "X-API-Key": apiKey, Accept: "application/json" },
       });
       if (!r.ok) return null;
@@ -173,10 +194,6 @@ export class CloudbetExecutionAdapter implements ExecutionAdapter {
       return null;
     }
   }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
 }
 
 function reject(req: OrderRequest, error: string): OrderResult {

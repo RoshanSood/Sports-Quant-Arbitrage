@@ -39,7 +39,14 @@ import { getVenues } from "./venueStore";
 import { filterMarketsForAgent } from "./venueFilters";
 import { DEFAULT_AGENT } from "./seed";
 import { runExecution } from "./execution/executor";
-import type { Agent, ArbOpportunity, MainLineWatch, MatchMapData } from "@/types/arbitrage";
+import { reconcileOutstandingReservations } from "./execution/reservationReconciler";
+import { captureCurrentLiveExecutionSnapshot, isPolymarketKalshiNativePair, requestCurrentLiveExecutionSnapshotRecovery } from "./execution/liveExecutionSnapshot";
+import { polymarketLiveBook } from "./polymarketLiveBook";
+import { kalshiLiveBook } from "./kalshiLiveBook";
+import { filterExecutableOpportunities, repriceMatchedEventsFromLiveBooks } from "./executableDetection";
+import { warmPolymarketExecutionPath } from "./execution/polymarketAdapter";
+import { polymarketRegion } from "../polymarketRegion";
+import type { Agent, ArbOpportunity, MainLineWatch, MatchMapData, RiskSettings } from "@/types/arbitrage";
 
 // Floor between completed scan cycles (mirrors the prior client-side SCAN_MIN_GAP_MS) — each
 // cycle re-ingests every venue, so this just prevents a busy-loop if a cycle finishes fast.
@@ -54,6 +61,8 @@ export type ScannerStatus = {
   rejects: ArbReject[];
   watch: MainLineWatch[];
   matchMap: MatchMapData;
+  liveBooks: { polymarket: ReturnType<typeof polymarketLiveBook.status>; kalshi: ReturnType<typeof kalshiLiveBook.status> };
+  autoExecution: { warmingUp: number; coolingDown: number; inFlight: number };
   error: string | null;
 };
 
@@ -75,6 +84,8 @@ let status: ScannerStatus = {
   rejects: [],
   watch: [],
   matchMap: EMPTY_MATCH_MAP,
+  liveBooks: { polymarket: polymarketLiveBook.status(), kalshi: kalshiLiveBook.status() },
+  autoExecution: { warmingUp: 0, coolingDown: 0, inFlight: 0 },
   error: null,
 };
 
@@ -84,6 +95,20 @@ let status: ScannerStatus = {
 // eligible, so it keeps getting retried on the next tick that still detects it. Mirrors
 // the browser's old autoInFlightRef, now living here since this is the sole trigger.
 const autoInFlight = new Set<string>();
+const autoCooldownUntil = new Map<string, number>();
+let warmingUpCount = 0;
+let liveReevaluationTimer: ReturnType<typeof setTimeout> | null = null;
+let scanContext: { generation: number; date: string; matchMap: MatchMapData; agent: Agent; risk: RiskSettings } | null = null;
+
+function liveBookStatus() {
+  return { polymarket: polymarketLiveBook.status(), kalshi: kalshiLiveBook.status() };
+}
+
+function autoExecutionStatus() {
+  const now = Date.now();
+  for (const [id, until] of autoCooldownUntil) if (until <= now) autoCooldownUntil.delete(id);
+  return { warmingUp: warmingUpCount, coolingDown: autoCooldownUntil.size, inFlight: autoInFlight.size };
+}
 
 // Fire every currently-detected opportunity that isn't already being placed, the instant
 // detectArbs() returns them — no browser round trip. Deliberately NOT awaited by the
@@ -93,14 +118,84 @@ const autoInFlight = new Set<string>();
 function fireAutoTrades(opportunities: ArbOpportunity[], agent: Agent, date: string): void {
   if (!agent.autoTrade) return;
   const mode = agent.live ? "live" : "dry_run";
+  const now = Date.now();
+  warmingUpCount = 0;
   for (const opp of opportunities) {
+    const cooldownUntil = autoCooldownUntil.get(opp.id) ?? 0;
+    if (cooldownUntil > now) continue;
+    autoCooldownUntil.delete(opp.id);
     if (autoInFlight.has(opp.id)) continue;
+    if (mode === "live" && isPolymarketKalshiNativePair(opp.legs)) {
+      const readiness = captureCurrentLiveExecutionSnapshot(opp.legs, now, undefined, 1);
+      if (!readiness.snapshot) {
+        warmingUpCount += 1;
+        requestCurrentLiveExecutionSnapshotRecovery(opp.legs);
+        autoCooldownUntil.set(opp.id, now + 2_000);
+        continue;
+      }
+    }
     autoInFlight.add(opp.id);
-    runExecution(opp.id, date, mode, undefined, opp.detectedAt)
+    runExecution(opp.id, date, mode, undefined, opp.detectedAt, opp)
+      .then((result) => {
+        if (result.result === "halted") {
+          const transient = /ladder|snapshot|quote|timed out|refresh/i.test(result.reason);
+          autoCooldownUntil.set(opp.id, Date.now() + (transient ? 10_000 : 3_000));
+        }
+      })
       .catch((e) => console.error(`[scannerWorker] auto-trade execution failed for ${opp.id}:`, e))
       .finally(() => autoInFlight.delete(opp.id));
   }
 }
+
+function evaluateScanContext(context: NonNullable<typeof scanContext>, now = Date.now()): void {
+  if (!scanning || context.generation !== scanGeneration) return;
+  const repricedMatchMap: MatchMapData = {
+    ...context.matchMap,
+    matched: repriceMatchedEventsFromLiveBooks(context.matchMap.matched),
+  };
+  const detected = detectArbs(repricedMatchMap.matched, context.agent, {
+    minLiquidityUsd: context.risk.minLiquidityUsd,
+    minExpectedProfitUsd: context.risk.minExpectedProfitUsd,
+    liquidityStakeBufferMultiple: context.risk.liquidityStakeBufferMultiple,
+    staleDivergenceCents: context.risk.staleDivergenceCents,
+  });
+  const executable = filterExecutableOpportunities(detected.opportunities, context.agent, context.risk, undefined, now);
+  const executionRejects: ArbReject[] = executable.rejected.map(({ opportunity, reason }) => ({
+    eventKey: opportunity.eventKey,
+    matchup: opportunity.matchup,
+    line: opportunity.line ?? 0,
+    reason: "insufficient_depth",
+    netEdge: opportunity.netEdge,
+    detail: `native executable basket unavailable: ${reason}`,
+  }));
+  fireAutoTrades(executable.opportunities, context.agent, context.date);
+  status = {
+    ...status,
+    scanning: true,
+    date: context.date,
+    updatedAt: now,
+    opportunities: executable.opportunities,
+    rejects: [...detected.rejects, ...executionRejects],
+    watch: detected.watch,
+    matchMap: repricedMatchMap,
+    liveBooks: liveBookStatus(),
+    autoExecution: autoExecutionStatus(),
+    error: null,
+  };
+}
+
+function scheduleLiveReevaluation(): void {
+  if (!scanning || !scanContext || liveReevaluationTimer) return;
+  // One websocket message can update several assets and initial subscription emits hundreds
+  // of snapshots. Coalesce the burst while keeping quote-to-decision latency sub-frame.
+  liveReevaluationTimer = setTimeout(() => {
+    liveReevaluationTimer = null;
+    if (scanContext) evaluateScanContext(scanContext);
+  }, 10);
+}
+
+polymarketLiveBook.onUpdate(scheduleLiveReevaluation);
+kalshiLiveBook.onUpdate(scheduleLiveReevaluation);
 
 // One scan cycle: ingest (already parallelized across venues + F5-aware + live-book-
 // augmented, see ingest.ts) then the SAME match+detect computation the old per-request
@@ -117,16 +212,12 @@ async function tick(generation: number): Promise<void> {
   ]);
   const activeMarkets = filterMarketsForAgent(markets, venues, agent);
   const matchMap = matchMarkets(activeMarkets);
-  const { opportunities, rejects, watch } = detectArbs(matchMap.matched, agent, {
-    minLiquidityUsd: risk.minLiquidityUsd,
-    staleDivergenceCents: risk.staleDivergenceCents,
-  });
 
   // A stop/start may have occurred while venue requests were in flight. Never publish that
   // prior generation's completed computation into the new generation's empty cache.
   if (scanning && generation === scanGeneration) {
-    fireAutoTrades(opportunities, agent, date);
-    status = { ...status, scanning: true, date, updatedAt: Date.now(), opportunities, rejects, watch, matchMap, error: null };
+    scanContext = { generation, date, matchMap, agent, risk };
+    evaluateScanContext(scanContext);
   }
 }
 
@@ -165,14 +256,28 @@ export function startScanning(): void {
     rejects: [],
     watch: [],
     matchMap: EMPTY_MATCH_MAP,
+    liveBooks: liveBookStatus(),
+    autoExecution: autoExecutionStatus(),
     error: null,
   };
+  if (polymarketRegion() !== "us") {
+    void warmPolymarketExecutionPath().catch((error) => console.error("[scannerWorker] Polymarket execution warm-up failed:", error));
+  }
+  // A prior process may have died after sending a venue request but before persisting its
+  // acknowledgement. Recovery is read-only and never resubmits an order; run it beside
+  // scanning so it adds no quote-to-order latency.
+  void reconcileOutstandingReservations().catch((error) => {
+    console.error("[scannerWorker] reservation restart reconciliation failed:", error);
+  });
   loop();
 }
 
 export function stopScanning(): void {
   scanning = false;
   scanGeneration += 1;
+  scanContext = null;
+  if (liveReevaluationTimer) clearTimeout(liveReevaluationTimer);
+  liveReevaluationTimer = null;
   // Clear actionable rows immediately. A scan already in flight may finish afterward, but
   // tick preserves scanning=false and the client also rejects non-scanning snapshots.
   status = { ...status, scanning: false, opportunities: [], watch: [] };
